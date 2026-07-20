@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Local environment overrides
+.env
+.env.local
+
+# Editor / IDE settings
+.idea/
+.vscode/
+
+# Editor backups
+*.swp
+*~
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Composer dependencies
+/vendor/
