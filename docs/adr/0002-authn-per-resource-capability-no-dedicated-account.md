@@ -1,0 +1,10 @@
+# Authentication via any WordPress user's Application Password; authorization via a base Operate capability plus each resource's own existing capability
+
+Any WordPress user who can be granted a capability can authenticate — there is no plugin-created service account. A user calls the REST API with a WordPress Application Password; two things must both hold for a given request to succeed: the user holds the plugin's own `kntnt_extractor_operate` capability ("may talk to this API at all"), and, for every table or file the request names, the user holds whatever existing WordPress capability already governs that resource elsewhere in WordPress (`manage_options` for the options table, `list_users` for the user tables, and so on). A resource with no specific mapping requires `manage_options` — the strictest available capability — as a fail-safe default, never the Operate capability alone.
+
+A dedicated, plugin-created user was considered and rejected: it would show up in the Users screen as an unexplained account an administrator might delete without understanding why, breaking the plugin silently. Gating solely on `manage_options` (belt-and-suspenders alongside the Operate capability) was also considered and rejected, because it would block a deliberately lower-privileged user — someone granted `kntnt_extractor_operate` plus, say, only post-reading capabilities — from ever calling the API for the resources they *do* have rights to. The chosen model composes with WordPress's existing permission model instead of layering a new one on top of it: a role-editor plugin that mistakenly grants `kntnt_extractor_operate` to a low-privileged role still cannot expose anything that role's own capabilities don't already cover.
+
+## Consequences
+
+- Activation grants `kntnt_extractor_operate` to the `administrator` role by default; extending it to another user or role is the site owner's own choice, made with their own tools.
+- No self-healing mechanism exists for a missing capability grant — deactivating and reactivating the plugin re-runs the activation grant, which is sufficient given there is no dedicated account left to accidentally delete.
