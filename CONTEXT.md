@@ -7,15 +7,8 @@ A WordPress plugin exposing a minimal REST API for extracting a selection of dat
 ### Access control
 
 **Operate capability**:
-The plugin-defined WordPress capability `kntnt_extractor_operate`. Grants only the right to call the REST API at all — it decides nothing about which tables or files a request may name.
+The plugin-defined WordPress capability `kntnt_extractor_operate`. Grants the right to call the REST API at all — the plugin's "on switch", inert until deliberately granted. Necessary but not sufficient: every listing and extraction request also requires the caller to hold `manage_options`, the administrator capability. The two compose — Operate opens the door, `manage_options` authorises the data — so a user with Operate but without `manage_options` reaches the API surface yet can neither list nor extract anything.
 _Avoid_: API access, permission
-
-**Resource capability**:
-The existing WordPress capability that already governs a given table or file category outside this plugin (e.g. `manage_options` for the options table, `list_users` for the user tables). A request succeeds only when the authenticated user holds both the Operate capability and the Resource capability for everything it names.
-_Avoid_: permission, access level
-
-**Fail-safe default**:
-The Resource capability required for a table or file with no specific mapping: `manage_options`, the strictest capability available, rather than the Operate capability alone. Applies equally to tables and files.
 
 ### Extraction
 
@@ -40,4 +33,4 @@ The REST contract's own version number, distinct from the plugin's release versi
 _Avoid_: plugin version (as a synonym)
 
 **Audit log**:
-The append-only record of every successful extraction (user, tables/files, timestamp). Stored as a randomly-named file, not a database table; read only through its own REST endpoint, gated on `manage_options` regardless of what the reader's Operate/Resource capabilities allow them to extract.
+The append-only record of every successful extraction (user, tables/files, timestamp). Stored as a randomly-named file, not a database table; read only through its own REST endpoint, gated on `manage_options`.

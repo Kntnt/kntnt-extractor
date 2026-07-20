@@ -22,7 +22,7 @@ Kntnt Extractor is a WordPress plugin for site owners, agencies and tooling auth
 ### Key features
 
 - REST API only, no admin screen — install it and grant a capability, nothing to configure
-- every request authenticates as a real WordPress user (an application password); the user's own WordPress capabilities decide what they may extract, not a separate access list
+- every request authenticates as a real WordPress user (an application password) and is authorised by WordPress's own administrator capability — no separate access list to maintain
 - a fixed, minimal set of endpoints: list tables, list files, extract a named selection, check status
 - large extractions run as a background job and are fetched through a one-time download link, so nothing sits open on the server
 - self-hosted update checks against GitHub releases, so the Plugins screen shows updates without a WordPress.org listing
@@ -46,7 +46,7 @@ Download the latest release from [the releases page](https://github.com/Kntnt/kn
 
 ## Usage
 
-Authenticate with an [application password](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/) for a user holding `kntnt_extractor_operate`, then call the plugin's REST namespace (`kntnt-extractor/v1`) to list the available tables and files, request an extraction, and fetch the result once it is ready. What a given user may extract follows their own WordPress capabilities — a user without `manage_options`, for instance, cannot extract the options table even with `kntnt_extractor_operate` granted.
+Authenticate with an [application password](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/) for a user holding both `kntnt_extractor_operate` and `manage_options` (an administrator has both), then call the plugin's REST namespace (`kntnt-extractor/v1`) to list the available tables and files, request an extraction, and fetch the result once it is ready. Both capabilities are required: `kntnt_extractor_operate` is the plugin's on switch, and `manage_options` authorises the data — a user with Operate but without `manage_options` can reach the API yet neither list nor extract anything.
 
 ## Questions, bugs, and feature requests
 
