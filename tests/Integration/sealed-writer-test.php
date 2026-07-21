@@ -218,6 +218,18 @@ $collect_strings = static function ( mixed $value, array &$acc, int $depth = 0 )
 		}
 	}
 };
+
+// Positive control for the retention walk: the same walk over a writer that is
+// still OPEN must surface its held public key. Without this the walk below could
+// pass simply by descending into nothing; this proves it genuinely traverses the
+// writer's properties and would catch a key stored as one.
+$canary_writer = new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-canary-' ) );
+$canary_writer->open( $public_key );
+$canary_strings = [];
+$collect_strings( $canary_writer, $canary_strings );
+$canary_writer->finalize();
+kntnt_extractor_assert( in_array( $public_key, $canary_strings, true ), 'The retention walk descends into the writer and surfaces a held key (positive control)' );
+
 $retained = [];
 $collect_strings( $writer, $retained );
 $leaks_key = false;
@@ -250,6 +262,15 @@ kntnt_extractor_assert( $rejects( static fn() => ( new Sealed_Writer( $reject_pa
 kntnt_extractor_assert( $rejects( static fn() => ( new Sealed_Writer( $reject_path ) )->open( str_repeat( 'x', SODIUM_CRYPTO_BOX_PUBLICKEYBYTES - 1 ) ) ), 'A too-short public key is rejected' );
 kntnt_extractor_assert( $rejects( static fn() => ( new Sealed_Writer( $reject_path ) )->open( str_repeat( 'x', SODIUM_CRYPTO_BOX_PUBLICKEYBYTES + 1 ) ) ), 'A too-long public key is rejected' );
 
+// AC7's load-bearing property, not just the throw: a rejected key writes nothing.
+// Validation runs before the destination is opened, so a fresh path that does not
+// yet exist must still not exist after a rejected open() — no empty or partial
+// container is ever created.
+$untouched_path = sys_get_temp_dir() . '/kntnt-no-side-effect-' . bin2hex( random_bytes( 8 ) );
+$rejected_empty_key = $rejects( static fn() => ( new Sealed_Writer( $untouched_path ) )->open( '' ) );
+$rejected_short_key = $rejects( static fn() => ( new Sealed_Writer( $untouched_path ) )->open( str_repeat( 'x', SODIUM_CRYPTO_BOX_PUBLICKEYBYTES - 1 ) ) );
+kntnt_extractor_assert( $rejected_empty_key && $rejected_short_key && ! file_exists( $untouched_path ), 'A rejected public key creates no container file (AC7: no partial artifact reaches disk)' );
+
 // A well-formed 32-byte public key is accepted (the writer opens and finalizes).
 $accepts_valid = true;
 try {
@@ -273,3 +294,12 @@ $is_logic_error = static function ( callable $fn ): bool {
 };
 kntnt_extractor_assert( $is_logic_error( static fn() => ( new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-order-' ) ) )->add_segment( 'x', $make_stream( 'x' ) ) ), 'add_segment() before open() throws a LogicException' );
 kntnt_extractor_assert( $is_logic_error( static fn() => ( new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-order-' ) ) )->finalize() ), 'finalize() before open() throws a LogicException' );
+
+// Reopening an already-open container is a lifecycle violation, not a silent
+// handle leak: a second open() before finalize() throws rather than truncating
+// the file while keeping the earlier segment names.
+kntnt_extractor_assert( $is_logic_error( static function () use ( $public_key ): void {
+	$reopened = new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-reopen-' ) );
+	$reopened->open( $public_key );
+	$reopened->open( $public_key );
+} ), 'A second open() before finalize() throws a LogicException (no handle leak)' );

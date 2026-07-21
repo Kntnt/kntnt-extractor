@@ -129,10 +129,20 @@ final class Sealed_Writer {
 	 *                           `SODIUM_CRYPTO_BOX_PUBLICKEYBYTES` bytes.
 	 * @return void
 	 *
+	 * @throws LogicException     When a container is already open on this writer.
 	 * @throws Invalid_Public_Key When the key is absent or the wrong length.
-	 * @throws RuntimeException   When the destination cannot be opened.
+	 * @throws RuntimeException   When the destination cannot be opened or the
+	 *                            header cannot be written.
 	 */
 	public function open( string $public_key ): void {
+
+		// Refuse to reopen an already-open container: a second open() would leak
+		// the live handle and truncate the file via fopen('wb') while leaving the
+		// prior segment names in the index. The lifecycle is exactly one
+		// open→add*→finalize per writer — one writer per extraction (ADR-0009).
+		if ( $this->handle !== null ) {
+			throw new LogicException( 'Sealed_Writer::open() cannot reopen an already-open container; call finalize() first.' );
+		}
 
 		// Reject an absent or malformed key before any byte reaches disk — an
 		// X25519 public key is exactly SODIUM_CRYPTO_BOX_PUBLICKEYBYTES long.
@@ -149,7 +159,7 @@ final class Sealed_Writer {
 		}
 
 		// Lay down the versioned format header and record the open container.
-		fwrite( $handle, self::MAGIC . chr( self::FORMAT_VERSION ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- streaming encrypt-as-you-go write; see open().
+		$this->write( $handle, self::MAGIC . chr( self::FORMAT_VERSION ) );
 		$this->handle = $handle;
 		$this->public_key = $public_key;
 
@@ -208,7 +218,7 @@ final class Sealed_Writer {
 		// Append the self-framed segment record and remember its name. Both the
 		// sealed key and the ciphertext carry their own length so the reader needs
 		// no box_seal size constant.
-		fwrite( $handle, pack( 'P', strlen( $sealed_key ) ) . $sealed_key . $nonce . pack( 'P', strlen( $ciphertext ) ) . $ciphertext ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- streaming encrypt-as-you-go write; see open().
+		$this->write( $handle, pack( 'P', strlen( $sealed_key ) ) . $sealed_key . $nonce . pack( 'P', strlen( $ciphertext ) ) . $ciphertext );
 		$this->segment_names[] = $name;
 
 	}
@@ -224,7 +234,9 @@ final class Sealed_Writer {
 	 *
 	 * @return void
 	 *
-	 * @throws LogicException When called before {@see open()}.
+	 * @throws LogicException   When called before {@see open()}.
+	 * @throws RuntimeException When the trailer cannot be written or the
+	 *                          container cannot be closed cleanly.
 	 */
 	public function finalize(): void {
 
@@ -240,14 +252,50 @@ final class Sealed_Writer {
 		// which tables or files it contains, then frame its length as the trailer
 		// the reader locates it by.
 		$sealed_index = sodium_crypto_box_seal( $this->encode_index(), $public_key );
-		fwrite( $handle, $sealed_index . pack( 'P', strlen( $sealed_index ) ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- streaming encrypt-as-you-go write; see open().
+		$this->write( $handle, $sealed_index . pack( 'P', strlen( $sealed_index ) ) );
 
 		// Close the container and drop every reference, so no value able to open
-		// the artifact survives this call.
-		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- streaming encrypt-as-you-go write; see open().
+		// the artifact survives this call. A failed close can mean buffered
+		// trailer bytes never reached disk — a truncated artifact — so it is
+		// escalated, but only once the references are already gone.
+		$closed = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- streaming encrypt-as-you-go write; see open().
 		$this->handle = null;
 		$this->public_key = null;
 		$this->segment_names = [];
+		if ( $closed === false ) {
+			throw new RuntimeException( 'Unable to close the sealed container after writing its trailer.' );
+		}
+
+	}
+
+	/**
+	 * Writes a complete buffer to the open container or fails loudly.
+	 *
+	 * `fwrite()` can write fewer bytes than asked — or none — when the disk or
+	 * the account quota fills, which is a real possibility here because an
+	 * extraction dumps whole tables and large files. A silent short write would
+	 * truncate this security-critical artifact while {@see finalize()} still
+	 * reported success, so any incomplete write is escalated to a
+	 * `RuntimeException` the job can surface rather than shipping a valid-looking
+	 * but short container. This mirrors the seam's existing handling of a failed
+	 * open and a failed stream read.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param resource $handle Open container stream to write to.
+	 * @param string   $bytes  Buffer that must be written in full.
+	 * @return void
+	 *
+	 * @throws RuntimeException When fewer than all bytes are written.
+	 */
+	private function write( $handle, string $bytes ): void {
+
+		// Treat anything short of the full buffer — including an outright false —
+		// as a fatal build error, since it leaves a truncated container.
+		$written = fwrite( $handle, $bytes ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- streaming encrypt-as-you-go write; see open().
+		if ( $written !== strlen( $bytes ) ) {
+			throw new RuntimeException( 'A partial write truncated the sealed container.' );
+		}
 
 	}
 
