@@ -40,9 +40,12 @@ final class Status_Controller {
 	 * behavioural change with no signature change; a bug fix that leaves the
 	 * contract as callers already understood it does not bump it (ADR-0005).
 	 *
+	 * Public because it is the single source of truth for the contract version: the
+	 * audit log stamps the same value into every record it writes (ADR-0006).
+	 *
 	 * @since 0.1.0
 	 */
-	private const int API_VERSION = 1;
+	public const int API_VERSION = 1;
 
 	/**
 	 * Registers the status route. Hooked on `rest_api_init`.

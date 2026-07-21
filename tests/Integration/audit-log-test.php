@@ -47,6 +47,15 @@ if ( ! class_exists( Audit_Log::class ) ) {
 }
 kntnt_extractor_assert( true, 'The audit-log machinery (Audit_Log) is available' );
 
+// Start from a clean slate: an earlier test file in this same Playground boot may
+// have driven a job to ready and left an audit entry, so clear any recorded log
+// before counting, making every assertion below deterministic regardless of order.
+$existing = get_option( 'kntnt_extractor_audit_log' );
+if ( is_string( $existing ) && is_file( $existing ) ) {
+	unlink( $existing );
+}
+delete_option( 'kntnt_extractor_audit_log' );
+
 // Dispatches POST /extractions with a JSON body through the live REST server.
 $post_extractions = static function ( array $body ): WP_REST_Response {
 	$request = new WP_REST_Request( 'POST', '/kntnt-extractor/v1/extractions' );
@@ -77,13 +86,16 @@ $get_audit = static function ( array $query = [] ): WP_REST_Response {
 };
 
 // Isolate the working directory (still under uploads so a ready artifact stays
-// web-reachable) and raise concurrency so several jobs can coexist.
+// web-reachable) and raise concurrency so several jobs can coexist. These filters
+// are removed at the end of the file: this test runs early in the suite, so a
+// leaked override would pollute a later file's environment.
 $work = wp_upload_dir()['basedir'] . '/kntnt-extractor-audit-' . bin2hex( random_bytes( 4 ) );
-add_filter( 'kntnt_extractor_config_work_dir', static fn(): string => $work );
-add_filter( 'kntnt_extractor_config_max_active_jobs', static fn(): int => 20 );
-
-// Short-circuit every loopback so a nudge never touches the real network.
-add_filter( 'pre_http_request', static fn() => [ 'headers' => [], 'body' => '', 'response' => [ 'code' => 202, 'message' => 'Accepted' ], 'cookies' => [], 'filename' => null ] );
+$force_work = static fn(): string => $work;
+$force_max = static fn(): int => 20;
+$block_http = static fn() => [ 'headers' => [], 'body' => '', 'response' => [ 'code' => 202, 'message' => 'Accepted' ], 'cookies' => [], 'filename' => null ];
+add_filter( 'kntnt_extractor_config_work_dir', $force_work );
+add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
+add_filter( 'pre_http_request', $block_http );
 
 // Make the Operate grant a precondition regardless of file order.
 if ( ! get_role( 'administrator' )->has_cap( $operate ) ) {
@@ -203,7 +215,8 @@ kntnt_extractor_assert( count( $fn ) === 2, 'A from-date of today still includes
 
 // Force retention to zero days through the documented filter, so every existing
 // entry is now older than the window (filter wins over the constant/default).
-add_filter( 'kntnt_extractor_log_retention_days', static fn(): int => 0 );
+$zero_retention = static fn(): int => 0;
+add_filter( 'kntnt_extractor_log_retention_days', $zero_retention );
 $log_before_rotation = get_option( 'kntnt_extractor_audit_log' );
 
 // Reading the log rotates it: with a zero-day window every entry is expired, so the
@@ -216,9 +229,20 @@ kntnt_extractor_assert( get_option( 'kntnt_extractor_audit_log' ) === false, 'Th
 
 // The next event creates a fresh, differently-named log file (AC6). Lift the
 // zero-day window first so the new entry is not itself immediately rotated away.
-remove_all_filters( 'kntnt_extractor_log_retention_days' );
+remove_filter( 'kntnt_extractor_log_retention_days', $zero_retention );
 wp_set_current_user( $owner->ID );
 $fresh_job = $drive_to_ready( [ 'tables' => [ $wpdb->options ], 'files' => [], 'public_key' => $public_key ] );
 $fresh_path = get_option( 'kntnt_extractor_audit_log' );
 kntnt_extractor_assert( $fresh_job !== '' && is_string( $fresh_path ) && is_file( $fresh_path ), 'The next event after an empty rotation creates a fresh log file (AC6)' );
 kntnt_extractor_assert( is_string( $fresh_path ) && $fresh_path !== $log_before_rotation, 'The fresh log file has a new random name (AC6)' );
+
+// Remove every filter this file installed and clear its audit residue, so the
+// early position of this test in the suite cannot pollute a later file.
+remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
+remove_filter( 'pre_http_request', $block_http );
+$leftover = get_option( 'kntnt_extractor_audit_log' );
+if ( is_string( $leftover ) && is_file( $leftover ) ) {
+	unlink( $leftover );
+}
+delete_option( 'kntnt_extractor_audit_log' );

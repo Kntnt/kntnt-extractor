@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Kntnt\Extractor\Rest\Audit_Log_Controller;
 use Kntnt\Extractor\Rest\Extractions_Controller;
 use Kntnt\Extractor\Rest\Files_Controller;
 use Kntnt\Extractor\Rest\Status_Controller;
@@ -102,21 +103,30 @@ final class Plugin {
 		// Artifact_Builder and its Table_Dumper, one secret-authenticated tick at a
 		// time (ADR-0007/0009). The Sweeper is the TTL backstop that reclaims a
 		// never-consumed job (ADR-0004); it answers the recurring cron event the
-		// Installer schedules against Sweeper::SWEEP_HOOK.
+		// Installer schedules against Sweeper::SWEEP_HOOK. The Audit_Log records every
+		// completed extraction at the ready transition — the non-evadable trigger — and
+		// answers the administrator-only GET /audit-log (ADR-0006).
 		$authorizer = new Authorizer();
 		$config = new Config();
 		$job_store = new Job_Store( $config );
 		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper() ) );
 		$sweeper = new Sweeper( $job_store, $config );
+		$audit_log = new Audit_Log();
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
 		$files_controller = new Files_Controller( $authorizer, $config );
 		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $dispatcher );
+		$audit_log_controller = new Audit_Log_Controller( $audit_log );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
+		add_action( 'rest_api_init', $audit_log_controller->register_routes( ... ) );
 		add_action( Sweeper::SWEEP_HOOK, $sweeper->run( ... ) );
+
+		// Record every completed extraction the moment it reaches ready — the
+		// sanctioned, non-evadable trigger, never at consume (ADR-0004/0006).
+		add_action( 'kntnt_extractor_job_ready', $audit_log->record( ... ) );
 
 		// Register the self-hosted update checker so a new GitHub release shows on
 		// the Plugins screen and installs in place (ADR-0005). It is independent of
