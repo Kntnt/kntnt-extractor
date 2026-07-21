@@ -160,9 +160,16 @@ final class Artifact_Builder {
 	private function file_stream( string $file ) {
 
 		// Fail closed unless the path resolves to a real location at or under the
-		// canonical installation root.
+		// canonical installation root. The root and the resolved path are compared on
+		// wp_normalize_path'd separators so the boundary holds on Windows/IIS too, where
+		// realpath renders paths with backslashes a forward-slash prefix would never
+		// match — the same normalisation the create-time check applies
+		// (Extractions_Controller::first_out_of_root_file). A null byte counts as out of
+		// root because realpath would raise a ValueError on it.
 		$root = realpath( ABSPATH );
+		$root = $root === false ? false : wp_normalize_path( $root );
 		$abs = $root === false || str_contains( $file, "\0" ) ? false : realpath( $root . '/' . $file );
+		$abs = $abs === false ? false : wp_normalize_path( $abs );
 		if ( $root === false || $abs === false || ! ( $abs === $root || str_starts_with( $abs, $root . '/' ) ) ) {
 			throw new RuntimeException( 'A requested file resolves outside the installation root.' );
 		}
