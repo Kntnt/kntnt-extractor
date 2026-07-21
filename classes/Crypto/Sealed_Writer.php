@@ -202,18 +202,15 @@ final class Sealed_Writer {
 
 		// Encrypt under a fresh random symmetric key and seal that key to the
 		// caller's public key, then wipe the key and the plaintext so the server
-		// keeps nothing able to open its own output (ADR-0009). The bundled sodium
-		// extension (present on the required PHP 8.5) wipes in place; WordPress's
-		// pure-PHP sodium_compat fallback cannot and refuses to, so the wipe is
-		// guarded to the extension — the locals are dropped either way on return.
+		// keeps nothing able to open its own output (ADR-0009). The wipe runs in
+		// every environment — see {@see wipe()} for how it scrubs with or without
+		// the native extension.
 		$key = sodium_crypto_secretbox_keygen();
 		$nonce = random_bytes( SODIUM_CRYPTO_SECRETBOX_NONCEBYTES );
 		$ciphertext = sodium_crypto_secretbox( $plaintext, $nonce, $key );
 		$sealed_key = sodium_crypto_box_seal( $key, $public_key );
-		if ( extension_loaded( 'sodium' ) ) {
-			sodium_memzero( $key );
-			sodium_memzero( $plaintext );
-		}
+		$this->wipe( $key );
+		$this->wipe( $plaintext );
 
 		// Append the self-framed segment record and remember its name. Both the
 		// sealed key and the ciphertext carry their own length so the reader needs
@@ -296,6 +293,39 @@ final class Sealed_Writer {
 		if ( $written !== strlen( $bytes ) ) {
 			throw new RuntimeException( 'A partial write truncated the sealed container.' );
 		}
+
+	}
+
+	/**
+	 * Scrubs a secret's bytes from the given variable once it is no longer needed.
+	 *
+	 * The native `sodium` extension bundled with the required PHP 8.5 overwrites
+	 * the string in place in constant time (and leaves the variable `null`).
+	 * WordPress's pure-PHP `sodium_compat` fallback cannot do that and throws
+	 * from {@see sodium_memzero()} rather than feign a secure wipe, so where the
+	 * extension is absent this overwrites the bytes with zeros instead — best
+	 * effort, not constant time, but it still clears the secret from the variable
+	 * so it does not linger past this call. Splitting the wipe out this way keeps
+	 * it a single code path that executes in every environment, not a branch that
+	 * is dead wherever the extension is not compiled in.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param string $secret Secret to clear; nulled or zero-filled in place.
+	 *
+	 * @param-out string|null $secret Left `null` by the native scrub, or a
+	 *                                zero-filled string by the fallback.
+	 * @return void
+	 */
+	private function wipe( string &$secret ): void {
+
+		// Prefer the extension's constant-time in-place scrub; fall back to a
+		// plain overwrite only where sodium_compat would otherwise throw from it.
+		if ( extension_loaded( 'sodium' ) ) {
+			sodium_memzero( $secret );
+			return;
+		}
+		$secret = str_repeat( "\x00", strlen( $secret ) );
 
 	}
 

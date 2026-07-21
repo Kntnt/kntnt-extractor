@@ -155,6 +155,19 @@ foreach ( $container['records'] as $i => $record ) {
 }
 kntnt_extractor_assert( $roundtrip_ok, 'Every segment decrypts byte-for-byte with the private key' );
 
+// Discriminating-power controls for the round-trip above: the byte-for-byte
+// check earns its keep only if a mismatch is genuinely detectable and the seal
+// binds to the caller's key, so demonstrate both here rather than leave the
+// assertion's teeth to inference. Decrypting one record and comparing it to a
+// DIFFERENT segment's plaintext must be unequal — a writer that swapped or
+// corrupted a segment would then fail the check — and a foreign keypair must
+// open nothing, so the round-trip proves possession of the matching private
+// key, not mere decodability of a co-evolved reader.
+$mismatch_detected = $open_segment( $container['records'][0], $keypair ) !== $payloads[1];
+$foreign_keypair = sodium_crypto_box_seed_keypair( str_repeat( "\x17", SODIUM_CRYPTO_BOX_SEEDBYTES ) );
+$foreign_open_fails = $open_segment( $container['records'][0], $foreign_keypair ) === false;
+kntnt_extractor_assert( $mismatch_detected && $foreign_open_fails, 'The round-trip check discriminates: a wrong payload is unequal and a foreign key opens nothing (negative controls)' );
+
 // Each segment's key is a distinct 32-byte symmetric key sealed with box_seal.
 $recovered_keys = [];
 foreach ( $container['records'] as $record ) {
@@ -173,6 +186,26 @@ $dup_a = $container['records'][3]['ciphertext'];
 $dup_b = $container['records'][4]['ciphertext'];
 kntnt_extractor_assert( $dup_a !== $dup_b && $segments['duplicate-payload-a'] === $segments['duplicate-payload-b'], 'Identical payloads produce different ciphertext (fresh key/nonce per segment)' );
 
+// AC2: the plaintext symmetric key is zeroed after use. add_segment() wipes its
+// key and plaintext through the writer's own wipe() primitive, which runs in
+// every environment — the native extension scrubs in place, and this
+// sodium_compat harness overwrites with zeros — so exercising wipe() directly
+// covers the exact code path add_segment() takes here, not a branch that would
+// be dead under compat. A closure bound to the class scope reaches the private
+// method with real by-reference semantics (ReflectionMethod::invokeArgs would
+// not carry the mutation back). The pre-check proves the secret started
+// non-zero, so the post-check is not vacuously comparing zero to zero.
+$invoke_wipe = \Closure::bind( static function ( Sealed_Writer $writer, string &$secret ): void {
+	$writer->wipe( $secret );
+}, null, Sealed_Writer::class );
+$wipe_writer = new Sealed_Writer( $path );
+$wipe_secret = random_bytes( SODIUM_CRYPTO_SECRETBOX_KEYBYTES );
+$wipe_length = strlen( $wipe_secret );
+$wipe_started_nonzero = $wipe_secret !== str_repeat( "\x00", $wipe_length );
+$invoke_wipe( $wipe_writer, $wipe_secret );
+$wipe_cleared = $wipe_secret === null || $wipe_secret === '' || ( is_string( $wipe_secret ) && $wipe_secret === str_repeat( "\x00", $wipe_length ) );
+kntnt_extractor_assert( $wipe_started_nonzero && $wipe_cleared, 'The plaintext symmetric key is zeroed after use (AC2)' );
+
 // The index is sealed: no segment name appears in the clear anywhere in the
 // artifact, yet the private key recovers the exact ordered name list.
 $no_name_leaks = true;
@@ -184,6 +217,11 @@ foreach ( $names as $name ) {
 $recovered_names = $open_index( $container['sealed_index'], $keypair );
 kntnt_extractor_assert( $no_name_leaks, 'No segment name appears in the clear in the artifact (index is sealed)' );
 kntnt_extractor_assert( $recovered_names === $names, 'The private key recovers the exact ordered segment names from the sealed index' );
+
+// Positive control for the leak scan: the same str_contains scan must find a
+// token that IS in the artifact — the magic header — so the "no name found"
+// result above reflects genuine absence rather than a scan that never matches.
+kntnt_extractor_assert( str_contains( $raw, Sealed_Writer::MAGIC ), 'The name-leak scan detects a token that is present (positive control)' );
 
 // Tamper detection: a single flipped ciphertext byte, and a corrupted nonce,
 // both fail authentication rather than decrypting to garbage.
