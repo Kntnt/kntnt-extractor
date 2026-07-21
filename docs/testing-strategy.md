@@ -4,7 +4,7 @@
 
 The plugin's behaviour is verified end-to-end against a real WordPress, dispatching requests through the live REST server exactly as an HTTP client would reach them. The harness runs inside a [WordPress Playground](https://wordpress.github.io/wordpress-playground/) instance — WASM PHP plus SQLite — which is the default integration harness in `agents.d/coding-standard/wordpress.md`. It needs no MySQL server and no local web server, so it runs the same on a laptop and in CI.
 
-MySQL-backed tooling (DDEV, the WordPress core PHPUnit suite) is the standard's explicit fallback, reserved for behaviour Playground cannot exercise — MySQL-specific SQL, locking semantics, or multi-process cron. The walking skeleton needs none of that, so Playground is the whole harness for now.
+MySQL-backed tooling (DDEV, the WordPress core PHPUnit suite) is the standard's explicit fallback, reserved for behaviour Playground cannot exercise — MySQL-specific SQL, locking semantics, or multi-process cron. `GET /tables` is the first behaviour that needs it: its row-count and byte-size estimates come from `SHOW TABLE STATUS`, whose `Rows`, `Data_length`, and `Index_length` columns SQLite stubs to zero, so their magnitudes can only be verified against a real MySQL-family engine. See the DDEV harness below.
 
 ### Running it
 
@@ -33,6 +33,25 @@ Current tests:
 - `activation-test.php` — the plugin activates and deactivates cleanly, and the autoloader resolves its classes.
 - `config-seam-test.php` — the `Config` seam resolves a value from a constant and lets a filter override it (filter wins).
 - `rest-status-test.php` — `GET /kntnt-extractor/v1/status` returns `{ "api_version": 1 }` unauthenticated, the namespace appears in the REST index, and no plugin release version leaks.
+- `tables-test.php` — `GET /tables` answers an authorized caller, its entries are well formed, and the listing is exactly the site's own `SHOW TABLES` (neither padded nor filtered). It does not assert the row/byte magnitudes: SQLite stubs those engine statistics to zero, so that check lives in the DDEV harness below.
+
+## MySQL-backed integration check (DDEV)
+
+The row-count and byte-size estimates in `GET /tables` are the storage engine's own `SHOW TABLE STATUS` figures. WordPress Playground runs on SQLite, whose translation of that statement reports `Rows`, `Data_length`, and `Index_length` as zero, so the fast suite can only verify the listing's shape — never that a populated table reports a plausible, positive estimate. That verification is the standard's DDEV fallback for MySQL-specific SQL.
+
+`tests/Integration/DDEV/run.sh` provisions a throwaway DDEV WordPress project on a real MySQL-family (InnoDB) database in a temporary directory, activates the plugin, seeds a little content, and asserts through `tests/Integration/DDEV/tables-size-test.php` that the options, users, and posts tables report a positive byte-size estimate and a positive estimated row count. It tears the whole project down again on exit, so the machine is left state-neutral.
+
+It requires Docker and DDEV, and is deliberately **not** part of `composer gate` — MySQL-backed tests are the exception, kept out of the fast PR-time suite. Run it on demand:
+
+```
+composer test:integration:mysql
+```
+
+or directly:
+
+```
+bash tests/Integration/DDEV/run.sh
+```
 
 ## Static analysis and coding standard
 

@@ -36,6 +36,7 @@
         "phpcbf": "phpcbf --standard=phpcs.xml.dist",
         "phpstan": "phpstan analyse --memory-limit=1G",
         "test:integration": "bash tests/Integration/run.sh",
+        "test:integration:mysql": "bash tests/Integration/DDEV/run.sh",
         "test": "@test:integration",
         "gate": [
             "@phpcs",
