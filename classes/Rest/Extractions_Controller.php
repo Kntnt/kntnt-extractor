@@ -1,0 +1,455 @@
+<?php
+/**
+ * REST controller that creates Extraction jobs and reports their state.
+ *
+ * @package Kntnt\Extractor
+ * @since   0.1.0
+ */
+
+declare( strict_types = 1 );
+
+namespace Kntnt\Extractor\Rest;
+
+use Kntnt\Extractor\Authorizer;
+use Kntnt\Extractor\Config;
+use Kntnt\Extractor\Job_Store;
+use WP_Error;
+use WP_REST_Request;
+use WP_REST_Response;
+use WP_REST_Server;
+
+/**
+ * Registers and answers `POST /extractions` and `GET /extractions/{id}`.
+ *
+ * `POST /extractions` turns an already-resolved selection of tables and/or files,
+ * plus the caller's ephemeral X25519 public key, into a queued Extraction job
+ * bound to the caller (ADR-0004); no work runs yet. `GET /extractions/{id}`
+ * reports that job's state to its owner.
+ *
+ * The order the create request is validated in is a security property, not an
+ * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
+ * key a 400, and an unknown table or a file resolving outside the installation
+ * root a 404 — and that 404 is decided BEFORE the capability gate, so the plugin
+ * rejects a request for something that does not exist without first disclosing
+ * whether the caller could have been authorized. Only once existence holds does
+ * the shared both-capabilities Authorizer get to refuse an unauthorized caller
+ * with 403. The out-of-root check is a `realpath` boundary, never a sanitiser:
+ * a traversal path is rejected outright, not rewritten into a safe one.
+ *
+ * @since 0.1.0
+ */
+final class Extractions_Controller {
+
+	/**
+	 * Non-terminal jobs allowed at once when the knob does not override it.
+	 *
+	 * One global job by default (ADR-0004): an extraction is heavy, and a second
+	 * concurrent one is refused with 429. The ceiling is resolved through the
+	 * Config seam under the knob `max_active_jobs`, so a site raises it with the
+	 * `KNTNT_EXTRACTOR_MAX_ACTIVE_JOBS` constant or the matching filter.
+	 *
+	 * @since 0.1.0
+	 */
+	private const int DEFAULT_MAX_ACTIVE_JOBS = 1;
+
+	/**
+	 * Wires the controller to the access gate, the Config seam, and the job store.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Authorizer $authorizer The shared both-capabilities access gate.
+	 * @param Config     $config     The constant-then-filter configuration seam.
+	 * @param Job_Store  $store      Persistence for Extraction jobs.
+	 */
+	public function __construct(
+		private readonly Authorizer $authorizer,
+		private readonly Config $config,
+		private readonly Job_Store $store,
+	) {}
+
+	/**
+	 * Registers both extraction routes. Hooked on `rest_api_init`.
+	 *
+	 * The create route's permission callback runs the whole existence-and-key
+	 * validation before the capability check, which is what lets a 404 or 400
+	 * precede the 403 (ADR-0003). The poll route captures a 32-hex id straight
+	 * from the path, so a malformed id never matches and never reaches the store.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return void
+	 */
+	public function register_routes(): void {
+
+		register_rest_route(
+			Status_Controller::REST_NAMESPACE,
+			'/extractions',
+			[
+				'methods' => WP_REST_Server::CREATABLE,
+				'callback' => $this->create( ... ),
+				'permission_callback' => $this->can_create( ... ),
+			],
+		);
+
+		register_rest_route(
+			Status_Controller::REST_NAMESPACE,
+			'/extractions/(?P<id>[a-f0-9]{32})',
+			[
+				'methods' => WP_REST_Server::READABLE,
+				'callback' => $this->poll( ... ),
+				'permission_callback' => $this->authorizer->authorize( ... ),
+			],
+		);
+
+	}
+
+	/**
+	 * Permission callback for creating a job: validate the request, then authorize.
+	 *
+	 * The request is fully validated first — body shape (422), public key (400),
+	 * and resource existence (404) — and only a request that survives all three
+	 * reaches the capability gate. Running validation here rather than in the main
+	 * callback is deliberate: WordPress runs the permission callback before the
+	 * callback, so this is the seam where a 404 can be made to precede the 403 the
+	 * capability gate would otherwise return first (ADR-0003).
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming create request.
+	 * @return true|WP_Error True once the request is valid and authorized; otherwise
+	 *                       the first failing check as a 422, 400, 404, or 403.
+	 */
+	public function can_create( WP_REST_Request $request ): true|WP_Error {
+
+		// Reject a malformed, keyless, or non-existent-resource request before the
+		// capability gate ever runs; only then let the Authorizer have its say.
+		$payload = $this->validate_payload( $request );
+		if ( is_wp_error( $payload ) ) {
+			return $payload;
+		}
+
+		return $this->authorizer->authorize();
+
+	}
+
+	/**
+	 * Creates the queued job and returns its id and state.
+	 *
+	 * The request has already passed validation and the capability gate, so the
+	 * only new gate here is concurrency: a second non-terminal job beyond the
+	 * configured ceiling is refused with 429. The payload is re-derived from the
+	 * request — parsing it is how this callback obtains its inputs, not a second
+	 * validation of them.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming create request.
+	 * @return WP_REST_Response|WP_Error A 201 with `{ id, state }`, or a 429 when the
+	 *                                   concurrency ceiling is already reached.
+	 */
+	public function create( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+
+		// Re-derive the validated payload; a failure cannot occur after can_create
+		// but the union return type must still be honoured.
+		$payload = $this->validate_payload( $request );
+		if ( is_wp_error( $payload ) ) {
+			return $payload;
+		}
+
+		// Enforce the global concurrency ceiling: a create beyond it is a 429, the
+		// caller's cue to poll or consume the active job before starting another.
+		if ( $this->store->count_active() >= $this->max_active_jobs() ) {
+			return new WP_Error(
+				'kntnt_extractor_too_many_jobs',
+				__( 'Another extraction is already in progress. Wait for it to finish before starting another.', 'kntnt-extractor' ),
+				[ 'status' => 429 ],
+			);
+		}
+
+		// Persist a queued job bound to the caller and report its id and state.
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['files'] );
+
+		return new WP_REST_Response(
+			[
+				'id' => $job->id,
+				'state' => $job->state->value,
+			],
+			201,
+		);
+
+	}
+
+	/**
+	 * Reports a job's state to its owner.
+	 *
+	 * An unknown id is a 404 and a job owned by someone else is a 403 — existence
+	 * before ownership, mirroring the create path's existence-before-capability
+	 * order. The capability gate has already admitted the caller through the
+	 * route's permission callback, so this only adds the per-job ownership binding
+	 * (AC4).
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming poll request, carrying the id.
+	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state }`, a 404 for an
+	 *                                   unknown job, or a 403 for a non-owner.
+	 */
+	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+
+		// Resolve the id to a job; an id naming no readable job is a 404.
+		$raw_id = $request->get_param( 'id' );
+		$job = $this->store->find( is_string( $raw_id ) ? $raw_id : '' );
+		if ( $job === null ) {
+			return new WP_Error(
+				'kntnt_extractor_no_such_job',
+				__( 'No such extraction job.', 'kntnt-extractor' ),
+				[ 'status' => 404 ],
+			);
+		}
+
+		// Bind the job to its creator: a caller who is not the owner is refused,
+		// even though the capability gate already admitted them.
+		if ( $job->owner !== get_current_user_id() ) {
+			return new WP_Error(
+				'kntnt_extractor_forbidden',
+				__( 'This extraction job belongs to another user.', 'kntnt-extractor' ),
+				[ 'status' => 403 ],
+			);
+		}
+
+		return new WP_REST_Response(
+			[
+				'id' => $job->id,
+				'state' => $job->state->value,
+			],
+		);
+
+	}
+
+	/**
+	 * Validates a create request into a resolved payload, or the first failing check.
+	 *
+	 * The checks run in the contract's fixed precedence: a body that is not a JSON
+	 * object, or a selection that is not a list of non-empty strings, or one that
+	 * selects nothing, is a 422; an absent or malformed public key is a 400; an
+	 * unknown table or a file resolving outside the installation root is a 404.
+	 * Existence is deliberately the last of the three so a well-formed request is
+	 * never told a resource is missing before it is told its own shape is wrong,
+	 * yet still ahead of the capability gate its caller runs afterwards.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming create request.
+	 * @return array{tables: array<int, string>, files: array<int, string>, public_key: string}|WP_Error
+	 */
+	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
+
+		// Parse the body; anything that is not a JSON object is a malformed body.
+		$data = json_decode( (string) $request->get_body(), true );
+		if ( ! is_array( $data ) ) {
+			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'The request body must be a JSON object.', 'kntnt-extractor' ) );
+		}
+
+		// Normalise both selections; a present-but-ill-typed selection, one holding
+		// an empty entry, or a request that selects nothing at all is a malformed body.
+		$tables = $this->string_selection( $data['tables'] ?? [] );
+		$files = $this->string_selection( $data['files'] ?? [] );
+		if ( $tables === null || $files === null || ( $tables === [] && $files === [] ) ) {
+			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'Provide tables and/or files as arrays of non-empty strings, selecting at least one.', 'kntnt-extractor' ) );
+		}
+
+		// Require a well-formed key: present, valid base64, exactly a 32-byte X25519
+		// public key. Its absence or malformation is a client error, not a not-found.
+		$public_key = $this->canonical_public_key( $data['public_key'] ?? null );
+		if ( $public_key === null ) {
+			return $this->error( 400, 'kntnt_extractor_invalid_public_key', __( 'A valid base64-encoded 32-byte X25519 public key is required.', 'kntnt-extractor' ) );
+		}
+
+		// Existence-first: an unknown table or an out-of-root file is a 404, decided
+		// before the capability gate (ADR-0003). Tables are checked before files.
+		$missing = $this->first_missing_table( $tables ) ?? $this->first_out_of_root_file( $files );
+		if ( $missing !== null ) {
+			return $this->error( 404, 'kntnt_extractor_unknown_resource', __( 'A requested table or file does not exist within this installation.', 'kntnt-extractor' ) );
+		}
+
+		return [
+			'tables' => $tables,
+			'files' => $files,
+			'public_key' => $public_key,
+		];
+
+	}
+
+	/**
+	 * Coerces a selection into a list of non-empty strings, or null when it is not one.
+	 *
+	 * An absent selection arrives as `[]` and is a valid empty selection; a scalar,
+	 * a map, or a list holding a non-string or empty string is not a selection at all.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param mixed $value The decoded `tables` or `files` value, or `[]` when absent.
+	 * @return array<int, string>|null The selection as a list of non-empty strings, or null.
+	 */
+	private function string_selection( mixed $value ): ?array {
+
+		// Only a list-shaped array whose every element is a non-empty string is a
+		// valid selection; anything else disqualifies the request as malformed.
+		if ( ! is_array( $value ) || ! array_is_list( $value ) ) {
+			return null;
+		}
+		$selection = [];
+		foreach ( $value as $item ) {
+			if ( ! is_string( $item ) || $item === '' ) {
+				return null;
+			}
+			$selection[] = $item;
+		}
+
+		return $selection;
+
+	}
+
+	/**
+	 * Validates a caller public key and returns it in canonical base64, or null.
+	 *
+	 * The key crosses JSON as base64 and must decode to exactly a 32-byte X25519
+	 * public key — the length the crypto seam seals with. The returned value is
+	 * re-encoded from the decoded bytes so what is persisted is a single canonical
+	 * form regardless of padding or alphabet quirks in what the caller sent.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param mixed $value The decoded `public_key` value, or null when absent.
+	 * @return string|null Canonical base64 of the key, or null when it is invalid.
+	 */
+	private function canonical_public_key( mixed $value ): ?string {
+
+		// Reject an absent, non-string, or empty key outright.
+		if ( ! is_string( $value ) || $value === '' ) {
+			return null;
+		}
+
+		// Require strict base64 that decodes to exactly the X25519 public-key length,
+		// then hand back a canonical re-encoding of those bytes.
+		$decoded = base64_decode( $value, true ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_decode -- decoding a caller's public key from the JSON body, not obfuscating code.
+		if ( $decoded === false || strlen( $decoded ) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES ) {
+			return null;
+		}
+
+		return base64_encode( $decoded ); // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.obfuscation_base64_encode -- re-encoding the validated public key to a canonical form for storage.
+
+	}
+
+	/**
+	 * Returns the first requested table that does not exist, or null when all do.
+	 *
+	 * Table existence is checked against the database's own catalog, never against
+	 * a caller-supplied fragment of SQL (ADR-0003); the caller sends only names.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param array<int, string> $tables The requested table names.
+	 * @return string|null The first unknown table name, or null when every one exists.
+	 */
+	private function first_missing_table( array $tables ): ?string {
+
+		// Skip the catalog query entirely when no table is requested.
+		if ( $tables === [] ) {
+			return null;
+		}
+
+		/**
+		 * The WordPress database access layer.
+		 *
+		 * @var \wpdb $wpdb
+		 */
+		global $wpdb;
+
+		// Compare each requested name against the site's actual tables; the first one
+		// absent from the catalog is the unknown resource that triggers the 404.
+		$existing = $wpdb->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- the site's table catalog is the authoritative existence check (ADR-0003); a schema listing has nothing to prepare or cache.
+		foreach ( $tables as $table ) {
+			if ( ! in_array( $table, $existing, true ) ) {
+				return $table;
+			}
+		}
+
+		return null;
+
+	}
+
+	/**
+	 * Returns the first requested file that resolves outside the root, or null.
+	 *
+	 * The boundary is a `realpath` check, never a sanitiser: a path is accepted only
+	 * when it resolves to a real location at or under the installation root, and a
+	 * traversal or absent path is rejected outright rather than rewritten (ADR-0003).
+	 * When the root itself cannot be resolved — a broken install — the request fails
+	 * closed, treating every file as out of bounds.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param array<int, string> $files The requested installation-root-relative file paths.
+	 * @return string|null The first out-of-root or absent path, or null when all resolve inside.
+	 */
+	private function first_out_of_root_file( array $files ): ?string {
+
+		// Nothing to check when no file is requested.
+		if ( $files === [] ) {
+			return null;
+		}
+
+		// Fail closed if the root cannot be canonicalised: without a trusted root
+		// there is no boundary to test against, so reject the whole selection.
+		$root = realpath( ABSPATH );
+		if ( $root === false ) {
+			return reset( $files );
+		}
+
+		// Resolve each path and confirm it lands at or under the root; a false
+		// realpath (no such file) or a resolved path outside the root is rejected.
+		foreach ( $files as $file ) {
+			$resolved = realpath( $root . '/' . $file );
+			if ( $resolved === false || ! ( $resolved === $root || str_starts_with( $resolved, $root . '/' ) ) ) {
+				return $file;
+			}
+		}
+
+		return null;
+
+	}
+
+	/**
+	 * Resolves the concurrency ceiling through the Config seam, clamped to at least one.
+	 *
+	 * A non-numeric or non-positive override cannot disable creation outright; the
+	 * floor of one keeps the endpoint usable however the knob is misconfigured.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return int The maximum number of non-terminal jobs allowed at once.
+	 */
+	private function max_active_jobs(): int {
+
+		$configured = $this->config->get( 'max_active_jobs', self::DEFAULT_MAX_ACTIVE_JOBS );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_ACTIVE_JOBS );
+
+	}
+
+	/**
+	 * Builds a REST error carrying an explicit HTTP status.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param int    $status  HTTP status the error maps to.
+	 * @param string $code    Machine-readable error code.
+	 * @param string $message Human-readable, translated message.
+	 * @return WP_Error
+	 */
+	private function error( int $status, string $code, string $message ): WP_Error {
+		return new WP_Error( $code, $message, [ 'status' => $status ] );
+	}
+
+}

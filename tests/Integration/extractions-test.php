@@ -129,8 +129,14 @@ add_filter( 'kntnt_extractor_config_work_dir', $force_work );
 // Running these as an anonymous caller is the whole point: existence and shape
 // errors must surface BEFORE the capability gate, so each of these must be its
 // own status code and never the 403 the caller would earn if the gate ran first.
+// A body that parses as JSON but does not match the extraction-request shape —
+// here a `tables` that is a string rather than an array — is unprocessable: 422.
+// (A body that is not even valid JSON is a 400 owned by WordPress core, one layer
+// below this contract; 422 is the well-formed-but-unprocessable case this endpoint
+// defines.)
 wp_set_current_user( 0 );
-kntnt_extractor_assert( $post_extractions( '{"tables": [' )->get_status() === 422, 'A malformed body is rejected 422 before the capability check' );
+kntnt_extractor_assert( $post_extractions( [ 'tables' => 'wp_options', 'public_key' => $valid_key ] )->get_status() === 422, 'A well-formed body that is not a valid extraction request is rejected 422 before the capability check' );
+kntnt_extractor_assert( $post_extractions( [ 'public_key' => $valid_key ] )->get_status() === 422, 'A body that selects neither a table nor a file is rejected 422' );
 kntnt_extractor_assert( $post_extractions( [ 'tables' => [ $wpdb->options ] ] )->get_status() === 400, 'An absent public_key is rejected 400 before the capability check' );
 kntnt_extractor_assert( $post_extractions( [ 'tables' => [ $wpdb->options ], 'public_key' => 'not-a-valid-key' ] )->get_status() === 400, 'A malformed public_key is rejected 400' );
 kntnt_extractor_assert( $post_extractions( [ 'tables' => [ 'wp_no_such_table_xyz' ], 'public_key' => $valid_key ] )->get_status() === 404, 'An unknown table is rejected 404 before the capability check' );

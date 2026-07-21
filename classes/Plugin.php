@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Kntnt\Extractor\Rest\Extractions_Controller;
 use Kntnt\Extractor\Rest\Files_Controller;
 use Kntnt\Extractor\Rest\Status_Controller;
 use Kntnt\Extractor\Rest\Tables_Controller;
@@ -94,15 +95,20 @@ final class Plugin {
 		// WordPress guarantees the REST server exists and routes may be added.
 		// The Authorizer is the shared both-capabilities gate the data endpoints
 		// reuse as their permission callback, and Config is the constant-then-filter
-		// seam the file Manifest reads its page size through.
+		// seam the file Manifest reads its page size through and the Job_Store reads
+		// its working-directory location through. The Job_Store persists Extraction
+		// jobs as state files under the working directory (ADR-0004/0008).
 		$authorizer = new Authorizer();
 		$config = new Config();
+		$job_store = new Job_Store( $config );
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
 		$files_controller = new Files_Controller( $authorizer, $config );
+		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );
+		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
 
 	}
 
