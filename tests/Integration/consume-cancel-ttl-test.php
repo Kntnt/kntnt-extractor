@@ -10,9 +10,10 @@
  *  - AC2: consume on a job that is not ready (queued or running) is a 409, and
  *    the rejected job is left untouched.
  *  - AC3: DELETE /extractions/{id} cancels / cleans up a job — deleting its
- *    artifact and working directory — without ever firing the ready lifecycle
- *    action that is the audit record's trigger (ADR-0004/0006), so cancel
- *    produces no audit record; it cleans up regardless of the job's state.
+ *    artifact and working directory — without filing an audit record. A stand-in
+ *    audit writer on the sanctioned ready trigger (ADR-0004/0006) is proven to
+ *    record one entry when a job reaches ready, then shown not to grow across the
+ *    cancel, so cancel produces no audit record; it cleans up regardless of state.
  *  - AC4: a TTL sweep removes a never-consumed artifact and its working directory
  *    and marks the job expired, and the TTL is a Config knob — a large TTL leaves
  *    the aged job untouched, a small one sweeps it, while a fresh job survives.
@@ -192,14 +193,36 @@ $cancel( $c2_id );
 
 // --- AC3: cancel cleans up without producing an audit record ---
 
+// Stand in for the ADR-0006 audit writer, which is not yet a subsystem: append a
+// line to a real log file on kntnt_extractor_job_ready — the sanctioned trigger the
+// audit record is filed on (ADR-0004) — and install it before the job is driven to
+// ready. That gives the criterion a positive control: the probe is shown recording
+// an entry when the audit-worthy event actually happens, so its later silence across
+// the cancel is a discriminating result, not a structurally guaranteed one. Residual:
+// until the real writer exists (a later issue) a cancel that filed a record by some
+// path other than this trigger could not be caught here; this binds the sanctioned
+// path, the only one that exists today.
+$audit_log = $work . '-audit.log';
+$audit_writer = static function () use ( $audit_log ): void {
+	file_put_contents( $audit_log, "job-ready\n", FILE_APPEND );
+};
+$audit_entries = static function () use ( $audit_log ): int {
+	return is_file( $audit_log ) ? count( file( $audit_log, FILE_IGNORE_NEW_LINES ) ?: [] ) : 0;
+};
+add_action( 'kntnt_extractor_job_ready', $audit_writer );
+
+// Drive a fresh job to ready and confirm the probe filed exactly one audit record for
+// it: without this positive control the later no-new-record check would hold vacuously.
 $c3_id = $id_of( $post_extractions( $selection ) );
 $drive_to_ready( $c3_id );
 $c3_artifact = $downloads . '/' . $state_field( $work, $c3_id, 'artifact' );
 $c3_dir = $work . '/' . $c3_id;
+kntnt_extractor_assert( $audit_entries() === 1, 'Reaching ready files exactly one audit record — the audit probe has discriminating power (AC3 precondition)' );
 
-// The audit record is written when a job reaches ready (ADR-0004/0006); watch that
-// exact lifecycle action across the cancel and prove it never fires, so cancel adds
-// no audit record.
+// Cancel the ready job while watching both the audit log and the ready action across
+// the call, so a cancel that filed a record — by growing the log or by firing the
+// ready transition — would be caught, not merely one guaranteed never to happen.
+$audit_before_cancel = $audit_entries();
 $ready_fired = false;
 $watch_ready = static function () use ( &$ready_fired ): void {
 	$ready_fired = true;
@@ -207,12 +230,13 @@ $watch_ready = static function () use ( &$ready_fired ): void {
 add_action( 'kntnt_extractor_job_ready', $watch_ready );
 $c3_response = $cancel( $c3_id );
 remove_action( 'kntnt_extractor_job_ready', $watch_ready );
+remove_action( 'kntnt_extractor_job_ready', $audit_writer );
 
 kntnt_extractor_assert( $c3_response->get_status() === 200, 'DELETE /extractions/{id} on a ready job is a 200 (AC3)' );
 $c3_data = $c3_response->get_data();
 kntnt_extractor_assert( is_array( $c3_data ) && ( $c3_data['state'] ?? null ) === 'cancelled', 'Cancel marks the job cancelled (AC3)' );
 kntnt_extractor_assert( ! is_file( $c3_artifact ) && ! is_dir( $c3_dir ), 'Cancel deletes the artifact and the working directory (AC3)' );
-kntnt_extractor_assert( ! $ready_fired, 'Cancel fires no ready lifecycle action, so it produces no audit record (AC3)' );
+kntnt_extractor_assert( $audit_entries() === $audit_before_cancel && ! $ready_fired, 'Cancel files no audit record: the audit log does not grow and no ready transition fires (AC3)' );
 kntnt_extractor_assert( $get_extraction( $c3_id )->get_status() === 404, 'A cancelled job is gone: a later poll is a 404 (AC3)' );
 
 // Cancel cleans up regardless of state: a queued job it never drove to ready is
@@ -311,4 +335,5 @@ remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
 $rmrf( $work );
 $rmrf( $downloads );
+@unlink( $audit_log );
 wp_set_current_user( 0 );
