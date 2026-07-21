@@ -118,6 +118,12 @@ final class Plugin {
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
 		add_action( Sweeper::SWEEP_HOOK, $sweeper->run( ... ) );
 
+		// Register the self-hosted update checker so a new GitHub release shows on
+		// the Plugins screen and installs in place (ADR-0005). It is independent of
+		// the capability-gated REST surface and runs on every load, keeping the
+		// "install and forget" promise regardless of the plugin's dormancy.
+		( new Update_Checker( self::$plugin_file ) )->register();
+
 	}
 
 }

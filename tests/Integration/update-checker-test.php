@@ -27,8 +27,8 @@ declare( strict_types = 1 );
 use Kntnt\Extractor\Plugin;
 use Kntnt\Extractor\Update_Checker;
 
-// Reads a protected/private property off a PUC object so the test can inspect
-// the wiring the library exposes no getter for. Scoped to this file.
+// Reads a protected property off a PUC object so the test can inspect the wiring
+// the library exposes no getter for. Scoped to this file.
 $read_prop = static function ( object $object, string $property ): mixed {
 	$reflection = new ReflectionProperty( $object, $property );
 	$reflection->setAccessible( true );
@@ -68,12 +68,12 @@ $rejects_foreign = $pattern !== '' && preg_match( $pattern, 'some-other-plugin.z
 kntnt_extractor_assert( $matches_own, 'AC2: the asset pattern matches the plugin\'s own release asset by name' );
 kntnt_extractor_assert( $rejects_foreign, 'AC2: the asset pattern rejects a foreign asset name (by name, not positional)' );
 
-// Build a configured checker to inspect how the library was told to select the
-// release asset. Registration is side-effecting but harmless to repeat here.
-$checker = null;
-if ( $has_wrapper && class_exists( $puc_factory ) && class_exists( Plugin::class ) ) {
-	$checker = ( new Update_Checker( Plugin::get_plugin_file() ) )->register();
-}
+// Retrieve the live checker the bootstrap already built and configured.
+// register() is build-once, so this returns that same instance rather than
+// constructing a colliding second checker for the same slug.
+$checker = ( $has_wrapper && class_exists( $puc_factory ) && class_exists( Plugin::class ) )
+	? ( new Update_Checker( Plugin::get_plugin_file() ) )->register()
+	: null;
 $api = $checker !== null ? $checker->getVcsApi() : null;
 
 // AC2: release assets are enabled, so the update package is the named asset
@@ -87,7 +87,7 @@ kntnt_extractor_assert( $pattern !== '' && $filter_regex === $pattern, 'AC2: the
 
 // AC2: a release without a name-matching asset is rejected, never resolved
 // positionally to whatever asset or source archive happens to be first.
-$require_preference = $api !== null && class_exists( $puc_factory ) && $read_prop( $api, 'releaseAssetPreference' ) === $api::REQUIRE_RELEASE_ASSETS;
+$require_preference = $api !== null && $read_prop( $api, 'releaseAssetPreference' ) === $api::REQUIRE_RELEASE_ASSETS;
 kntnt_extractor_assert( $require_preference, 'AC2: an absent named asset is refused, never matched positionally' );
 
 // AC1: the built checker resolves to this plugin's GitHub repository.

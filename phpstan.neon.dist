@@ -13,6 +13,12 @@ parameters:
         - kntnt-extractor.php
         - autoloader.php
 
+    # The bundled Plugin Update Checker (lib/) is third-party code: load its
+    # symbols so the Update_Checker wiring type-checks against them, but do not
+    # analyse the library itself. It is likewise outside the phpcs file list.
+    scanDirectories:
+        - lib/plugin-update-checker
+
     # Keep in step with the `Requires PHP` header – this is what enforces the
     # floor. PHPStan reports any syntax newer than it, and the diagnostic is
     # non-ignorable, so no baseline can bury it. phpcs cannot do this job: its
