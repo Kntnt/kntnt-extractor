@@ -81,5 +81,11 @@ if ( ! kntnt_extractor_requirements_check() ) {
 // Load the PSR-4 autoloader for the plugin's own classes.
 require_once __DIR__ . '/autoloader.php';
 
+// Switch the plugin's dormancy on and off: activation grants the Operate
+// capability to the administrator role and reactivation re-runs the grant
+// (self-healing), while deactivation revokes it.
+register_activation_hook( __FILE__, [ \Kntnt\Extractor\Installer::class, 'activate' ] );
+register_deactivation_hook( __FILE__, [ \Kntnt\Extractor\Installer::class, 'deactivate' ] );
+
 // Bootstrap the plugin singleton, which registers every WordPress hook.
 \Kntnt\Extractor\Plugin::get_instance( __FILE__ );

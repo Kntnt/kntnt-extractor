@@ -11,6 +11,7 @@ declare( strict_types = 1 );
 namespace Kntnt\Extractor;
 
 use Kntnt\Extractor\Rest\Status_Controller;
+use Kntnt\Extractor\Rest\Tables_Controller;
 
 /**
  * Singleton entry point for the Kntnt Extractor plugin.
@@ -90,8 +91,13 @@ final class Plugin {
 
 		// Register the REST controllers on rest_api_init, the one point where
 		// WordPress guarantees the REST server exists and routes may be added.
+		// The Authorizer is the shared both-capabilities gate the data endpoints
+		// reuse as their permission callback.
+		$authorizer = new Authorizer();
 		$status_controller = new Status_Controller();
+		$tables_controller = new Tables_Controller( $authorizer );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
+		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
 
 	}
 
