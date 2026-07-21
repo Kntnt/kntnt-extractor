@@ -2,21 +2,26 @@
 /**
  * Integration test: the self-hosted update checker (issue #12).
  *
- * Proves the four acceptance criteria of the update path, without any network
- * round trip. The YahnisElsts Plugin Update Checker is bundled and loads (AC1);
- * the plugin's own `Update_Checker` points it at this repository's GitHub
- * releases and constrains it to the release asset selected BY NAME, never
- * positionally, refusing to fall back to the auto-generated source archive
- * (AC2); the bootstrap has already hooked the plugin-update transient so an
- * available update surfaces on the Plugins screen (AC2/AC4); and the name the
- * checker matches is exactly the filename `build-release-zip.sh` emits, so the
- * in-place update needs no manual file replacement (AC4, closed with the build
- * test).
+ * Proves the four acceptance criteria of the update path with no network round
+ * trip. The YahnisElsts Plugin Update Checker is bundled and loads (AC1); the
+ * plugin's own `Update_Checker` points it at this repository's GitHub releases
+ * and constrains it to the release asset selected BY NAME, never positionally,
+ * refusing to fall back to the auto-generated source archive (AC2); the
+ * bootstrap has already hooked the plugin-update transient so an available
+ * update surfaces on the Plugins screen (AC2/AC4); and the name the checker
+ * matches is exactly the filename `build-release-zip.sh` emits, so the in-place
+ * update needs no manual file replacement (AC4, closed with the build test).
  *
  * The asset-name match is the failure surface ADR-0005 flags: if the configured
- * name and the built asset name ever drift, self-update silently breaks. This
- * suite pins the match to a required, by-name selection; `build-release-zip.sh`
- * is pinned to the same literal from the other side by the build test.
+ * name and the built asset name ever drift, self-update silently breaks. Rather
+ * than reflect into the bundled library's protected wiring — which would couple
+ * the test to one library version's internals — the suite feeds the live
+ * checker a canned GitHub "latest release" response through `pre_http_request`
+ * (so no real request leaves the process) and asserts the OBSERVABLE outcome:
+ * the download URL the checker resolves. A release that lists a foreign asset
+ * first and the plugin's own asset second must still resolve to the plugin's
+ * asset (by name, not position, and not the source ZIP); a release carrying no
+ * matching asset must resolve to no update at all.
  *
  * @package Kntnt\Extractor
  * @since   0.1.0
@@ -26,15 +31,6 @@ declare( strict_types = 1 );
 
 use Kntnt\Extractor\Plugin;
 use Kntnt\Extractor\Update_Checker;
-
-// Reads a protected property off a PUC object so the test can inspect the wiring
-// the library exposes no getter for. Scoped to this file.
-$read_prop = static function ( object $object, string $property ): mixed {
-	$reflection = new ReflectionProperty( $object, $property );
-	$reflection->setAccessible( true );
-
-	return $reflection->getValue( $object );
-};
 
 // AC1: the bundled YahnisElsts Plugin Update Checker library is present and
 // loaded — its version-stable factory alias resolves.
@@ -76,23 +72,84 @@ $checker = ( $has_wrapper && class_exists( $puc_factory ) && class_exists( Plugi
 	: null;
 $api = $checker !== null ? $checker->getVcsApi() : null;
 
-// AC2: release assets are enabled, so the update package is the named asset
-// rather than GitHub's auto-generated source ZIP.
-$assets_enabled = $api !== null && $read_prop( $api, 'releaseAssetsEnabled' ) === true;
-kntnt_extractor_assert( $assets_enabled, 'AC2: the checker downloads the named release asset, not the source archive' );
+// Intercept every GitHub API request so the checker resolves against a canned
+// release instead of the network. The handler serves the current $fake_release
+// for the "latest release" endpoint and refuses every other endpoint, so no tag
+// or branch fallback can resolve a source archive behind our back. It also
+// records the requested URL so the test can prove the checker calls its own
+// repository.
+$fake_release = null;
+$requested_url = '';
+$intercept = static function ( $preempt, array $args, string $url ) use ( &$fake_release, &$requested_url ) {
 
-// AC2: the library filters assets by exactly the plugin's own name pattern.
-$filter_regex = $api !== null ? $read_prop( $api, 'assetFilterRegex' ) : null;
-kntnt_extractor_assert( $pattern !== '' && $filter_regex === $pattern, 'AC2: the library filters release assets by the plugin\'s name pattern' );
+	if ( ! str_contains( $url, 'api.github.com' ) ) {
+		return $preempt;
+	}
 
-// AC2: a release without a name-matching asset is rejected, never resolved
-// positionally to whatever asset or source archive happens to be first.
-$require_preference = $api !== null && $read_prop( $api, 'releaseAssetPreference' ) === $api::REQUIRE_RELEASE_ASSETS;
-kntnt_extractor_assert( $require_preference, 'AC2: an absent named asset is refused, never matched positionally' );
+	$requested_url = $url;
+	if ( str_contains( $url, '/releases/latest' ) && $fake_release !== null ) {
+		return [ 'response' => [ 'code' => 200 ], 'body' => (string) wp_json_encode( $fake_release ) ];
+	}
 
-// AC1: the built checker resolves to this plugin's GitHub repository.
-$metadata_url = $checker !== null ? (string) $read_prop( $checker, 'metadataUrl' ) : '';
-kntnt_extractor_assert( str_contains( $metadata_url, 'github.com/Kntnt/kntnt-extractor' ), 'AC1: the built update checker resolves to the plugin\'s GitHub repository' );
+	return [ 'response' => [ 'code' => 404 ], 'body' => '' ];
+
+};
+add_filter( 'pre_http_request', $intercept, 10, 3 );
+
+// AC2: a release whose asset list puts a foreign asset FIRST and the plugin's
+// own asset SECOND must still resolve to the plugin's asset — proving selection
+// is by name, not by position, and not the auto-generated source ZIP whose URL
+// the reference otherwise starts out holding.
+$own_asset_url = 'https://github.com/Kntnt/kntnt-extractor/releases/download/v99.0.0/kntnt-extractor.zip';
+$fake_release = [
+	'tag_name'    => 'v99.0.0',
+	'created_at'  => '2099-01-01T00:00:00Z',
+	'zipball_url' => 'https://api.github.com/repos/Kntnt/kntnt-extractor/zipball/v99.0.0',
+	'assets'      => [
+		[
+			'name'                 => 'some-other-plugin.zip',
+			'url'                  => 'https://api.github.com/repos/Kntnt/kntnt-extractor/releases/assets/1',
+			'browser_download_url' => 'https://github.com/Kntnt/kntnt-extractor/releases/download/v99.0.0/some-other-plugin.zip',
+			'download_count'       => 0,
+		],
+		[
+			'name'                 => 'kntnt-extractor.zip',
+			'url'                  => 'https://api.github.com/repos/Kntnt/kntnt-extractor/releases/assets/2',
+			'browser_download_url' => $own_asset_url,
+			'download_count'       => 3,
+		],
+	],
+];
+$resolved = $api !== null ? $api->chooseReference( 'master' ) : null;
+
+// AC1: the checker resolved against this plugin's own GitHub repository — read
+// off the URL it actually requested, not off any private wiring.
+kntnt_extractor_assert( str_contains( $requested_url, 'Kntnt/kntnt-extractor' ), 'AC1: the built update checker requests this plugin\'s own GitHub repository' );
+
+// AC2: the resolved download URL is the by-name asset, chosen over the foreign
+// asset that came first and over the source ZIP.
+$resolved_url = $resolved !== null ? (string) $resolved->downloadUrl : '';
+kntnt_extractor_assert( $resolved_url === $own_asset_url, 'AC2: the checker resolves the update to the named release asset, by name and not positionally' );
+
+// AC2: a release carrying only a foreign asset — no name match — must resolve to
+// no update at all, never positionally to the first asset or the source ZIP.
+$fake_release = [
+	'tag_name'    => 'v99.0.0',
+	'created_at'  => '2099-01-01T00:00:00Z',
+	'zipball_url' => 'https://api.github.com/repos/Kntnt/kntnt-extractor/zipball/v99.0.0',
+	'assets'      => [
+		[
+			'name'                 => 'some-other-plugin.zip',
+			'url'                  => 'https://api.github.com/repos/Kntnt/kntnt-extractor/releases/assets/1',
+			'browser_download_url' => 'https://github.com/Kntnt/kntnt-extractor/releases/download/v99.0.0/some-other-plugin.zip',
+			'download_count'       => 0,
+		],
+	],
+];
+$resolved_without_asset = $api !== null ? $api->chooseReference( 'master' ) : 'unset';
+kntnt_extractor_assert( $api !== null && $resolved_without_asset === null, 'AC2: a release with no name-matching asset yields no update source' );
+
+remove_filter( 'pre_http_request', $intercept, 10 );
 
 // AC2/AC4: the bootstrap already registered the update checker, so PUC hooks the
 // plugin-update transient and an available update shows on the Plugins screen —

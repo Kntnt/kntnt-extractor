@@ -95,6 +95,9 @@ final class Update_Checker {
 	 * @since 0.1.0
 	 *
 	 * @return object The configured Plugin Update Checker instance.
+	 *
+	 * @throws \RuntimeException When REPOSITORY_URL does not resolve to a GitHub
+	 *                           API, so by-name asset selection cannot be wired.
 	 */
 	public function register(): object {
 
@@ -110,16 +113,23 @@ final class Update_Checker {
 		// Point the checker at this plugin's own GitHub releases.
 		$checker = PucFactory::buildUpdateChecker( self::REPOSITORY_URL, $this->plugin_file, self::SLUG );
 
+		// Resolve the factory's deliberately broad return type to the concrete
+		// GitHub API. The pinned v5p7 references track the bundled library version.
+		$api = $checker instanceof BaseChecker ? $checker->getVcsApi() : null;
+
+		// A non-GitHub API here means REPOSITORY_URL was repointed off github.com
+		// without updating this wiring: by-name asset selection could not be
+		// configured, and the checker would silently fall back to positional or
+		// source-ZIP resolution — the exact self-update break ADR-0005 guards
+		// against. Fail loudly rather than register a quietly broken updater.
+		if ( ! $api instanceof GitHubApi ) {
+			throw new \RuntimeException( esc_html( 'Update_Checker requires a GitHub API for ' . self::REPOSITORY_URL . '; by-name release-asset selection cannot be configured.' ) );
+		}
+
 		// Constrain the GitHub API to the by-name release asset: select the
 		// package by ASSET_NAME, never positionally, and refuse to fall back to
-		// GitHub's auto-generated source ZIP when no matching asset exists. The
-		// instanceof narrowings resolve the factory's deliberately broad return
-		// type to the concrete GitHub API; the pinned v5p7 references track the
-		// bundled library version.
-		$api = $checker instanceof BaseChecker ? $checker->getVcsApi() : null;
-		if ( $api instanceof GitHubApi ) {
-			$api->enableReleaseAssets( self::asset_name_pattern(), GitHubApi::REQUIRE_RELEASE_ASSETS );
-		}
+		// GitHub's auto-generated source ZIP when no matching asset exists.
+		$api->enableReleaseAssets( self::asset_name_pattern(), GitHubApi::REQUIRE_RELEASE_ASSETS );
 
 		self::$checker = $checker;
 
