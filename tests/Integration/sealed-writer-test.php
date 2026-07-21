@@ -206,6 +206,31 @@ $invoke_wipe( $wipe_writer, $wipe_secret );
 $wipe_cleared = $wipe_secret === null || $wipe_secret === '' || ( is_string( $wipe_secret ) && $wipe_secret === str_repeat( "\x00", $wipe_length ) );
 kntnt_extractor_assert( $wipe_started_nonzero && $wipe_cleared, 'The plaintext symmetric key is zeroed after use (AC2)' );
 
+// AC2 bound to the write path. The isolated wipe() check above proves the
+// primitive zeroes a secret, but the key and plaintext add_segment() wipes are
+// locals, and a zeroed local is not observable once the call returns — so
+// nothing above would notice if the two wipe() calls were dropped from
+// add_segment() itself. The suite would stay green while the plaintext key
+// lingered in freed memory: the exact regression AC2 exists to prevent. Since
+// the values cannot be inspected after the fact, bind the criterion to the
+// source instead — require that the fresh symmetric key (drawn from
+// sodium_crypto_secretbox_keygen) and the segment plaintext (read from the
+// stream) are each passed to wipe(). This is deliberately coupled to the
+// inlined write path (ADR-0009 keeps all crypto in this one seam); a refactor
+// that relocates the wipe should re-prove AC2 here rather than pass in silence.
+$add_segment = new ReflectionMethod( Sealed_Writer::class, 'add_segment' );
+$add_segment_lines = file( $add_segment->getFileName() );
+$add_segment_source = implode( '', array_slice(
+	$add_segment_lines,
+	$add_segment->getStartLine() - 1,
+	$add_segment->getEndLine() - $add_segment->getStartLine() + 1,
+) );
+$key_var = preg_match( '/(\$\w+)\s*=\s*sodium_crypto_secretbox_keygen\s*\(/', $add_segment_source, $key_match ) === 1 ? $key_match[1] : null;
+$plaintext_var = preg_match( '/(\$\w+)\s*=\s*stream_get_contents\s*\(/', $add_segment_source, $plaintext_match ) === 1 ? $plaintext_match[1] : null;
+$key_is_wiped = $key_var !== null && preg_match( '/\$this->wipe\(\s*' . preg_quote( $key_var, '/' ) . '\s*\)/', $add_segment_source ) === 1;
+$plaintext_is_wiped = $plaintext_var !== null && preg_match( '/\$this->wipe\(\s*' . preg_quote( $plaintext_var, '/' ) . '\s*\)/', $add_segment_source ) === 1;
+kntnt_extractor_assert( $key_is_wiped && $plaintext_is_wiped, 'add_segment() wipes both the fresh symmetric key and the segment plaintext (AC2 bound to the write path, not just the helper)' );
+
 // The index is sealed: no segment name appears in the clear anywhere in the
 // artifact, yet the private key recovers the exact ordered name list.
 $no_name_leaks = true;
