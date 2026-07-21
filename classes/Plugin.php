@@ -10,6 +10,8 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Kntnt\Extractor\Rest\Status_Controller;
+
 /**
  * Singleton entry point for the Kntnt Extractor plugin.
  *
@@ -85,6 +87,12 @@ final class Plugin {
 	 * @since 0.1.0
 	 */
 	private function __construct() {
+
+		// Register the REST controllers on rest_api_init, the one point where
+		// WordPress guarantees the REST server exists and routes may be added.
+		$status_controller = new Status_Controller();
+		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
+
 	}
 
 }
