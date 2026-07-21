@@ -32,6 +32,21 @@ use RuntimeException;
  * control (ADR-0008). The location is resolved through Config on every call so a
  * runtime override takes effect without reconstructing the store.
  *
+ * The state directory and the served artifact are deliberately kept apart. A job's
+ * on-disk state (job.json — the tick secret and the plaintext table/file selection)
+ * stays in that deny-hardened, unguessably-named per-job directory, which no public
+ * URL ever discloses. The finished artifact, by contrast, must be fetched directly
+ * by the caller (ADR-0004) and so lives in a separate sibling *downloads* directory
+ * that carries no deny and holds sealed artifacts only. That separation is a
+ * security property, not a convenience: the two requirements — serve the artifact
+ * statically on every web server, yet never expose the state — cannot both hold when
+ * the artifact sits beside job.json under a single directory-level deny (which
+ * Apache/IIS apply to the artifact too, while nginx ignores it and would serve
+ * job.json). Keying the download link on the artifact's own random token rather than
+ * the job id means a leaked link reveals nothing that could locate the state, and
+ * the served artifact is safe in the open because it is sealed to the caller's key
+ * (ADR-0009).
+ *
  * @since 0.1.0
  */
 final class Job_Store {
@@ -42,6 +57,17 @@ final class Job_Store {
 	 * @since 0.1.0
 	 */
 	private const string DIR_NAME = 'kntnt-extractor';
+
+	/**
+	 * Suffix appended to the working directory to name the served downloads directory.
+	 *
+	 * The served artifacts live in a sibling of the state working directory, named by
+	 * appending this suffix to the resolved working-directory path, so the two never
+	 * share a directory yet a `work_dir` override still moves both together.
+	 *
+	 * @since 0.1.0
+	 */
+	private const string DOWNLOADS_SUFFIX = '-downloads';
 
 	/**
 	 * Basename of the per-job state file inside each job's directory.
@@ -90,11 +116,14 @@ final class Job_Store {
 	 */
 	public function create( int $owner, string $public_key, array $tables, array $files ): Extraction_Job {
 
-		// Resolve and harden the working directory, then mint an unguessable id and
-		// build the queued record. The id doubles as the job's directory name; the
-		// tick secret authenticates the internal driver, and the artifact filename is
-		// its own unguessable token so the download path is not merely the job id.
+		// Resolve and harden the working directory, and lay down the separate served
+		// downloads directory the ready artifact will be fetched from, then mint an
+		// unguessable id and build the queued record. The id doubles as the job's
+		// state directory name; the tick secret authenticates the internal driver, and
+		// the artifact filename is its own unguessable token so the public download
+		// path is keyed on the artifact, never on the job id.
 		$base = $this->ensure_base();
+		$this->ensure_downloads();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
 		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
@@ -205,14 +234,21 @@ final class Job_Store {
 	/**
 	 * Returns the absolute path the job's sealed artifact is written to and served from.
 	 *
+	 * The artifact lives in the served downloads directory, not the deny-hardened
+	 * state directory: it is meant to be fetched directly (ADR-0004) and is safe in
+	 * the open because it is sealed to the caller's key (ADR-0009), whereas the state
+	 * beside it must never be web-reachable. Its filename is the job's own unguessable
+	 * artifact token, so the flat downloads directory needs no per-job subdirectory and
+	 * the public path discloses no job id.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job whose artifact path to resolve.
-	 * @return string Absolute path to the artifact inside the job's directory.
+	 * @return string Absolute path to the artifact inside the served downloads directory.
 	 */
 	public function artifact_path( Extraction_Job $job ): string {
 
-		return $this->base_path() . '/' . $job->id . '/' . $job->artifact;
+		return $this->downloads_path() . '/' . $job->artifact;
 
 	}
 
@@ -221,9 +257,12 @@ final class Job_Store {
 	 *
 	 * The artifact is a static file the web server serves directly (ADR-0004): safe
 	 * to expose because it is sealed to the caller's key (ADR-0009), so this maps its
-	 * on-disk path under the uploads directory to the matching public URL. It returns
-	 * null for a job that is not yet ready, and for the outside-docroot override where
-	 * the working directory is deliberately not web-reachable and has no static URL.
+	 * on-disk path in the served downloads directory to the matching public URL. That
+	 * URL is keyed on the artifact's own unguessable token and carries no job id, so a
+	 * leaked link discloses nothing that could locate the deny-hardened state directory
+	 * (job.json, the tick secret, the plaintext selection) beside it. It returns null
+	 * for a job that is not yet ready, and for the outside-docroot override where the
+	 * downloads directory is deliberately not web-reachable and has no static URL.
 	 *
 	 * @since 0.1.0
 	 *
@@ -238,7 +277,7 @@ final class Job_Store {
 		}
 
 		// Map the artifact's path to a URL only while it lives under the web-reachable
-		// uploads directory; an outside-docroot working directory has no static URL.
+		// uploads directory; an outside-docroot downloads directory has no static URL.
 		$uploads = wp_upload_dir();
 		$basedir = rtrim( is_string( $uploads['basedir'] ?? null ) ? $uploads['basedir'] : '', '/' );
 		$baseurl = rtrim( is_string( $uploads['baseurl'] ?? null ) ? $uploads['baseurl'] : '', '/' );
@@ -276,6 +315,26 @@ final class Job_Store {
 	}
 
 	/**
+	 * Resolves the served downloads directory's path without creating anything.
+	 *
+	 * This is the state working directory's sibling — derived from the same resolved
+	 * location, so a `work_dir` override moves both together — under a distinct name so
+	 * a served artifact and a job's state never share a directory (ADR-0004/0008/0009).
+	 * Under the default it sits beside the state directory in the uploads folder and is
+	 * web-reachable; under an outside-docroot override it is not, and a ready job then
+	 * has no static download URL.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return string Absolute path to the served downloads directory, without a trailing slash.
+	 */
+	private function downloads_path(): string {
+
+		return $this->base_path() . self::DOWNLOADS_SUFFIX;
+
+	}
+
+	/**
 	 * Resolves the working directory, creating and hardening it when needed.
 	 *
 	 * @since 0.1.0
@@ -296,6 +355,35 @@ final class Job_Store {
 		$this->write_if_absent( $base . '/web.config', $this->web_config_deny() );
 
 		return $base;
+
+	}
+
+	/**
+	 * Resolves the served downloads directory, creating and softening it when needed.
+	 *
+	 * Unlike the state directory, this one is meant to be served: it gets an index.html
+	 * to silence directory listing but deliberately NO .htaccess/web.config deny, so the
+	 * sealed artifact it holds is fetched directly on Apache, IIS and nginx alike
+	 * (ADR-0004). That is safe because every artifact here is sealed to the caller's key
+	 * (ADR-0009) and no job state ever shares this directory. Creation is idempotent, so
+	 * a warm directory costs only the existence checks.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return string Absolute path to the ensured served downloads directory.
+	 */
+	private function ensure_downloads(): string {
+
+		// Create the served directory on first use and silence listing; never write a
+		// deny here — the artifact is meant to be served, and the deny lives only on the
+		// state directory that must not be.
+		$downloads = $this->downloads_path();
+		if ( ! is_dir( $downloads ) ) {
+			wp_mkdir_p( $downloads );
+		}
+		$this->write_if_absent( $downloads . '/index.html', $this->silence() );
+
+		return $downloads;
 
 	}
 

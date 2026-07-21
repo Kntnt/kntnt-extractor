@@ -12,6 +12,7 @@ namespace Kntnt\Extractor;
 
 use Kntnt\Extractor\Crypto\Sealed_Writer;
 use RuntimeException;
+use Throwable;
 
 /**
  * Packages a job's selection into one sealed, per-segment-encrypted artifact.
@@ -48,15 +49,25 @@ final class Artifact_Builder {
 	 * open the result. The write is encrypt-as-you-go: each table dump and each file
 	 * is sealed and appended in turn, and the container is finalized once.
 	 *
+	 * The container is built into a private temporary file and published into place
+	 * with a single atomic rename. The extraction driver is deliberately lock-free
+	 * (ADR-0007), so two ticks can briefly race the same job; building to a temp file
+	 * and renaming means such a race can only ever replace one complete artifact with
+	 * another complete one, never leave the served path holding a half-written,
+	 * truncated container a ready poll would hand out. A build that fails removes its
+	 * temporary file rather than leaving a partial one behind in the served directory.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job              The running job whose selection to seal.
-	 * @param string         $destination_path Absolute path the sealed container is written to.
+	 * @param string         $destination_path Absolute path the sealed container is published to.
 	 * @return void
 	 *
 	 * @throws RuntimeException When the job's public key is undecodable, a requested
 	 *                          file resolves outside the root or cannot be opened, or
-	 *                          the container cannot be written.
+	 *                          the container cannot be written or published.
+	 * @throws Throwable        Re-raised after a failed build removes its partial temp
+	 *                          artifact, so the driver can move the job to failed.
 	 */
 	public function build( Extraction_Job $job, string $destination_path ): void {
 
@@ -67,17 +78,41 @@ final class Artifact_Builder {
 			throw new RuntimeException( 'The job public key is not decodable base64.' );
 		}
 
-		// Seal the selection in order — every table as a SQL segment, then every file
-		// as its own segment — and close the container exactly once.
-		$writer = new Sealed_Writer( $destination_path );
-		$writer->open( $public_key );
-		foreach ( $job->tables as $table ) {
-			$writer->add_segment( $table, $this->sql_stream( $this->dumper->dump( $table ) ) );
+		// Build into a private temp file beside the destination so the rename below is a
+		// same-directory, atomic swap; a random suffix keeps two racing builds from
+		// sharing a temp path.
+		$temp_path = $destination_path . '.' . bin2hex( random_bytes( 8 ) ) . '.part';
+
+		try {
+
+			// Seal the selection in order — every table as a SQL segment, then every file
+			// as its own segment — and close the container exactly once.
+			$writer = new Sealed_Writer( $temp_path );
+			$writer->open( $public_key );
+			foreach ( $job->tables as $table ) {
+				$writer->add_segment( $table, $this->sql_stream( $this->dumper->dump( $table ) ) );
+			}
+			foreach ( $job->files as $file ) {
+				$writer->add_segment( $file, $this->file_stream( $file ) );
+			}
+			$writer->finalize();
+
+			// Publish the finished container in one atomic rename, so the served path is
+			// never observed mid-write.
+			if ( ! rename( $temp_path, $destination_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic same-directory publish of the plugin's own sealed artifact; WP_Filesystem::move offers no atomicity guarantee.
+				throw new RuntimeException( 'Unable to publish the sealed artifact into place.' );
+			}
+
+		} catch ( Throwable $error ) {
+
+			// Never leave a partial temp file behind in the served directory; drop it and
+			// re-raise so the driver can move the job to failed.
+			if ( is_file( $temp_path ) ) {
+				unlink( $temp_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own abandoned temp artifact from its scratch area.
+			}
+			throw $error;
+
 		}
-		foreach ( $job->files as $file ) {
-			$writer->add_segment( $file, $this->file_stream( $file ) );
-		}
-		$writer->finalize();
 
 	}
 

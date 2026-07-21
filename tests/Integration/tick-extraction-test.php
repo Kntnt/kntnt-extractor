@@ -10,13 +10,16 @@
  *  - AC1: an internal tick endpoint authenticated by a per-job secret advances
  *    the job, and an outsider without the secret — even a capable owner — cannot
  *    drive it, while an anonymous caller holding the secret can.
- *  - AC2: ticking a queued small-table selection dumps each table as a sealed
- *    segment and drives it queued -> running -> ready (the running state is
- *    observed mid-tick through the job's lifecycle action).
+ *  - AC2: ticking a queued small-table selection dumps each table (a two-table
+ *    selection, so "each" means more than the first) as a sealed segment and
+ *    drives it queued -> running -> ready (the running state is observed mid-tick
+ *    through the job's lifecycle action).
  *  - AC3: each table segment is mysqldump-compatible SQL (DROP TABLE / CREATE
- *    TABLE / INSERT INTO).
- *  - AC4: a ready poll returns a download_url to a static file under the
- *    web-reachable uploads directory at an unguessable path.
+ *    TABLE / INSERT INTO), asserted for both selected tables.
+ *  - AC4: a ready poll returns a download_url a web server serves directly — no
+ *    deny-all rule governs the artifact's path — at an unguessable per-artifact
+ *    path that discloses no job id, and beside which no job.json sits, so the
+ *    state file is neither served nor derivable from a leaked link.
  *  - AC5: a self-generated X25519 keypair round-trips — the submitted public key
  *    seals the artifact, and the matching private key recovers the table data.
  *  - AC6: the persisted job state holds no key able to open the artifact.
@@ -195,10 +198,12 @@ $keypair = sodium_crypto_box_keypair();
 $public_key = sodium_crypto_box_publickey( $keypair );
 $secret_key = sodium_crypto_box_secretkey( $keypair );
 
-// The selection: the options table (whose marker row must round-trip) and the
-// bootstrap file (proving a file segment round-trips too).
+// The selection: two tables — the options table (whose marker row must round-trip)
+// and the users table — so "dump each table as a sealed segment" is exercised with a
+// plurality, not just a single table; plus the bootstrap file (proving a file segment
+// round-trips too).
 $selection = [
-	'tables' => [ $wpdb->options ],
+	'tables' => [ $wpdb->options, $wpdb->users ],
 	'files' => [ 'wp-load.php' ],
 	'public_key' => base64_encode( $public_key ),
 ];
@@ -219,6 +224,11 @@ $state_path = $work . '/' . $id . '/job.json';
 $state = is_file( $state_path ) ? json_decode( (string) file_get_contents( $state_path ), true ) : null;
 $tick_secret = is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
 kntnt_extractor_assert( $tick_secret !== '', 'The job persists a non-empty per-job tick secret' );
+
+// The artifact's own unguessable filename, which the public download link is keyed
+// on — never the job id — so a leaked link cannot locate the state directory.
+$artifact_name = is_array( $state ) && is_string( $state['artifact'] ?? null ) ? $state['artifact'] : '';
+kntnt_extractor_assert( $artifact_name !== '' && $artifact_name !== $id, 'The job persists an artifact token distinct from its id' );
 
 // A queued poll reports no download_url yet: the artifact does not exist until the
 // job is ready.
@@ -264,42 +274,85 @@ wp_set_current_user( $owner->ID );
 $ready_poll = $get_extraction( $id )->get_data();
 kntnt_extractor_assert( is_array( $ready_poll ) && ( $ready_poll['state'] ?? null ) === 'ready', 'After the tick the job is ready (AC2)' );
 
-// --- AC4: a ready poll returns a download_url to a static, unguessable path ---
+// --- AC4: a ready poll returns a download_url a web server serves directly ---
 
 $download_url = is_array( $ready_poll ) && is_string( $ready_poll['download_url'] ?? null ) ? $ready_poll['download_url'] : '';
 $uploads = wp_upload_dir();
-kntnt_extractor_assert( $download_url !== '' && str_starts_with( $download_url, rtrim( $uploads['baseurl'], '/' ) ), 'A ready poll returns a download_url under the uploads base URL (AC4)' );
-kntnt_extractor_assert( str_contains( $download_url, $id ), 'The download_url sits at an unguessable, per-job path (AC4)' );
+$baseurl = rtrim( $uploads['baseurl'], '/' );
+$basedir = rtrim( $uploads['basedir'], '/' );
+kntnt_extractor_assert( $download_url !== '' && str_starts_with( $download_url, $baseurl ), 'A ready poll returns a download_url under the uploads base URL (AC4)' );
 
-// The download_url maps back to the on-disk artifact the web server would serve
-// directly; resolve it and confirm the sealed container is really there.
-$artifact_path = rtrim( $uploads['basedir'], '/' ) . substr( $download_url, strlen( rtrim( $uploads['baseurl'], '/' ) ) );
+// The link is unguessable through the artifact's own random token, and it discloses
+// the job id NOWHERE: the state directory (job.json — the tick secret and the
+// plaintext selection) is named by that id, so a leaked link must not reveal it, or
+// job.json would be a derivable sibling fetch (ADR-0008/0009).
+kntnt_extractor_assert( str_contains( $download_url, $artifact_name ), 'The download_url is keyed on the unguessable artifact token (AC4)' );
+kntnt_extractor_assert( ! str_contains( $download_url, $id ), 'The download_url discloses no job id, so job.json is not derivable from a leaked link (AC4)' );
+
+// The download_url maps back to the on-disk artifact the web server serves directly.
+$artifact_path = $basedir . substr( $download_url, strlen( $baseurl ) );
 kntnt_extractor_assert( is_file( $artifact_path ), 'The download_url resolves to an existing static artifact file (AC4)' );
 $raw = is_file( $artifact_path ) ? (string) file_get_contents( $artifact_path ) : '';
 kntnt_extractor_assert( str_starts_with( $raw, Sealed_Writer::MAGIC ), 'The served artifact is a sealed container (AC4)' );
 
+// "Serves directly" is the actual criterion, not merely "exists on disk". Playground
+// runs no real web server, so stand in for one: walk the artifact's directory ancestry
+// up to the uploads root and prove no deny-all .htaccess/web.config governs it — the
+// exact rule that would make Apache or IIS answer a direct GET with 403. Without this
+// the earlier build shipped the artifact inside the state tree's recursive deny, and a
+// disk-read assertion sailed straight past it.
+$governing_deny = static function ( string $path, string $stop_at ): bool {
+	$stop_at = rtrim( $stop_at, '/' );
+	$dir = dirname( $path );
+	while ( str_starts_with( $dir . '/', $stop_at . '/' ) ) {
+		$htaccess = is_file( $dir . '/.htaccess' ) ? (string) file_get_contents( $dir . '/.htaccess' ) : '';
+		$webconfig = is_file( $dir . '/web.config' ) ? (string) file_get_contents( $dir . '/web.config' ) : '';
+		if ( str_contains( $htaccess, 'Require all denied' ) || str_contains( $htaccess, 'Deny from all' ) || str_contains( $webconfig, 'deny users' ) ) {
+			return true;
+		}
+		if ( $dir === $stop_at ) {
+			break;
+		}
+		$dir = dirname( $dir );
+	}
+	return false;
+};
+kntnt_extractor_assert( ! $governing_deny( $artifact_path, $basedir ), 'No deny-all rule governs the artifact path, so a web server serves it directly (AC4)' );
+kntnt_extractor_assert( $governing_deny( $state_path, $basedir ), 'The job state directory IS deny-governed (AC4 positive control: the servability check detects a deny)' );
+
+// The served directory holds sealed artifacts only: job.json never sits beside the
+// public link, so no sibling fetch derived from the download_url reaches the tick
+// secret or the plaintext selection, on any web server (ADR-0008/0009).
+kntnt_extractor_assert( ! is_file( dirname( $artifact_path ) . '/job.json' ), 'The served artifact directory contains no job.json (AC4)' );
+
 // --- AC2/AC5: the container holds one sealed segment per selected resource ---
 
+// Two tables plus one file: three segments, one per resource, proving "each table"
+// with a plurality rather than a single-table shortcut that could only ever emit the
+// first table.
 $container = $parse( $raw );
-kntnt_extractor_assert( $container['header_ok'] && count( $container['records'] ) === 2, 'The artifact holds one sealed segment per selected table and file (AC2)' );
+kntnt_extractor_assert( $container['header_ok'] && count( $container['records'] ) === 3, 'The artifact holds one sealed segment per selected table and file — each of the two tables, not just the first (AC2)' );
 
 $names = $open_index( $container['sealed_index'], $keypair );
-kntnt_extractor_assert( $names === [ $wpdb->options, 'wp-load.php' ], 'The sealed index recovers the selected names in order, with the private key (AC5)' );
+kntnt_extractor_assert( $names === [ $wpdb->options, $wpdb->users, 'wp-load.php' ], 'The sealed index recovers every selected name in table-then-file order, with the private key (AC2/AC5)' );
 
 // --- AC5: the caller's private key round-trips the actual data ---
 
-$table_sql = $open_segment( $container['records'][0], $keypair );
-$file_bytes = $open_segment( $container['records'][1], $keypair );
-kntnt_extractor_assert( is_string( $table_sql ) && str_contains( $table_sql, $marker ), 'The unsealed table dump round-trips the seeded marker row (AC5)' );
+$options_sql = $open_segment( $container['records'][0], $keypair );
+$users_sql = $open_segment( $container['records'][1], $keypair );
+$file_bytes = $open_segment( $container['records'][2], $keypair );
+kntnt_extractor_assert( is_string( $options_sql ) && str_contains( $options_sql, $marker ), 'The unsealed options dump round-trips the seeded marker row (AC5)' );
 kntnt_extractor_assert( is_string( $file_bytes ) && $file_bytes === (string) file_get_contents( ABSPATH . 'wp-load.php' ), 'The unsealed file segment round-trips the file byte-for-byte (AC5)' );
 
-// --- AC3: the table dump is mysqldump-compatible SQL ---
+// --- AC3: EACH table dump is mysqldump-compatible SQL ---
 
-$is_mysqldump = is_string( $table_sql )
-	&& str_contains( $table_sql, 'DROP TABLE IF EXISTS `' . $wpdb->options . '`' )
-	&& str_contains( $table_sql, 'CREATE TABLE `' . $wpdb->options . '`' )
-	&& str_contains( $table_sql, 'INSERT INTO `' . $wpdb->options . '`' );
-kntnt_extractor_assert( $is_mysqldump, 'The table dump is mysqldump-compatible SQL: DROP TABLE, CREATE TABLE, INSERT INTO (AC3)' );
+// Assert the shape against both tables, not just the marker-bearing one, so a dumper
+// that only ever emitted the first table would be caught here.
+$is_mysqldump = static fn( string|false $sql, string $table ): bool => is_string( $sql )
+	&& str_contains( $sql, 'DROP TABLE IF EXISTS `' . $table . '`' )
+	&& str_contains( $sql, 'CREATE TABLE `' . $table . '`' )
+	&& str_contains( $sql, 'INSERT INTO `' . $table . '`' );
+kntnt_extractor_assert( $is_mysqldump( $options_sql, $wpdb->options ) && $is_mysqldump( $users_sql, $wpdb->users ), 'Each table dumps as mysqldump-compatible SQL: DROP TABLE, CREATE TABLE, INSERT INTO (AC3)' );
 
 // --- AC6: the server's job state holds no key able to open the artifact ---
 
@@ -319,7 +372,7 @@ foreach ( array_merge( [ $secret_key ], $symmetric_keys ) as $secret ) {
 		$leaks = true;
 	}
 }
-kntnt_extractor_assert( count( $symmetric_keys ) === 2 && ! $leaks, 'The persisted job state holds no key able to open the artifact (AC6)' );
+kntnt_extractor_assert( count( $symmetric_keys ) === 3 && ! $leaks, 'The persisted job state holds no key able to open the artifact (AC6)' );
 kntnt_extractor_assert( str_contains( $state_raw, base64_encode( $public_key ) ), 'The key-leak scan is genuine: the harmless public key IS present in the job state (AC6 positive control)' );
 
 // --- AC7: a status poll opportunistically nudges an untended job, never a tended one ---
@@ -388,4 +441,5 @@ remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
 delete_option( 'kntnt_extractor_roundtrip_marker' );
 $rmrf( $work );
+$rmrf( $work . '-downloads' );
 wp_set_current_user( 0 );

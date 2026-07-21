@@ -113,8 +113,10 @@ kntnt_extractor_assert( is_file( $default_base . '/index.html' ) && is_file( $de
 kntnt_extractor_assert( is_file( $default_base . '/' . $default_id . '/index.html' ), 'The per-job directory carries its own index.html' );
 
 // Reset the default location so its lone job cannot count against the isolated
-// concurrency checks that follow.
+// concurrency checks that follow. The served artifacts live in a sibling downloads
+// directory, so clear that too and leave the uploads folder as it was found.
 $rmrf( $default_base );
+$rmrf( $default_base . '-downloads' );
 
 // --- AC6: KNTNT_EXTRACTOR_WORK_DIR redirects the working directory ---
 
@@ -191,7 +193,8 @@ kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 201
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 429, 'The raised limit still refuses the job past the ceiling (429)' );
 remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 
-// Leave the suite state clean for later files.
+// Leave the suite state clean for later files, including the served downloads sibling.
 $rmrf( $work );
+$rmrf( $work . '-downloads' );
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
 wp_set_current_user( 0 );
