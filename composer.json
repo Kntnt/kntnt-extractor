@@ -37,11 +37,13 @@
         "phpstan": "phpstan analyse --memory-limit=1G",
         "test:integration": "bash tests/Integration/run.sh",
         "test:integration:mysql": "bash tests/Integration/DDEV/run.sh",
+        "test:build": "bash tests/Build/build-release-zip-test.sh",
         "test": "@test:integration",
         "gate": [
             "@phpcs",
             "@phpstan",
-            "@test:integration"
+            "@test:integration",
+            "@test:build"
         ]
     },
     "minimum-stability": "stable",
