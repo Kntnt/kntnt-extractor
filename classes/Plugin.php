@@ -100,11 +100,14 @@ final class Plugin {
 		// jobs as state files under the working directory (ADR-0004/0008). The
 		// Dispatcher drives a queued job to a sealed artifact through the
 		// Artifact_Builder and its Table_Dumper, one secret-authenticated tick at a
-		// time (ADR-0007/0009).
+		// time (ADR-0007/0009). The Sweeper is the TTL backstop that reclaims a
+		// never-consumed job (ADR-0004); it answers the recurring cron event the
+		// Installer schedules against Sweeper::SWEEP_HOOK.
 		$authorizer = new Authorizer();
 		$config = new Config();
 		$job_store = new Job_Store( $config );
 		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper() ) );
+		$sweeper = new Sweeper( $job_store, $config );
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
 		$files_controller = new Files_Controller( $authorizer, $config );
@@ -113,6 +116,7 @@ final class Plugin {
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
+		add_action( Sweeper::SWEEP_HOOK, $sweeper->run( ... ) );
 
 	}
 

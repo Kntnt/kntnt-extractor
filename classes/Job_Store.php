@@ -175,12 +175,49 @@ final class Job_Store {
 	}
 
 	/**
+	 * Loads every readable job in the working directory.
+	 *
+	 * The walk considers only id-shaped subdirectories, so the hardening files and
+	 * any stray entry are ignored, and a record that no longer reconstructs is
+	 * treated as absent rather than surfaced. This is the single enumeration the
+	 * concurrency count and the TTL sweep (ADR-0004) both read the live job set
+	 * through, so "which jobs exist" is answered in exactly one place.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return array<int, Extraction_Job> Every readable job, in scandir order.
+	 */
+	public function all(): array {
+
+		// Nothing exists before the working directory has ever been created.
+		$base = $this->base_path();
+		if ( ! is_dir( $base ) ) {
+			return [];
+		}
+
+		// Reconstruct every id-shaped directory's job, skipping any entry that is not a
+		// job directory and any record that no longer reads as a valid job.
+		$entries = scandir( $base );
+		$jobs = [];
+		foreach ( $entries === false ? [] : $entries as $entry ) {
+			if ( preg_match( self::ID_PATTERN, $entry ) !== 1 ) {
+				continue;
+			}
+			$job = $this->find( $entry );
+			if ( $job !== null ) {
+				$jobs[] = $job;
+			}
+		}
+
+		return $jobs;
+
+	}
+
+	/**
 	 * Counts the jobs that still occupy the global concurrency slot.
 	 *
 	 * A job is active while its state is non-terminal (queued, running, or ready
 	 * with an unconsumed artifact); a terminal job is finished and does not count.
-	 * The walk considers only id-shaped subdirectories, so the hardening files and
-	 * any stray entry are ignored, and an unreadable record is treated as absent.
 	 *
 	 * @since 0.1.0
 	 *
@@ -188,26 +225,7 @@ final class Job_Store {
 	 */
 	public function count_active(): int {
 
-		// Nothing is active before the working directory has ever been created.
-		$base = $this->base_path();
-		if ( ! is_dir( $base ) ) {
-			return 0;
-		}
-
-		// Tally every id-shaped directory whose readable job is still non-terminal.
-		$entries = scandir( $base );
-		$active = 0;
-		foreach ( $entries === false ? [] : $entries as $entry ) {
-			if ( preg_match( self::ID_PATTERN, $entry ) !== 1 ) {
-				continue;
-			}
-			$job = $this->find( $entry );
-			if ( $job !== null && ! $job->state->is_terminal() ) {
-				++$active;
-			}
-		}
-
-		return $active;
+		return count( array_filter( $this->all(), static fn( Extraction_Job $job ): bool => ! $job->state->is_terminal() ) );
 
 	}
 
@@ -228,6 +246,33 @@ final class Job_Store {
 	public function save( Extraction_Job $job ): void {
 
 		$this->persist( $job, $this->base_path() . '/' . $job->id . '/' . self::STATE_FILE );
+
+	}
+
+	/**
+	 * Deletes a job's artifact and its own working directory, scoped strictly to it.
+	 *
+	 * This is the single irreversible cleanup that consume, cancel, and the TTL sweep
+	 * (ADR-0004) all reach the disk through. Exactly two things are removed and nothing
+	 * else: the job's sealed artifact in the served downloads directory, and the job's
+	 * own id-named state directory under the working directory. Every deletion is pinned
+	 * to this one job — the artifact by its own unguessable token, the directory by its
+	 * id-shaped name — and refuses to act on anything that resolves outside those two
+	 * locations, so a `KNTNT_EXTRACTOR_WORK_DIR` relocation is honoured yet the delete
+	 * can never escape to the shared working directory or beyond. A job cancelled before
+	 * it ever reached ready simply has no artifact to remove. The audit record lives in
+	 * its own file written earlier at the ready state (ADR-0006), so removing the job
+	 * here never touches it.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose artifact and working directory to remove.
+	 * @return void
+	 */
+	public function purge( Extraction_Job $job ): void {
+
+		$this->delete_artifact( $job );
+		$this->delete_work_dir( $job );
 
 	}
 
@@ -287,6 +332,106 @@ final class Job_Store {
 		}
 
 		return $baseurl . substr( $path, strlen( $basedir ) );
+
+	}
+
+	/**
+	 * Removes a job's sealed artifact from the served downloads directory.
+	 *
+	 * The artifact token names a single flat file in the downloads directory, and this
+	 * touches nothing else: the path is resolved and re-checked to sit directly under
+	 * the served directory before it is unlinked, so a token carrying a separator or a
+	 * traversal — a hand-edited record — resolves outside and is skipped rather than
+	 * followed. A job with no artifact yet is simply nothing to remove.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose artifact to remove.
+	 * @return void
+	 */
+	private function delete_artifact( Extraction_Job $job ): void {
+
+		// A null byte can never belong to a real filename and would make realpath raise
+		// a ValueError; treat such a token as nothing to remove.
+		if ( str_contains( $job->artifact, "\0" ) ) {
+			return;
+		}
+
+		// Unlink the artifact only when it resolves to a real file genuinely inside the
+		// served directory — never a path that escapes it.
+		$downloads = realpath( $this->downloads_path() );
+		$artifact = realpath( $this->downloads_path() . '/' . $job->artifact );
+		if ( $downloads !== false && $artifact !== false && str_starts_with( $artifact, $downloads . '/' ) && is_file( $artifact ) ) {
+			unlink( $artifact ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own sealed artifact from its scratch area on consume/cancel/sweep.
+		}
+
+	}
+
+	/**
+	 * Removes a job's own id-named state directory, and nothing above it.
+	 *
+	 * The directory name must match the id pattern before it is ever joined to a path,
+	 * so a malformed id can never climb out of the working directory; the recursive
+	 * removal is then bounded to stay strictly beneath the working directory and never
+	 * follows a symlink out of it.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose state directory to remove.
+	 * @return void
+	 */
+	private function delete_work_dir( Extraction_Job $job ): void {
+
+		// Only an id-shaped name reaches a path, pinning the deletion to this one job's
+		// directory rather than the shared working directory that holds it.
+		if ( preg_match( self::ID_PATTERN, $job->id ) !== 1 ) {
+			return;
+		}
+
+		$this->delete_tree( $this->base_path() . '/' . $job->id, $this->base_path() );
+
+	}
+
+	/**
+	 * Recursively removes a directory, bounded to stay strictly under a trusted root.
+	 *
+	 * Every level re-resolves the directory and refuses to act unless it sits strictly
+	 * beneath the boundary, and it unlinks a symlink rather than descending through it,
+	 * so this irreversible walk can never escape the job's own directory even if a
+	 * hostile entry were planted inside it. A path that is not a real directory is
+	 * simply nothing to remove.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param string $dir      Absolute path of the directory to remove.
+	 * @param string $boundary Absolute path the removal must stay strictly beneath.
+	 * @return void
+	 */
+	private function delete_tree( string $dir, string $boundary ): void {
+
+		// Refuse to touch anything that is not a real directory strictly beneath the
+		// boundary, so the walk can never climb above the job's own directory.
+		$target = realpath( $dir );
+		$root = realpath( $boundary );
+		if ( $target === false || $root === false || ! str_starts_with( $target, $root . '/' ) ) {
+			return;
+		}
+
+		// Remove every child — descending only into a real subdirectory, never through a
+		// symlink — then drop the now-empty directory itself.
+		$entries = scandir( $target );
+		foreach ( $entries === false ? [] : $entries as $entry ) {
+			if ( $entry === '.' || $entry === '..' ) {
+				continue;
+			}
+			$path = $target . '/' . $entry;
+			if ( is_dir( $path ) && ! is_link( $path ) ) {
+				$this->delete_tree( $path, $root );
+			} else {
+				unlink( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing an entry from the plugin's own job directory during cleanup.
+			}
+		}
+		rmdir( $target ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- removing the plugin's own emptied job directory during cleanup.
 
 	}
 

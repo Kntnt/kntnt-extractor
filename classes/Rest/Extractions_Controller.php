@@ -13,6 +13,8 @@ namespace Kntnt\Extractor\Rest;
 use Kntnt\Extractor\Authorizer;
 use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Dispatcher;
+use Kntnt\Extractor\Extraction_Job;
+use Kntnt\Extractor\Job_State;
 use Kntnt\Extractor\Job_Store;
 use WP_Error;
 use WP_REST_Request;
@@ -20,8 +22,9 @@ use WP_REST_Response;
 use WP_REST_Server;
 
 /**
- * Registers and answers `POST /extractions`, `GET /extractions/{id}`, and the
- * internal `POST /extractions/{id}/tick`.
+ * Registers and answers `POST /extractions`, `GET /extractions/{id}`,
+ * `POST /extractions/{id}/consume`, `DELETE /extractions/{id}`, and the internal
+ * `POST /extractions/{id}/tick`.
  *
  * `POST /extractions` turns an already-resolved selection of tables and/or files,
  * plus the caller's ephemeral X25519 public key, into a queued Extraction job
@@ -32,6 +35,16 @@ use WP_REST_Server;
  * internal driver endpoint: authenticated by the job's own secret rather than by a
  * capability, so the loopback loop can advance the job without a session (ADR-0007),
  * it is the one route here that is not behind the capability gate.
+ *
+ * The last two routes end a job's life (ADR-0004). `POST /extractions/{id}/consume`
+ * is the caller's confirmation that it fetched and unsealed a ready artifact: the
+ * server deletes the artifact and the job's working directory and reports the job
+ * consumed, refusing any job that is not ready with a 409. `DELETE /extractions/{id}`
+ * is the caller's abort — it cleans up a job in any state without writing an audit
+ * record, since the audit log is filed only when a job reaches ready, never here.
+ * Both bind to the owner: existence is decided before ownership, so a capable
+ * non-owner is refused 403 without ever learning a job's state, and an unknown id is
+ * a 404.
  *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
@@ -81,8 +94,11 @@ final class Extractions_Controller {
 	 *
 	 * The create route's permission callback runs the whole existence-and-key
 	 * validation before the capability check, which is what lets a 404 or 400
-	 * precede the 403 (ADR-0003). The poll route captures a 32-hex id straight
-	 * from the path, so a malformed id never matches and never reaches the store.
+	 * precede the 403 (ADR-0003). The id-addressed routes capture a 32-hex id
+	 * straight from the path, so a malformed id never matches and never reaches the
+	 * store. Poll and cancel share one route path — a `GET` reads the job, a `DELETE`
+	 * cancels it — behind the same capability gate, with the per-job ownership binding
+	 * layered on inside each callback.
 	 *
 	 * @since 0.1.0
 	 *
@@ -104,8 +120,25 @@ final class Extractions_Controller {
 			Status_Controller::REST_NAMESPACE,
 			'/extractions/(?P<id>[a-f0-9]{32})',
 			[
-				'methods' => WP_REST_Server::READABLE,
-				'callback' => $this->poll( ... ),
+				[
+					'methods' => WP_REST_Server::READABLE,
+					'callback' => $this->poll( ... ),
+					'permission_callback' => $this->authorizer->authorize( ... ),
+				],
+				[
+					'methods' => WP_REST_Server::DELETABLE,
+					'callback' => $this->cancel( ... ),
+					'permission_callback' => $this->authorizer->authorize( ... ),
+				],
+			],
+		);
+
+		register_rest_route(
+			Status_Controller::REST_NAMESPACE,
+			'/extractions/(?P<id>[a-f0-9]{32})/consume',
+			[
+				'methods' => WP_REST_Server::CREATABLE,
+				'callback' => $this->consume( ... ),
 				'permission_callback' => $this->authorizer->authorize( ... ),
 			],
 		);
@@ -217,25 +250,10 @@ final class Extractions_Controller {
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
-		// Resolve the id to a job; an id naming no readable job is a 404.
-		$raw_id = $request->get_param( 'id' );
-		$job = $this->store->find( is_string( $raw_id ) ? $raw_id : '' );
-		if ( $job === null ) {
-			return new WP_Error(
-				'kntnt_extractor_no_such_job',
-				__( 'No such extraction job.', 'kntnt-extractor' ),
-				[ 'status' => 404 ],
-			);
-		}
-
-		// Bind the job to its creator: a caller who is not the owner is refused,
-		// even though the capability gate already admitted them.
-		if ( $job->owner !== get_current_user_id() ) {
-			return new WP_Error(
-				'kntnt_extractor_forbidden',
-				__( 'This extraction job belongs to another user.', 'kntnt-extractor' ),
-				[ 'status' => 403 ],
-			);
+		// Resolve the caller's own job; an unknown id is a 404 and a non-owner a 403.
+		$job = $this->resolve_owned_job( $request );
+		if ( is_wp_error( $job ) ) {
+			return $job;
 		}
 
 		// Opportunistically restart a queued or stalled job's loopback, but never one
@@ -249,6 +267,88 @@ final class Extractions_Controller {
 				'id' => $job->id,
 				'state' => $job->state->value,
 				'download_url' => $this->store->download_url( $job ),
+			],
+		);
+
+	}
+
+	/**
+	 * Consumes a ready job: deletes its artifact and working directory, marks it consumed.
+	 *
+	 * The caller's confirmation that it has fetched and unsealed the artifact, so the
+	 * server removes both the sealed artifact and the job's working directory and
+	 * reports the job consumed (ADR-0004). Only a ready job can be consumed — any other
+	 * state has no unconsumed artifact to confirm and is a 409. Existence precedes
+	 * ownership precedes state, so a non-owner is refused 403 without ever learning the
+	 * job's state, and the audit record written earlier at ready (ADR-0006) is a
+	 * separate file this deletion never touches.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming consume request, carrying the id.
+	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state: consumed }`; a 404 for an
+	 *                                   unknown job, a 403 for a non-owner, or a 409 when
+	 *                                   the job is not ready.
+	 */
+	public function consume( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+
+		// Resolve the caller's own job; an unknown id is a 404 and a non-owner a 403.
+		$job = $this->resolve_owned_job( $request );
+		if ( is_wp_error( $job ) ) {
+			return $job;
+		}
+
+		// Consume confirms a ready artifact; a job in any other state has nothing to
+		// confirm and is a conflict, revealed only now that ownership holds.
+		if ( $job->state !== Job_State::Ready ) {
+			return $this->error( 409, 'kntnt_extractor_not_ready', __( 'Only a ready extraction job can be consumed.', 'kntnt-extractor' ) );
+		}
+
+		// Delete the artifact and the working directory, then report the job consumed;
+		// the ready-time audit record is a separate file this never touches (ADR-0006).
+		$this->store->purge( $job );
+
+		return new WP_REST_Response(
+			[
+				'id' => $job->id,
+				'state' => Job_State::Consumed->value,
+			],
+		);
+
+	}
+
+	/**
+	 * Cancels a job: deletes its artifact and working directory without an audit record.
+	 *
+	 * Unlike consume, cancel is the caller's abort and applies to a job in any state it
+	 * owns — queued, running, or ready — removing the artifact and the working directory
+	 * and reporting the job cancelled. It writes no audit record: the audit log is filed
+	 * only when a job reaches ready (ADR-0004/0006), a transition cancel never causes.
+	 * Existence precedes ownership, so a non-owner is refused 403 and an unknown id is a
+	 * 404.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming cancel request, carrying the id.
+	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state: cancelled }`; a 404 for an
+	 *                                   unknown job, or a 403 for a non-owner.
+	 */
+	public function cancel( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+
+		// Resolve the caller's own job; an unknown id is a 404 and a non-owner a 403.
+		$job = $this->resolve_owned_job( $request );
+		if ( is_wp_error( $job ) ) {
+			return $job;
+		}
+
+		// Delete the artifact and the working directory whatever state the job is in,
+		// then report it cancelled; no ready transition occurs, so no audit is written.
+		$this->store->purge( $job );
+
+		return new WP_REST_Response(
+			[
+				'id' => $job->id,
+				'state' => Job_State::Cancelled->value,
 			],
 		);
 
@@ -326,6 +426,39 @@ final class Extractions_Controller {
 				'state' => $advanced->state->value,
 			],
 		);
+
+	}
+
+	/**
+	 * Resolves the request's id to the caller's own job, or the failing check.
+	 *
+	 * Existence is decided before ownership — an id naming no readable job is a 404,
+	 * and a job owned by someone else is a 403 — so the endpoint never discloses to a
+	 * non-owner whether a job exists by answering with a different status. This is the
+	 * per-job binding every id-addressed route (poll, consume, cancel) shares (AC4/AC5),
+	 * layered on top of the capability gate the route's permission callback already ran.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming id-addressed request.
+	 * @return Extraction_Job|WP_Error The caller's own job, or a 404 or 403.
+	 */
+	private function resolve_owned_job( WP_REST_Request $request ): Extraction_Job|WP_Error {
+
+		// Resolve the id to a job; an id naming no readable job is a 404.
+		$raw_id = $request->get_param( 'id' );
+		$job = $this->store->find( is_string( $raw_id ) ? $raw_id : '' );
+		if ( $job === null ) {
+			return $this->error( 404, 'kntnt_extractor_no_such_job', __( 'No such extraction job.', 'kntnt-extractor' ) );
+		}
+
+		// Bind the job to its creator: a caller who is not the owner is refused, even
+		// though the capability gate already admitted them.
+		if ( $job->owner !== get_current_user_id() ) {
+			return $this->error( 403, 'kntnt_extractor_forbidden', __( 'This extraction job belongs to another user.', 'kntnt-extractor' ) );
+		}
+
+		return $job;
 
 	}
 
