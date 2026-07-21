@@ -34,6 +34,8 @@ Current tests:
 - `config-seam-test.php` — the `Config` seam resolves a value from a constant and lets a filter override it (filter wins).
 - `rest-status-test.php` — `GET /kntnt-extractor/v1/status` returns `{ "api_version": 1 }` unauthenticated, the namespace appears in the REST index, and no plugin release version leaks.
 - `tables-test.php` — `GET /tables` answers an authorized caller, its entries are well formed, and the listing is exactly the site's own `SHOW TABLES` (neither padded nor filtered). It does not assert the row/byte magnitudes: SQLite stubs those engine statistics to zero, so that check lives in the DDEV harness below.
+- `files-manifest-test.php` — drives the `Manifest` directly against a controlled, adversarial temporary tree (a directory and a sibling file colliding on a prefix). It proves the canonical depth-first, per-component path ordering, that only leaf files are emitted with paths relative to the root, and that paging at sizes 1/2/3/5 reassembles the whole listing in order with no gaps or duplicates, plus opaque- and malformed-cursor handling.
+- `files-endpoint-test.php` — `GET /files` reuses the both-capabilities Authorizer (403 otherwise), returns `path`/`size`/`mtime` entries with no categorisation, honours the `Config` page-size knob, round-trips the opaque cursor through the REST layer, and answers 400 for a malformed cursor. The exhaustive no-gaps/no-duplicates reassembly proof lives in `files-manifest-test.php` so this suite need not page the entire install.
 
 ## MySQL-backed integration check (DDEV)
 

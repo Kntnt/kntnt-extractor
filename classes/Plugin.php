@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Kntnt\Extractor\Rest\Files_Controller;
 use Kntnt\Extractor\Rest\Status_Controller;
 use Kntnt\Extractor\Rest\Tables_Controller;
 
@@ -92,12 +93,16 @@ final class Plugin {
 		// Register the REST controllers on rest_api_init, the one point where
 		// WordPress guarantees the REST server exists and routes may be added.
 		// The Authorizer is the shared both-capabilities gate the data endpoints
-		// reuse as their permission callback.
+		// reuse as their permission callback, and Config is the constant-then-filter
+		// seam the file Manifest reads its page size through.
 		$authorizer = new Authorizer();
+		$config = new Config();
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
+		$files_controller = new Files_Controller( $authorizer, $config );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
+		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );
 
 	}
 
