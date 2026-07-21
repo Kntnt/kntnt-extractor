@@ -61,8 +61,10 @@ final class Tables_Controller {
 	/**
 	 * Returns the Table list to an authorized caller.
 	 *
-	 * Each descriptor is `{ name, rows, bytes }`: the table name, an exact row
-	 * count, and an estimated size in bytes.
+	 * Each descriptor is `{ name, rows, bytes }`: the table name, a row-count
+	 * estimate, and an estimated size in bytes — both figures drawn from one
+	 * non-scanning `SHOW TABLE STATUS` snapshot so enumerating a large install
+	 * stays O(number of tables) and cannot time out on a per-table COUNT(*) scan.
 	 *
 	 * @since 0.1.0
 	 *
@@ -77,13 +79,11 @@ final class Tables_Controller {
 		 */
 		global $wpdb;
 
-		// Size estimates in bytes, keyed by table name.
-		$sizes = $this->size_estimates();
+		// Row and size estimates, keyed by table name, from one status snapshot.
+		$stats = $this->table_stats();
 
 		// Build one descriptor per table from the database's own catalogue of
-		// names. No caller-supplied name reaches this endpoint (ADR-0003), so
-		// interpolating a name into COUNT(*) is safe — an identifier cannot be
-		// bound through prepare(), and this one never came from a caller.
+		// names. No caller-supplied name reaches this endpoint (ADR-0003).
 		$tables = [];
 		foreach ( $wpdb->get_col( 'SHOW TABLES' ) as $name ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 
@@ -92,13 +92,11 @@ final class Tables_Controller {
 				continue;
 			}
 
-			// Describe the table: an exact row count plus the size estimate.
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
-			$rows = $this->to_int( $wpdb->get_var( "SELECT COUNT(*) FROM `{$name}`" ) );
+			// Describe the table: a row-count estimate plus the size estimate.
 			$tables[] = [
 				'name' => $name,
-				'rows' => $rows,
-				'bytes' => $sizes[ $name ] ?? 0,
+				'rows' => $this->row_count( $name, $stats[ $name ]['rows'] ?? 0 ),
+				'bytes' => $stats[ $name ]['bytes'] ?? 0,
 			];
 
 		}
@@ -108,17 +106,28 @@ final class Tables_Controller {
 	}
 
 	/**
-	 * Reads a size estimate in bytes for every table, keyed by table name.
+	 * Resolves a table's row count, preferring the non-scanning estimate.
 	 *
-	 * `SHOW TABLE STATUS` reports `Data_length + Index_length` — a non-locking
-	 * MySQL estimate. The SQLite test backend answers the query but reports the
-	 * size columns as 0, so a zero there is expected, not a bug.
+	 * `SHOW TABLE STATUS` already reports a `Rows` estimate for every table in a
+	 * single query, so a populated table on a large InnoDB install needs no
+	 * per-table scan — the estimate is returned as-is, which AC5 permits. Only a
+	 * zero estimate falls back to an exact `COUNT(*)`: a table the engine
+	 * believes empty counts instantly, and the fallback also recovers the true
+	 * count on a backend that cannot estimate — the SQLite test backend flattens
+	 * `Rows` to 0 for every table.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array<string, int> Table name to estimated size in bytes.
+	 * @param string $name     Table name from the DB catalogue, never a caller.
+	 * @param int    $estimate The engine's `Rows` estimate for the table.
+	 * @return int The estimate when positive, otherwise an exact `COUNT(*)`.
 	 */
-	private function size_estimates(): array {
+	private function row_count( string $name, int $estimate ): int {
+
+		// Trust a positive estimate: it costs no scan, and AC5 permits an estimate.
+		if ( $estimate > 0 ) {
+			return $estimate;
+		}
 
 		/**
 		 * WordPress database access layer.
@@ -127,9 +136,41 @@ final class Tables_Controller {
 		 */
 		global $wpdb;
 
-		// Fold the status rows into a name -> bytes map, tolerating a backend that
-		// omits the size columns.
-		$sizes = [];
+		// A zero estimate means an empty table (instant to count) or a backend
+		// that cannot estimate; either way an exact COUNT(*) is cheap and correct.
+		// The name comes from SHOW TABLES, never a caller, so interpolating it is
+		// safe — an identifier cannot be bound through prepare().
+		// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
+		return $this->to_int( $wpdb->get_var( "SELECT COUNT(*) FROM `{$name}`" ) );
+
+	}
+
+	/**
+	 * Reads a row-count and size estimate for every table, keyed by table name.
+	 *
+	 * A single `SHOW TABLE STATUS` reports both `Rows` and
+	 * `Data_length + Index_length` — non-locking MySQL estimates that need no
+	 * per-table scan. The SQLite test backend answers the query but flattens
+	 * every numeric column to 0, so a zero there is expected, not a bug; the
+	 * caller's fallback turns that zero into an exact count.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return array<string, array{rows:int, bytes:int}> Table name to its
+	 *         estimated row count and size in bytes.
+	 */
+	private function table_stats(): array {
+
+		/**
+		 * WordPress database access layer.
+		 *
+		 * @var \wpdb $wpdb
+		 */
+		global $wpdb;
+
+		// Fold the status rows into a name -> { rows, bytes } map, tolerating a
+		// backend that omits the numeric columns.
+		$stats = [];
 		foreach ( (array) $wpdb->get_results( 'SHOW TABLE STATUS', ARRAY_A ) as $status ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 
 			// Each row is an associative array; index it only by a real table name.
@@ -138,12 +179,15 @@ final class Tables_Controller {
 			}
 			$name = $status['Name'] ?? null;
 			if ( is_string( $name ) ) {
-				$sizes[ $name ] = $this->to_int( $status['Data_length'] ?? 0 ) + $this->to_int( $status['Index_length'] ?? 0 );
+				$stats[ $name ] = [
+					'rows' => $this->to_int( $status['Rows'] ?? 0 ),
+					'bytes' => $this->to_int( $status['Data_length'] ?? 0 ) + $this->to_int( $status['Index_length'] ?? 0 ),
+				];
 			}
 
 		}
 
-		return $sizes;
+		return $stats;
 
 	}
 
