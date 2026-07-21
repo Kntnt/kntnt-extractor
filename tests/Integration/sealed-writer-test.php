@@ -82,12 +82,14 @@ $parse = static function ( string $raw ) use ( $read_length ): array {
 	$sealed_index = substr( $raw, $trailer_at - $index_len, $index_len );
 	$body_end = $trailer_at - $index_len;
 
-	// Walk the segment records: sealed key, nonce, ciphertext length, ciphertext.
+	// Walk the self-framed segment records: sealed-key length and bytes, nonce,
+	// ciphertext length and bytes. No box_seal size constant is trusted.
 	$records = [];
 	$offset = $header_len;
 	while ( $offset < $body_end ) {
-		$sealed_key = substr( $raw, $offset, SODIUM_CRYPTO_BOX_SEALBYTES + SODIUM_CRYPTO_SECRETBOX_KEYBYTES );
-		$offset += SODIUM_CRYPTO_BOX_SEALBYTES + SODIUM_CRYPTO_SECRETBOX_KEYBYTES;
+		$sk_len = $read_length( $raw, $offset );
+		$sealed_key = substr( $raw, $offset, $sk_len );
+		$offset += $sk_len;
 		$nonce = substr( $raw, $offset, SODIUM_CRYPTO_SECRETBOX_NONCEBYTES );
 		$offset += SODIUM_CRYPTO_SECRETBOX_NONCEBYTES;
 		$ct_len = $read_length( $raw, $offset );
