@@ -258,6 +258,9 @@ remove_action( 'kntnt_extractor_job_running', $observe_running );
 kntnt_extractor_assert( $tick_response->get_status() === 200, 'An anonymous caller holding the secret drives the tick (200) (AC1)' );
 kntnt_extractor_assert( $mid_tick_state === 'running', 'The job is persisted as running mid-tick (queued -> running -> ready) (AC2)' );
 
+// The owner reads the outcome: the tick was driven anonymously by the secret, but
+// polling still needs the capability gate the owner holds.
+wp_set_current_user( $owner->ID );
 $ready_poll = $get_extraction( $id )->get_data();
 kntnt_extractor_assert( is_array( $ready_poll ) && ( $ready_poll['state'] ?? null ) === 'ready', 'After the tick the job is ready (AC2)' );
 

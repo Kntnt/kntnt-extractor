@@ -35,11 +35,12 @@ final readonly class Extraction_Job {
 	 *
 	 * Written into every persisted job so a later plugin release can recognise
 	 * and migrate an older record rather than misreading it. Bumped only when the
-	 * field set or their meaning changes.
+	 * field set or their meaning changes — raised to 2 when execution added the
+	 * per-job tick secret and the sealed artifact's filename.
 	 *
 	 * @since 0.1.0
 	 */
-	public const int SCHEMA_VERSION = 1;
+	public const int SCHEMA_VERSION = 2;
 
 	/**
 	 * Builds a job record from its fully-resolved fields.
@@ -48,16 +49,24 @@ final readonly class Extraction_Job {
 	 * directory name, the selections have been checked for existence, and the key
 	 * is canonical base64 of a 32-byte X25519 public key.
 	 *
+	 * The tick secret authenticates the internal tick endpoint that drives the job
+	 * forward — it is an authorization token for the loopback driver, never a key
+	 * that can open the sealed artifact, so persisting it does not weaken the seal
+	 * (ADR-0009). The artifact is the unguessable filename the sealed container is
+	 * written to and served from once the job is ready.
+	 *
 	 * @since 0.1.0
 	 *
-	 * @param string             $id         Unguessable job identifier; also its directory name.
-	 * @param Job_State          $state      Lifecycle state the job is in.
-	 * @param int                $owner      WordPress user id the job is bound to.
-	 * @param string             $public_key Caller's ephemeral X25519 public key, as base64.
-	 * @param array<int, string> $tables     Requested table names, already resolved to existing tables.
-	 * @param array<int, string> $files      Requested file paths, already resolved inside the root.
-	 * @param int                $created_at Unix timestamp the job was created at.
-	 * @param int                $updated_at Unix timestamp the job last changed state at.
+	 * @param string             $id          Unguessable job identifier; also its directory name.
+	 * @param Job_State          $state       Lifecycle state the job is in.
+	 * @param int                $owner       WordPress user id the job is bound to.
+	 * @param string             $public_key  Caller's ephemeral X25519 public key, as base64.
+	 * @param array<int, string> $tables      Requested table names, already resolved to existing tables.
+	 * @param array<int, string> $files       Requested file paths, already resolved inside the root.
+	 * @param int                $created_at  Unix timestamp the job was created at.
+	 * @param int                $updated_at  Unix timestamp the job last changed state at.
+	 * @param string             $tick_secret Per-job secret authenticating the internal tick endpoint.
+	 * @param string             $artifact    Unguessable filename of the sealed artifact in the job directory.
 	 */
 	public function __construct(
 		public string $id,
@@ -68,7 +77,27 @@ final readonly class Extraction_Job {
 		public array $files,
 		public int $created_at,
 		public int $updated_at,
+		public string $tick_secret,
+		public string $artifact,
 	) {}
+
+	/**
+	 * Returns a copy of the job in a new lifecycle state, stamped as just updated.
+	 *
+	 * The record is immutable, so a state transition mints a fresh instance rather
+	 * than mutating this one. The updated-at stamp is refreshed to now, which is
+	 * what lets a later reader tell an actively-running job from a stalled one.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Job_State $state The lifecycle state to move the job into.
+	 * @return self A new record identical to this one but in the given state.
+	 */
+	public function with_state( Job_State $state ): self {
+
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact );
+
+	}
 
 	/**
 	 * Serialises the job into the associative array persisted as JSON.
@@ -78,7 +107,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, files: array<int, string>, created_at: int, updated_at: int}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string}
 	 */
 	public function to_array(): array {
 
@@ -92,6 +121,8 @@ final readonly class Extraction_Job {
 			'files' => $this->files,
 			'created_at' => $this->created_at,
 			'updated_at' => $this->updated_at,
+			'tick_secret' => $this->tick_secret,
+			'artifact' => $this->artifact,
 		];
 
 	}
@@ -125,8 +156,12 @@ final readonly class Extraction_Job {
 		$files = self::string_list( $data['files'] ?? null );
 		$created_at = $data['created_at'] ?? null;
 		$updated_at = $data['updated_at'] ?? null;
+		$tick_secret = $data['tick_secret'] ?? null;
+		$artifact = $data['artifact'] ?? null;
 
-		// Reject the record unless every field is present and correctly typed.
+		// Reject the record unless every field is present and correctly typed; a
+		// pre-execution record without the tick secret or artifact name is a schema
+		// this release cannot drive, so it reads as no readable job here.
 		if ( $state === null
 			|| ! is_string( $id ) || $id === ''
 			|| ! is_int( $owner )
@@ -134,11 +169,13 @@ final readonly class Extraction_Job {
 			|| $tables === null
 			|| $files === null
 			|| ! is_int( $created_at )
-			|| ! is_int( $updated_at ) ) {
+			|| ! is_int( $updated_at )
+			|| ! is_string( $tick_secret ) || $tick_secret === ''
+			|| ! is_string( $artifact ) || $artifact === '' ) {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $files, $created_at, $updated_at );
+		return new self( $id, $state, $owner, $public_key, $tables, $files, $created_at, $updated_at, $tick_secret, $artifact );
 
 	}
 

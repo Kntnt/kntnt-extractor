@@ -97,14 +97,18 @@ final class Plugin {
 		// reuse as their permission callback, and Config is the constant-then-filter
 		// seam the file Manifest reads its page size through and the Job_Store reads
 		// its working-directory location through. The Job_Store persists Extraction
-		// jobs as state files under the working directory (ADR-0004/0008).
+		// jobs as state files under the working directory (ADR-0004/0008). The
+		// Dispatcher drives a queued job to a sealed artifact through the
+		// Artifact_Builder and its Table_Dumper, one secret-authenticated tick at a
+		// time (ADR-0007/0009).
 		$authorizer = new Authorizer();
 		$config = new Config();
 		$job_store = new Job_Store( $config );
+		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper() ) );
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
 		$files_controller = new Files_Controller( $authorizer, $config );
-		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store );
+		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $dispatcher );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );

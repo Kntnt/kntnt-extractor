@@ -12,6 +12,7 @@ namespace Kntnt\Extractor\Rest;
 
 use Kntnt\Extractor\Authorizer;
 use Kntnt\Extractor\Config;
+use Kntnt\Extractor\Dispatcher;
 use Kntnt\Extractor\Job_Store;
 use WP_Error;
 use WP_REST_Request;
@@ -19,12 +20,18 @@ use WP_REST_Response;
 use WP_REST_Server;
 
 /**
- * Registers and answers `POST /extractions` and `GET /extractions/{id}`.
+ * Registers and answers `POST /extractions`, `GET /extractions/{id}`, and the
+ * internal `POST /extractions/{id}/tick`.
  *
  * `POST /extractions` turns an already-resolved selection of tables and/or files,
  * plus the caller's ephemeral X25519 public key, into a queued Extraction job
- * bound to the caller (ADR-0004); no work runs yet. `GET /extractions/{id}`
- * reports that job's state to its owner.
+ * bound to the caller (ADR-0004) and fires the first loopback that starts its
+ * execution. `GET /extractions/{id}` reports that job's state to its owner, hands
+ * back the sealed artifact's download link once the job is ready, and
+ * opportunistically nudges a stalled queue. `POST /extractions/{id}/tick` is the
+ * internal driver endpoint: authenticated by the job's own secret rather than by a
+ * capability, so the loopback loop can advance the job without a session (ADR-0007),
+ * it is the one route here that is not behind the capability gate.
  *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
@@ -60,11 +67,13 @@ final class Extractions_Controller {
 	 * @param Authorizer $authorizer The shared both-capabilities access gate.
 	 * @param Config     $config     The constant-then-filter configuration seam.
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
+	 * @param Dispatcher $dispatcher Drives a job forward and nudges a stalled queue.
 	 */
 	public function __construct(
 		private readonly Authorizer $authorizer,
 		private readonly Config $config,
 		private readonly Job_Store $store,
+		private readonly Dispatcher $dispatcher,
 	) {}
 
 	/**
@@ -98,6 +107,16 @@ final class Extractions_Controller {
 				'methods' => WP_REST_Server::READABLE,
 				'callback' => $this->poll( ... ),
 				'permission_callback' => $this->authorizer->authorize( ... ),
+			],
+		);
+
+		register_rest_route(
+			Status_Controller::REST_NAMESPACE,
+			'/extractions/(?P<id>[a-f0-9]{32})/tick',
+			[
+				'methods' => WP_REST_Server::CREATABLE,
+				'callback' => $this->tick( ... ),
+				'permission_callback' => $this->can_tick( ... ),
 			],
 		);
 
@@ -166,8 +185,10 @@ final class Extractions_Controller {
 			);
 		}
 
-		// Persist a queued job bound to the caller and report its id and state.
+		// Persist a queued job bound to the caller, then fire the initial loopback so
+		// its execution begins without waiting for the first poll (ADR-0007).
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['files'] );
+		$this->dispatcher->maybe_nudge( $job );
 
 		return new WP_REST_Response(
 			[
@@ -217,10 +238,92 @@ final class Extractions_Controller {
 			);
 		}
 
+		// Opportunistically restart a queued or stalled job's loopback, but never one
+		// currently being ticked — the poll kicks the driver, it does not do the work
+		// (ADR-0007). A ready job reports the download link its sealed artifact is
+		// fetched through; a job not yet ready reports it as null.
+		$this->dispatcher->maybe_nudge( $job );
+
 		return new WP_REST_Response(
 			[
 				'id' => $job->id,
 				'state' => $job->state->value,
+				'download_url' => $this->store->download_url( $job ),
+			],
+		);
+
+	}
+
+	/**
+	 * Permission callback for the internal tick endpoint: the per-job secret alone.
+	 *
+	 * The tick is driven by the loopback loop, which carries no WordPress session, so
+	 * it is authenticated by the job's own secret rather than by a capability — an
+	 * outsider without the secret cannot drive the job, and neither can even a capable
+	 * owner (ADR-0007). An unknown job and an absent or wrong secret are refused
+	 * identically, so the endpoint reveals nothing about which job ids exist. The
+	 * comparison is constant-time to keep the secret out of a timing side channel.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming tick request, carrying the id and secret.
+	 * @return true|WP_Error True when the secret matches the job; a 403 otherwise.
+	 */
+	public function can_tick( WP_REST_Request $request ): true|WP_Error {
+
+		// Resolve the job and require its exact secret; any failure is one uniform 403
+		// so the endpoint is not an existence oracle.
+		$raw_id = $request->get_param( 'id' );
+		$job = $this->store->find( is_string( $raw_id ) ? $raw_id : '' );
+		$provided = $request->get_header( Dispatcher::TICK_SECRET_HEADER );
+		if ( $job === null || ! is_string( $provided ) || $provided === '' || ! hash_equals( $job->tick_secret, $provided ) ) {
+			return new WP_Error(
+				'kntnt_extractor_forbidden',
+				__( 'A valid per-job tick secret is required.', 'kntnt-extractor' ),
+				[ 'status' => 403 ],
+			);
+		}
+
+		return true;
+
+	}
+
+	/**
+	 * Advances a job one tick and reports the state it reached.
+	 *
+	 * The permission callback has already authenticated the secret and proven the job
+	 * exists, so this reloads it and hands it to the driver. A tick on a finished or
+	 * actively-running job is a no-op there, so a duplicate loopback is harmless. The
+	 * job can still be swept between the permission check and here, which reads as a
+	 * 404 rather than a fatal on a vanished record.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param WP_REST_Request $request The incoming tick request, carrying the id.
+	 * @return WP_REST_Response|WP_Error A 200 with the job's `{ id, state }` after the
+	 *                                   tick, or a 404 when the job no longer exists.
+	 */
+	public function tick( WP_REST_Request $request ): WP_REST_Response|WP_Error {
+
+		// Reload the job the authenticated request named; a job swept between the
+		// permission check and here is simply gone.
+		$raw_id = $request->get_param( 'id' );
+		$job = $this->store->find( is_string( $raw_id ) ? $raw_id : '' );
+		if ( $job === null ) {
+			return new WP_Error(
+				'kntnt_extractor_no_such_job',
+				__( 'No such extraction job.', 'kntnt-extractor' ),
+				[ 'status' => 404 ],
+			);
+		}
+
+		// Advance the surviving job one tick and report the state it reached.
+		$advanced = $this->dispatcher->tick( $job );
+
+		return new WP_REST_Response(
+			[
+				'id' => $advanced->id,
+				'state' => $advanced->state->value,
 			],
 		);
 

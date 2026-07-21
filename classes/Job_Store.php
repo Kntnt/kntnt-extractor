@@ -91,11 +91,13 @@ final class Job_Store {
 	public function create( int $owner, string $public_key, array $tables, array $files ): Extraction_Job {
 
 		// Resolve and harden the working directory, then mint an unguessable id and
-		// build the queued record. The id doubles as the job's directory name.
+		// build the queued record. The id doubles as the job's directory name; the
+		// tick secret authenticates the internal driver, and the artifact filename is
+		// its own unguessable token so the download path is not merely the job id.
 		$base = $this->ensure_base();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
-		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $files ), $now, $now );
+		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
 
 		// Give the job its own directory, drop an index.html into it as defence in
 		// depth, and persist the state file that lets a later request resume it.
@@ -177,6 +179,75 @@ final class Job_Store {
 		}
 
 		return $active;
+
+	}
+
+	/**
+	 * Persists an updated job over its existing state file.
+	 *
+	 * The job's directory already exists — it was laid down by {@see create()} — so
+	 * this rewrites only the state file, which is how every lifecycle transition
+	 * (queued -> running -> ready and the terminal states) reaches disk.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose current state to persist.
+	 * @return void
+	 *
+	 * @throws RuntimeException When the record cannot be encoded or written whole.
+	 */
+	public function save( Extraction_Job $job ): void {
+
+		$this->persist( $job, $this->base_path() . '/' . $job->id . '/' . self::STATE_FILE );
+
+	}
+
+	/**
+	 * Returns the absolute path the job's sealed artifact is written to and served from.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose artifact path to resolve.
+	 * @return string Absolute path to the artifact inside the job's directory.
+	 */
+	public function artifact_path( Extraction_Job $job ): string {
+
+		return $this->base_path() . '/' . $job->id . '/' . $job->artifact;
+
+	}
+
+	/**
+	 * Returns the URL a ready job's artifact is downloaded from, or null.
+	 *
+	 * The artifact is a static file the web server serves directly (ADR-0004): safe
+	 * to expose because it is sealed to the caller's key (ADR-0009), so this maps its
+	 * on-disk path under the uploads directory to the matching public URL. It returns
+	 * null for a job that is not yet ready, and for the outside-docroot override where
+	 * the working directory is deliberately not web-reachable and has no static URL.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose download URL to resolve.
+	 * @return string|null The artifact's public URL, or null when there is none.
+	 */
+	public function download_url( Extraction_Job $job ): ?string {
+
+		// Nothing to serve until the artifact exists at the ready state.
+		if ( $job->state !== Job_State::Ready ) {
+			return null;
+		}
+
+		// Map the artifact's path to a URL only while it lives under the web-reachable
+		// uploads directory; an outside-docroot working directory has no static URL.
+		$uploads = wp_upload_dir();
+		$basedir = rtrim( is_string( $uploads['basedir'] ?? null ) ? $uploads['basedir'] : '', '/' );
+		$baseurl = rtrim( is_string( $uploads['baseurl'] ?? null ) ? $uploads['baseurl'] : '', '/' );
+		$path = $this->artifact_path( $job );
+		if ( $basedir === '' || ! str_starts_with( $path, $basedir . '/' ) ) {
+			return null;
+		}
+
+		return $baseurl . substr( $path, strlen( $basedir ) );
 
 	}
 
