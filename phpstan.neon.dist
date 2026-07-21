@@ -1,0 +1,27 @@
+includes:
+    # Teaches PHPStan about WordPress core – agents.d/coding-standard/wordpress.md.
+    - vendor/szepeviktor/phpstan-wordpress/extension.neon
+
+parameters:
+
+    level: max
+
+    # The production PHP: the namespace classes plus the two root files. The
+    # test suite runs inside WordPress Playground, not under static analysis.
+    paths:
+        - classes
+        - kntnt-extractor.php
+        - autoloader.php
+
+    # Keep in step with the `Requires PHP` header – this is what enforces the
+    # floor. PHPStan reports any syntax newer than it, and the diagnostic is
+    # non-ignorable, so no baseline can bury it. phpcs cannot do this job: its
+    # `testVersion` belongs to PHPCompatibility, whose last stable (9.3.5, 2019)
+    # knows nothing after PHP 7.4 and passes 8.x code in silence.
+    phpVersion: 80500
+
+    # The bootstrap guard tests PHP_VERSION against the floor above. Left on,
+    # PHPStan folds that test to a constant true and calls the whole fallback
+    # dead – but the guard exists precisely for hosts that load the plugin
+    # outside the activation path, where the declared floor is not a fact.
+    treatPhpDocTypesAsCertain: false

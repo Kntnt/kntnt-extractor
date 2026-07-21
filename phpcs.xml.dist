@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<ruleset name="kntnt-extractor">
+
+	<description>WordPress Coding Standards with the deliberate deviations documented in agents.d/coding-standard/wordpress.md.</description>
+
+	<!-- The production PHP: the namespace classes plus the two root files. -->
+	<file>classes/</file>
+	<file>kntnt-extractor.php</file>
+	<file>autoloader.php</file>
+
+	<!-- Only PHP files. -->
+	<arg name="extensions" value="php"/>
+
+	<!-- Show sniff codes and progress, with colour. -->
+	<arg value="sp"/>
+	<arg name="colors"/>
+
+	<!-- Baseline: the WordPress Coding Standards. -->
+	<rule ref="WordPress">
+
+		<!--
+			Deliberate deviation 1: modern PHP array syntax.
+			The project uses [ ... ] literals; array() is banned by choice. Both
+			the Generic and Universal short-array sniffs are excluded so the
+			DisallowLongArraySyntax rule added below can enforce the modern
+			syntax without a conflicting sniff.
+		-->
+		<exclude name="Generic.Arrays.DisallowShortArraySyntax"/>
+		<exclude name="Universal.Arrays.DisallowShortArraySyntax"/>
+
+		<!--
+			Deliberate deviation 2: PSR-4 filenames.
+			WordPress CS expects class-classname.php; the autoloader maps
+			Pascal_Snake_Case class names 1:1 to <Class_Name>.php.
+		-->
+		<exclude name="WordPress.Files.FileName"/>
+
+		<!--
+			Deliberate deviation 3: namespaces over global function prefixes.
+			PHP code lives inside \Kntnt\Extractor rather than under a kntnt_
+			function-name prefix. The prefix is still used for identifiers that
+			live in a global registry – the requirements-check function and the
+			PHP-floor constant in the main file, which cannot be namespaced.
+		-->
+		<exclude name="WordPress.NamingConventions.PrefixAllGlobals"/>
+
+		<!--
+			Deliberate deviation 4: Yoda conditions are not required.
+			Natural order is the default (strict_types removes the original
+			safety motivation); Yoda only when it genuinely improves readability.
+		-->
+		<exclude name="WordPress.PHP.YodaConditions"/>
+
+		<!--
+			The standard forbids vertical alignment of = and => across lines. Two
+			separate sniffs enforce the opposite – one for assignments, one for
+			the double arrows inside a multi-line array – so both are excluded and
+			the no-alignment rule wins.
+		-->
+		<exclude name="Generic.Formatting.MultipleStatementAlignment"/>
+		<exclude name="WordPress.Arrays.MultipleStatementAlignment"/>
+
+		<!--
+			Paragraph style requires a blank line before the closing brace of a
+			function / method body (and of a class body). PSR2's
+			FunctionClosingBrace and ClassDeclaration sniffs forbid that blank
+			line; the paragraph style takes precedence.
+		-->
+		<exclude name="PSR2.Methods.FunctionClosingBrace"/>
+		<exclude name="PSR2.Classes.ClassDeclaration"/>
+
+		<!--
+			The same paragraph rule applies inside a control structure: a
+			paragraph's trailing blank line stands even when the paragraph is the
+			last one in a loop or conditional body. BlankLineAfterEnd forbids
+			exactly that; the paragraph style takes precedence.
+		-->
+		<exclude name="WordPress.WhiteSpace.ControlStructureSpacing.BlankLineAfterEnd"/>
+
+	</rule>
+
+	<!-- Require short array syntax ([ ]) – never array(). -->
+	<rule ref="Generic.Arrays.DisallowLongArraySyntax"/>
+
+	<!--
+		Keep in step with the `Requires at least` header: this is what makes the
+		WPCS deprecation sniffs flag anything that died after the floor we
+		promise to run on.
+	-->
+	<config name="minimum_supported_wp_version" value="6.0"/>
+
+</ruleset>
