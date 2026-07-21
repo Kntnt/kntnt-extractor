@@ -60,8 +60,11 @@ $admin_role = get_role( 'administrator' );
 kntnt_extractor_assert( $admin_role !== null && $admin_role->has_cap( $operate_cap ), 'AC1: activation grants Operate to the administrator role' );
 
 // The capability slug the Authorizer enforces is the one activation grants —
-// one authoritative source, not two strings that can drift apart.
-kntnt_extractor_assert( Authorizer::OPERATE_CAPABILITY === $operate_cap, 'AC1: the Authorizer and the grant name the same capability' );
+// one authoritative source, not two strings that can drift apart. Guard the
+// class reference with class_exists() so an absent Authorizer fails only this
+// assertion rather than a fatal "class not found" that would abort the whole
+// file before every behavioural check below it has run.
+kntnt_extractor_assert( class_exists( Authorizer::class ) && Authorizer::OPERATE_CAPABILITY === $operate_cap, 'AC1: the Authorizer and the grant name the same capability' );
 
 // --- Arrange the four capability profiles ------------------------------------
 
@@ -90,6 +93,13 @@ kntnt_extractor_assert( $get_tables_as( $manage_only )->get_status() === 403, 'A
 
 // Neither capability is refused.
 kntnt_extractor_assert( $get_tables_as( $neither )->get_status() === 403, 'AC6: a caller with neither capability is refused with 403' );
+
+// An anonymous (unauthenticated) caller is definitionally missing the Operate
+// capability, so it must be refused with 403 — not the 401 that WordPress
+// substitutes for an unauthenticated REST request. This is the no-credentials
+// case a real client hits first, and the one AC6 path a logged-in caller can
+// never exercise.
+kntnt_extractor_assert( $get_tables_as( 0 )->get_status() === 403, 'AC6: an anonymous caller is refused with 403, not 401' );
 
 // --- AC3: the Operate-only caller reaches the surface but cannot list ---------
 
