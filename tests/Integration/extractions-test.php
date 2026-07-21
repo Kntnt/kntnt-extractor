@@ -135,6 +135,7 @@ add_filter( 'kntnt_extractor_config_work_dir', $force_work );
 // below this contract; 422 is the well-formed-but-unprocessable case this endpoint
 // defines.)
 wp_set_current_user( 0 );
+kntnt_extractor_assert( $post_extractions( '{"tables": [' )->get_status() === 400, 'A syntactically invalid JSON body is a 400 owned by WordPress core, one layer below this contract' );
 kntnt_extractor_assert( $post_extractions( [ 'tables' => 'wp_options', 'public_key' => $valid_key ] )->get_status() === 422, 'A well-formed body that is not a valid extraction request is rejected 422 before the capability check' );
 kntnt_extractor_assert( $post_extractions( [ 'public_key' => $valid_key ] )->get_status() === 422, 'A body that selects neither a table nor a file is rejected 422' );
 kntnt_extractor_assert( $post_extractions( [ 'tables' => [ $wpdb->options ] ] )->get_status() === 400, 'An absent public_key is rejected 400 before the capability check' );
@@ -142,6 +143,7 @@ kntnt_extractor_assert( $post_extractions( [ 'tables' => [ $wpdb->options ], 'pu
 kntnt_extractor_assert( $post_extractions( [ 'tables' => [ 'wp_no_such_table_xyz' ], 'public_key' => $valid_key ] )->get_status() === 404, 'An unknown table is rejected 404 before the capability check' );
 kntnt_extractor_assert( $post_extractions( [ 'files' => [ '..' ], 'public_key' => $valid_key ] )->get_status() === 404, 'A file resolving outside the installation root is rejected 404 before the capability check' );
 kntnt_extractor_assert( $post_extractions( [ 'files' => [ '../wp-load.php' ], 'public_key' => $valid_key ] )->get_status() === 404, 'A traversal path resolving outside the root is rejected 404, never sanitised' );
+kntnt_extractor_assert( $post_extractions( [ 'files' => [ "wp-load.php\u{0000}../../etc/passwd" ], 'public_key' => $valid_key ] )->get_status() === 404, 'A null byte in a file path is rejected 404 at the realpath boundary, never allowed to crash it' );
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 403, 'A fully valid request from an unauthorized caller is refused 403 once existence passes' );
 
 // No job may have been created by any of the rejected attempts above.
