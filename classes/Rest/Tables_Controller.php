@@ -17,24 +17,23 @@ use WP_REST_Server;
 /**
  * Registers and answers `GET /kntnt-extractor/v1/tables`.
  *
- * Returns the Table list: every table that exists in the site's database, each
- * with an estimated row count and a byte-size estimate — both the storage
- * engine's own cached statistics, read without scanning table data. The plugin
- * reports what exists and categorises nothing — the caller decides what any
- * table is for (ADR-0003). Access is gated by the shared Authorizer, so only a caller
- * holding both the Operate capability and `manage_options` reaches the data;
- * everyone else is refused with 403.
+ * Returns the Table list — the enumeration of tables in the site's database,
+ * the file manifest's counterpart (ADR-0003) — each with a row count and a size
+ * estimate so a caller can plan an extraction. The endpoint carries no
+ * caller-supplied resource, so it needs no input validation: authorization is
+ * the plugin's single two-capability gate, applied through {@see Authorizer}
+ * (ADR-0002).
  *
  * @since 0.1.0
  */
 final class Tables_Controller {
 
 	/**
-	 * Wires the controller to the shared authorization gate.
+	 * The two-capability gate every listing and extraction endpoint shares.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param Authorizer $authorizer The shared both-capabilities access gate.
+	 * @param Authorizer $authorizer The both-capabilities authorization seam.
 	 */
 	public function __construct( private readonly Authorizer $authorizer ) {}
 
@@ -60,63 +59,48 @@ final class Tables_Controller {
 	}
 
 	/**
-	 * Returns the Table list with a row count and byte-size estimate per table.
+	 * Returns the Table list to an authorized caller.
 	 *
-	 * Table names come from the database catalog, never from the caller, so the
-	 * endpoint takes no input to validate. Both figures are the storage engine's
-	 * own cached statistics from a single `SHOW TABLE STATUS`: the row count is
-	 * its approximate `Rows`, the byte size its `Data_length + Index_length`. Both
-	 * are estimates by nature (AC5), and are read from table metadata rather than
-	 * by scanning each table — so a large install's `postmeta`, `options`, or
-	 * action-scheduler logs are never counted row by row, and the endpoint stays
-	 * O(number of tables) instead of risking an execution-time or HTTP timeout.
+	 * Each descriptor is `{ name, rows, bytes }`: the table name, an exact row
+	 * count, and an estimated size in bytes.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return WP_REST_Response The listing, as `{ "tables": [ { name, rows, bytes } ] }`.
+	 * @return WP_REST_Response The table list, as `{ "tables": [ … ] }`.
 	 */
 	public function get_tables(): WP_REST_Response {
 
 		/**
-		 * The WordPress database access layer.
+		 * WordPress database access layer.
 		 *
 		 * @var \wpdb $wpdb
 		 */
 		global $wpdb;
 
-		// Read every table's engine-level statistics in one round trip, keyed by
-		// name: the approximate row count and the byte-size estimate. A schema
-		// query has nothing to prepare and must not be cached. The row set is a
-		// deserialization boundary — loosely typed — so each row and its values
-		// are checked before use.
-		$stats = [];
-		foreach ( (array) $wpdb->get_results( 'SHOW TABLE STATUS', ARRAY_A ) as $status ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
-			if ( ! is_array( $status ) ) {
-				continue;
-			}
-			$name = $status['Name'] ?? null;
-			if ( is_string( $name ) ) {
-				$stats[ $name ] = [
-					'rows' => $this->to_int( $status['Rows'] ?? null ),
-					'bytes' => $this->to_int( $status['Data_length'] ?? null ) + $this->to_int( $status['Index_length'] ?? null ),
-				];
-			}
-		}
+		// Size estimates in bytes, keyed by table name.
+		$sizes = $this->size_estimates();
 
-		// Enumerate the site's tables and attach each one's estimated row count
-		// and byte size. `SHOW TABLES` is the authoritative catalog of what exists
-		// (ADR-0003); a table absent from the statistics above — one just created,
-		// with no gathered stats — reports zero rather than being dropped.
+		// Build one descriptor per table from the database's own catalogue of
+		// names. No caller-supplied name reaches this endpoint (ADR-0003), so
+		// interpolating a name into COUNT(*) is safe — an identifier cannot be
+		// bound through prepare(), and this one never came from a caller.
 		$tables = [];
 		foreach ( $wpdb->get_col( 'SHOW TABLES' ) as $name ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+			// get_col is typed as returning mixed values; a table name is a string.
 			if ( ! is_string( $name ) ) {
 				continue;
 			}
+
+			// Describe the table: an exact row count plus the size estimate.
+			// phpcs:ignore WordPress.DB.DirectDatabaseQuery, WordPress.DB.PreparedSQL
+			$rows = $this->to_int( $wpdb->get_var( "SELECT COUNT(*) FROM `{$name}`" ) );
 			$tables[] = [
 				'name' => $name,
-				'rows' => $stats[ $name ]['rows'] ?? 0,
-				'bytes' => $stats[ $name ]['bytes'] ?? 0,
+				'rows' => $rows,
+				'bytes' => $sizes[ $name ] ?? 0,
 			];
+
 		}
 
 		return new WP_REST_Response( [ 'tables' => $tables ] );
@@ -124,14 +108,54 @@ final class Tables_Controller {
 	}
 
 	/**
-	 * Coerces a loosely typed database column value into an integer.
+	 * Reads a size estimate in bytes for every table, keyed by table name.
 	 *
-	 * The schema row set types every column as `mixed`; a numeric value becomes
-	 * its integer, anything else (a null column, a view without stats) becomes 0.
+	 * `SHOW TABLE STATUS` reports `Data_length + Index_length` — a non-locking
+	 * MySQL estimate. The SQLite test backend answers the query but reports the
+	 * size columns as 0, so a zero there is expected, not a bug.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param mixed $value A single column value from a schema query.
+	 * @return array<string, int> Table name to estimated size in bytes.
+	 */
+	private function size_estimates(): array {
+
+		/**
+		 * WordPress database access layer.
+		 *
+		 * @var \wpdb $wpdb
+		 */
+		global $wpdb;
+
+		// Fold the status rows into a name -> bytes map, tolerating a backend that
+		// omits the size columns.
+		$sizes = [];
+		foreach ( (array) $wpdb->get_results( 'SHOW TABLE STATUS', ARRAY_A ) as $status ) { // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+
+			// Each row is an associative array; index it only by a real table name.
+			if ( ! is_array( $status ) ) {
+				continue;
+			}
+			$name = $status['Name'] ?? null;
+			if ( is_string( $name ) ) {
+				$sizes[ $name ] = $this->to_int( $status['Data_length'] ?? 0 ) + $this->to_int( $status['Index_length'] ?? 0 );
+			}
+
+		}
+
+		return $sizes;
+
+	}
+
+	/**
+	 * Coerces a raw database value to a non-negative integer.
+	 *
+	 * `$wpdb` reads are typed as `mixed` and numeric columns arrive as numeric
+	 * strings; anything non-numeric collapses to 0 rather than a misleading cast.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param mixed $value A value read from the database.
 	 * @return int The value as an integer, or 0 when it is not numeric.
 	 */
 	private function to_int( mixed $value ): int {

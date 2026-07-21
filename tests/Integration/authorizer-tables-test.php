@@ -20,7 +20,7 @@
  *  - AC7  Deactivating and reactivating re-runs the grant (self-healing).
  *
  * @package Kntnt\Extractor
- * @since   0.2.0
+ * @since   0.1.0
  */
 
 declare( strict_types = 1 );
@@ -172,10 +172,14 @@ kntnt_extractor_assert( ! ( $rejected instanceof WP_User ), 'AC4: an invalid App
 
 // --- AC7: deactivate + reactivate re-runs the grant (self-healing) -----------
 
-// Simulate the grant drifting away, then reactivate: activation must restore it.
+// Simulate the grant drifting away, then reactivate: activation must restore
+// it. Operate on the live role object get_role() returns — WP_Roles::remove_cap
+// updates the roles option but not a previously-captured WP_Role's in-memory
+// caps, so a stale handle would report a removal that never took effect.
 $users_before = count_users()['total_users'];
-$admin_role->remove_cap( $operate_cap );
-kntnt_extractor_assert( ! get_role( 'administrator' )->has_cap( $operate_cap ), 'AC7: precondition — the Operate grant has been removed' );
+$live_role = get_role( 'administrator' );
+$live_role->remove_cap( $operate_cap );
+kntnt_extractor_assert( ! $live_role->has_cap( $operate_cap ), 'AC7: precondition — the Operate grant has been removed' );
 
 deactivate_plugins( $plugin );
 activate_plugin( $plugin );
