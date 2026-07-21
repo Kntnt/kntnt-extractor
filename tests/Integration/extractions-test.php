@@ -109,7 +109,11 @@ kntnt_extractor_assert( is_array( $created ) && isset( $created['id'], $created[
 kntnt_extractor_assert( $default_id !== '' && preg_match( '/^[a-f0-9]{32}$/', $default_id ) === 1, 'The job id is an unguessable 32-hex identifier' );
 kntnt_extractor_assert( is_array( $created ) && ( $created['state'] ?? null ) === 'queued', 'A freshly created job is queued' );
 kntnt_extractor_assert( is_file( $default_base . '/' . $default_id . '/job.json' ), 'Job state persists as JSON in a randomly-named dir under uploads' );
-kntnt_extractor_assert( is_file( $default_base . '/index.html' ) && is_file( $default_base . '/.htaccess' ) && is_file( $default_base . '/web.config' ), 'The working directory is hardened with index.html and an .htaccess/web.config deny' );
+kntnt_extractor_assert( is_file( $default_base . '/index.html' ), 'The working directory carries an index.html that silences directory listing' );
+$default_htaccess = is_file( $default_base . '/.htaccess' ) ? (string) file_get_contents( $default_base . '/.htaccess' ) : '';
+$default_web_config = is_file( $default_base . '/web.config' ) ? (string) file_get_contents( $default_base . '/web.config' ) : '';
+kntnt_extractor_assert( str_contains( $default_htaccess, 'Require all denied' ) && str_contains( $default_htaccess, 'Deny from all' ), 'The .htaccess actually denies direct web access on both Apache 2.4 and 2.2, not merely exists' );
+kntnt_extractor_assert( str_contains( $default_web_config, 'deny users="*"' ), 'The web.config actually denies direct web access on IIS, not merely exists' );
 kntnt_extractor_assert( is_file( $default_base . '/' . $default_id . '/index.html' ), 'The per-job directory carries its own index.html' );
 
 // Reset the default location so its lone job cannot count against the isolated

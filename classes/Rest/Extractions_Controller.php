@@ -621,10 +621,14 @@ final class Extractions_Controller {
 	 * The boundary is a `realpath` check, never a sanitiser: a path is accepted only
 	 * when it resolves to a real location at or under the installation root, and a
 	 * traversal or absent path is rejected outright rather than rewritten (ADR-0003).
-	 * A path carrying a null byte is rejected here too: `realpath` would raise a
-	 * ValueError on such input, so it counts as out of root rather than reaching that
-	 * boundary. When the root itself cannot be resolved — a broken install — the
-	 * request fails closed, treating every file as out of bounds.
+	 * The root and each resolved path are compared on `wp_normalize_path`'d separators
+	 * so the boundary holds on Windows/IIS too, where `realpath` renders paths with
+	 * backslashes a forward-slash prefix would never match — without that normalisation
+	 * every valid in-root file would 404 there, disabling file selection on a platform
+	 * the plugin explicitly supports. A path carrying a null byte is rejected here too:
+	 * `realpath` would raise a ValueError on such input, so it counts as out of root
+	 * rather than reaching that boundary. When the root itself cannot be resolved — a
+	 * broken install — the request fails closed, treating every file as out of bounds.
 	 *
 	 * @since 0.1.0
 	 *
@@ -639,11 +643,14 @@ final class Extractions_Controller {
 		}
 
 		// Fail closed if the root cannot be canonicalised: without a trusted root
-		// there is no boundary to test against, so reject the whole selection.
+		// there is no boundary to test against, so reject the whole selection. Its
+		// separators are normalised so the boundary comparison below holds on Windows
+		// too, where realpath yields backslashes a forward-slash needle would never match.
 		$root = realpath( ABSPATH );
 		if ( $root === false ) {
 			return reset( $files );
 		}
+		$root = wp_normalize_path( $root );
 
 		// Check every requested path against the root, rejecting the first that does
 		// not resolve to a real location at or under it — outright, never rewritten.
@@ -656,10 +663,15 @@ final class Extractions_Controller {
 				return $file;
 			}
 
-			// A false realpath (no such file) or a path resolving outside the root is
-			// the out-of-root file that triggers the 404.
+			// A false realpath (no such file) is out of root outright; otherwise the
+			// comparison runs on wp_normalize_path'd separators so a path at or under the
+			// root is recognised on every platform, not only where realpath uses slashes.
 			$resolved = realpath( $root . '/' . $file );
-			if ( $resolved === false || ! ( $resolved === $root || str_starts_with( $resolved, $root . '/' ) ) ) {
+			if ( $resolved === false ) {
+				return $file;
+			}
+			$resolved = wp_normalize_path( $resolved );
+			if ( $resolved !== $root && ! str_starts_with( $resolved, $root . '/' ) ) {
 				return $file;
 			}
 
