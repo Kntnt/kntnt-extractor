@@ -277,6 +277,43 @@ final class Job_Store {
 	}
 
 	/**
+	 * Removes every job and the working and served-downloads directories whole.
+	 *
+	 * The single call uninstall reaches all of this store's disk residue through
+	 * (issue #13, ADR-0008). It first purges every still-known job — the same
+	 * per-job artifact-and-directory cleanup {@see purge()} performs — then removes
+	 * the working base directory and its served downloads sibling in their entirety,
+	 * taking the hardening files (index.html, .htaccess/web.config) and any residual
+	 * per-job directory with them. Both removals resolve their location through
+	 * Config, so a `KNTNT_EXTRACTOR_WORK_DIR` override is honoured and both siblings
+	 * are cleaned; each is bounded, realpath-guarded, strictly beneath its own parent
+	 * exactly as {@see delete_tree()} enforces, so the walk can never escape the
+	 * resolved directory. A directory that never existed is simply nothing to remove,
+	 * so this is safe on a partially-present install.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return void
+	 */
+	public function purge_all(): void {
+
+		// Remove each still-known job's artifact and its own working directory first,
+		// the same per-job cleanup consume, cancel, and the TTL sweep reach disk through.
+		foreach ( $this->all() as $job ) {
+			$this->purge( $job );
+		}
+
+		// Then remove the working base directory and its served downloads sibling in
+		// full — each bounded strictly beneath its own parent, so the removal is pinned
+		// to the resolved location and can never climb above it.
+		$base = $this->base_path();
+		$downloads = $this->downloads_path();
+		$this->delete_tree( $base, dirname( $base ) );
+		$this->delete_tree( $downloads, dirname( $downloads ) );
+
+	}
+
+	/**
 	 * Returns the absolute path the job's sealed artifact is written to and served from.
 	 *
 	 * The artifact lives in the served downloads directory, not the deny-hardened

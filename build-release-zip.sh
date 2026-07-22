@@ -50,6 +50,7 @@ KEEP=(
 	lib
 	LICENSE
 	README.md
+	uninstall.php
 )
 
 OUTPUT_PATH=""

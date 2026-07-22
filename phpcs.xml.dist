@@ -3,10 +3,11 @@
 
 	<description>WordPress Coding Standards with the deliberate deviations documented in agents.d/coding-standard/wordpress.md.</description>
 
-	<!-- The production PHP: the namespace classes plus the two root files. -->
+	<!-- The production PHP: the namespace classes plus the three root files. -->
 	<file>classes/</file>
 	<file>kntnt-extractor.php</file>
 	<file>autoloader.php</file>
+	<file>uninstall.php</file>
 
 	<!-- Only PHP files. -->
 	<arg name="extensions" value="php"/>

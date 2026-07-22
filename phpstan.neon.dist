@@ -6,12 +6,13 @@ parameters:
 
     level: max
 
-    # The production PHP: the namespace classes plus the two root files. The
+    # The production PHP: the namespace classes plus the three root files. The
     # test suite runs inside WordPress Playground, not under static analysis.
     paths:
         - classes
         - kntnt-extractor.php
         - autoloader.php
+        - uninstall.php
 
     # The bundled Plugin Update Checker (lib/) is third-party code: load its
     # symbols so the Update_Checker wiring type-checks against them, but do not
