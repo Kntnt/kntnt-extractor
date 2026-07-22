@@ -152,6 +152,23 @@ kntnt_extractor_assert( $post_extractions( [ 'files' => [ '../wp-load.php' ], 'p
 kntnt_extractor_assert( $post_extractions( [ 'files' => [ "wp-load.php\u{0000}../../etc/passwd" ], 'public_key' => $valid_key ] )->get_status() === 404, 'A null byte in a file path is rejected 404 at the realpath boundary, never allowed to crash it' );
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 403, 'A fully valid request from an unauthorized caller is refused 403 once existence passes' );
 
+// --- issue #16: the structure-only sibling list extends the same ladder ---
+
+// AC2: a table listed in BOTH tables and tables_structure_only is a request-shape
+// error — 422, decided as a malformed selection before existence and the gate.
+kntnt_extractor_assert( $post_extractions( [ 'tables' => [ $wpdb->options ], 'tables_structure_only' => [ $wpdb->options ], 'public_key' => $valid_key ] )->get_status() === 422, 'A table in both tables and tables_structure_only is rejected 422 (AC2)' );
+
+// AC3: an unknown structure-only table is a 404, and because this caller is
+// unauthorized the 404 proves existence is decided BEFORE the capability 403 — the
+// same existence-before-authorization order tables already hold to (ADR-0003).
+kntnt_extractor_assert( $post_extractions( [ 'tables_structure_only' => [ 'wp_no_such_table_xyz' ], 'public_key' => $valid_key ] )->get_status() === 404, 'An unknown structure-only table is rejected 404 before the capability check (AC3)' );
+
+// AC4: all three of tables, tables_structure_only, and files empty selects nothing
+// — a 422 — while a selection of ONLY structure-only tables is valid and reaches the
+// gate, so an unauthorized caller earns the 403 that proves existence passed.
+kntnt_extractor_assert( $post_extractions( [ 'tables' => [], 'tables_structure_only' => [], 'files' => [], 'public_key' => $valid_key ] )->get_status() === 422, 'A request selecting no table, structure-only table, or file is rejected 422 (AC4)' );
+kntnt_extractor_assert( $post_extractions( [ 'tables_structure_only' => [ $wpdb->options ], 'public_key' => $valid_key ] )->get_status() === 403, 'A structure-only-only selection is a valid selection that reaches the capability gate (AC4)' );
+
 // No job may have been created by any of the rejected attempts above.
 kntnt_extractor_assert( ! is_dir( $work ) || count( array_diff( scandir( $work ) ?: [], [ '.', '..', 'index.html', '.htaccess', 'web.config' ] ) ) === 0, 'A rejected create persists no job' );
 
