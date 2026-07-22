@@ -168,9 +168,25 @@ final class Audit_Log {
 		usort( $filtered, static fn( array $a, array $b ): int => ( is_int( $b['ts'] ?? null ) ? $b['ts'] : 0 ) <=> ( is_int( $a['ts'] ?? null ) ? $a['ts'] : 0 ) );
 		$page = max( 1, $page );
 		$per_page = max( 1, $per_page );
+		$page_entries = array_values( array_slice( $filtered, ( $page - 1 ) * $per_page, $per_page ) );
+
+		// Publish ts in the contract's ISO-8601 UTC form. The record keeps ts as an
+		// integer Unix timestamp on disk, and the rotation cutoff and the newest-first
+		// ordering above both read it as one; only this outward-facing representation is
+		// the string the contract documents, so the conversion happens last, on the page
+		// actually returned, and never touches the on-disk log or the math above.
+		$page_entries = array_map(
+			static function ( array $entry ): array {
+				if ( isset( $entry['ts'] ) && is_int( $entry['ts'] ) ) {
+					$entry['ts'] = gmdate( 'Y-m-d\TH:i:s\Z', $entry['ts'] );
+				}
+				return $entry;
+			},
+			$page_entries,
+		);
 
 		return [
-			'entries' => array_values( array_slice( $filtered, ( $page - 1 ) * $per_page, $per_page ) ),
+			'entries' => $page_entries,
 			'total' => count( $filtered ),
 			'page' => $page,
 			'per_page' => $per_page,
