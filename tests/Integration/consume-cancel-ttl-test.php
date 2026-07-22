@@ -150,9 +150,16 @@ $selection = [
 	'public_key' => base64_encode( $public_key ),
 ];
 
-// Drives a freshly-created job to ready with its own persisted tick secret.
+// Drives a freshly-created job to ready with its own persisted tick secret. The
+// build is chunked (one bounded segment per tick, ADR-0007), so tick across chunks
+// until it reaches ready, exactly as the loopback loop would.
 $drive_to_ready = static function ( string $id ) use ( $work, $tick, $state_field ): void {
-	$tick( $id, $state_field( $work, $id, 'tick_secret' ) );
+	$secret = $state_field( $work, $id, 'tick_secret' );
+	$driven = 0;
+	while ( $driven < 200 && $state_field( $work, $id, 'state' ) !== 'ready' ) {
+		$tick( $id, $secret );
+		$driven++;
+	}
 };
 
 // --- AC1: consume deletes the artifact and the working directory, marks consumed ---

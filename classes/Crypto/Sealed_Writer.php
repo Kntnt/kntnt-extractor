@@ -166,6 +166,109 @@ final class Sealed_Writer {
 	}
 
 	/**
+	 * Reopens an in-progress container to append the next sealed segment.
+	 *
+	 * The chunked, resumable build (ADR-0007) writes one bounded segment per tick and
+	 * finalizes only once, so between ticks the container is a header plus the
+	 * segments sealed so far, with no trailer yet. Resuming restores exactly the
+	 * state {@see add_segment()} and {@see finalize()} need — the caller's key and the
+	 * ordered names already written — and reopens the file for appending. Because
+	 * each segment is sealed independently there is no cross-segment authentication
+	 * state to restore; only this bookkeeping.
+	 *
+	 * The container is first truncated back to the committed byte length. That length
+	 * is the resume anchor persisted after the last clean tick, so a partial record a
+	 * crashed tick left past it is discarded here rather than sealed into the result —
+	 * the write path's counterpart to {@see write()}'s short-write guard.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param string             $public_key      The caller's ephemeral X25519 public key, exactly
+	 *                                             `SODIUM_CRYPTO_BOX_PUBLICKEYBYTES` bytes.
+	 * @param array<int, string> $committed_names Names of the segments already written, in order.
+	 * @param int                $committed_bytes Byte length the container is truncated back to.
+	 * @return void
+	 *
+	 * @throws LogicException     When a container is already open on this writer.
+	 * @throws Invalid_Public_Key When the key is absent or the wrong length.
+	 * @throws RuntimeException    When the container cannot be reopened, truncated, or
+	 *                             positioned for appending.
+	 */
+	public function resume( string $public_key, array $committed_names, int $committed_bytes ): void {
+
+		// Refuse to reopen a live writer, and reject a malformed key, exactly as open()
+		// does — the same lifecycle and key contract applies to a resumed container.
+		if ( $this->handle !== null ) {
+			throw new LogicException( 'Sealed_Writer::resume() cannot reopen an already-open container; call finalize() or suspend() first.' );
+		}
+		if ( strlen( $public_key ) !== SODIUM_CRYPTO_BOX_PUBLICKEYBYTES ) {
+			throw new Invalid_Public_Key( 'A sealed container requires a 32-byte X25519 public key.' );
+		}
+
+		// Reopen the existing container for in-place update, drop anything past the
+		// committed offset a crashed tick may have left, and position at the end so the
+		// next segment appends cleanly.
+		$handle = fopen( $this->destination_path, 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming a streaming encrypt-as-you-go write; WP_Filesystem has no incremental-append API.
+		if ( $handle === false ) {
+			throw new RuntimeException( 'Unable to reopen the in-progress sealed container.' );
+		}
+		$committed_bytes = max( 0, $committed_bytes );
+		if ( ftruncate( $handle, $committed_bytes ) === false || fseek( $handle, $committed_bytes ) === -1 ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a failed reopen; see open().
+			throw new RuntimeException( 'Unable to position the in-progress sealed container for appending.' );
+		}
+
+		// Restore the writer's state so add_segment() and finalize() continue the build.
+		$this->handle = $handle;
+		$this->public_key = $public_key;
+		$this->segment_names = array_values( $committed_names );
+
+	}
+
+	/**
+	 * Flushes and closes the container without a trailer, returning its byte length.
+	 *
+	 * This ends a non-final chunk: the container keeps its header and the segments
+	 * sealed so far, but no trailer, so the next tick can {@see resume()} it. The
+	 * returned length is the committed byte offset the resume truncates back to. Like
+	 * {@see finalize()}, this drops every reference, but unlike it the container is
+	 * left mid-build rather than sealed shut.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return int The committed byte length of the in-progress container.
+	 *
+	 * @throws LogicException   When called before {@see open()} or {@see resume()}.
+	 * @throws RuntimeException When the container cannot be flushed, measured, or closed.
+	 */
+	public function suspend(): int {
+
+		// Require an open container: guards the ordering contract and narrows the handle
+		// away from null.
+		$handle = $this->handle;
+		if ( $handle === null ) {
+			throw new LogicException( 'Sealed_Writer::open() or resume() must be called before suspend().' );
+		}
+
+		// Flush buffered bytes and measure the committed length before closing, so the
+		// next tick's resume truncates to exactly what reached disk. A failed flush or
+		// unreadable position means the offset would be untrustworthy, so it is escalated
+		// rather than persisted.
+		$flushed = fflush( $handle );
+		$bytes = ftell( $handle );
+		$closed = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- suspending a streaming encrypt-as-you-go write; see open().
+		$this->handle = null;
+		$this->public_key = null;
+		$this->segment_names = [];
+		if ( $flushed === false || $bytes === false || $closed === false ) {
+			throw new RuntimeException( 'Unable to suspend the in-progress sealed container.' );
+		}
+
+		return $bytes;
+
+	}
+
+	/**
 	 * Encrypts one segment and appends it to the container.
 	 *
 	 * The segment is drawn from the stream, encrypted under a fresh random

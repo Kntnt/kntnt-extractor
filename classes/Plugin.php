@@ -109,7 +109,7 @@ final class Plugin {
 		$authorizer = new Authorizer();
 		$config = new Config();
 		$job_store = new Job_Store( $config );
-		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper() ) );
+		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper(), $config ) );
 		$sweeper = new Sweeper( $job_store, $config );
 		$audit_log = new Audit_Log();
 		$status_controller = new Status_Controller();

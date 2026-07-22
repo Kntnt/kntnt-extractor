@@ -36,11 +36,12 @@ final readonly class Extraction_Job {
 	 * Written into every persisted job so a later plugin release can recognise
 	 * and migrate an older record rather than misreading it. Bumped only when the
 	 * field set or their meaning changes — raised to 2 when execution added the
-	 * per-job tick secret and the sealed artifact's filename.
+	 * per-job tick secret and the sealed artifact's filename, and to 3 when the
+	 * chunked, resumable build added durable build-progress (ADR-0007).
 	 *
 	 * @since 0.1.0
 	 */
-	public const int SCHEMA_VERSION = 2;
+	public const int SCHEMA_VERSION = 3;
 
 	/**
 	 * Builds a job record from its fully-resolved fields.
@@ -57,16 +58,17 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string             $id          Unguessable job identifier; also its directory name.
-	 * @param Job_State          $state       Lifecycle state the job is in.
-	 * @param int                $owner       WordPress user id the job is bound to.
-	 * @param string             $public_key  Caller's ephemeral X25519 public key, as base64.
-	 * @param array<int, string> $tables      Requested table names, already resolved to existing tables.
-	 * @param array<int, string> $files       Requested file paths, already resolved inside the root.
-	 * @param int                $created_at  Unix timestamp the job was created at.
-	 * @param int                $updated_at  Unix timestamp the job last changed state at.
-	 * @param string             $tick_secret Per-job secret authenticating the internal tick endpoint.
-	 * @param string             $artifact    Unguessable filename of the sealed artifact in the job directory.
+	 * @param string              $id          Unguessable job identifier; also its directory name.
+	 * @param Job_State           $state       Lifecycle state the job is in.
+	 * @param int                 $owner       WordPress user id the job is bound to.
+	 * @param string              $public_key  Caller's ephemeral X25519 public key, as base64.
+	 * @param array<int, string>  $tables      Requested table names, already resolved to existing tables.
+	 * @param array<int, string>  $files       Requested file paths, already resolved inside the root.
+	 * @param int                 $created_at  Unix timestamp the job was created at.
+	 * @param int                 $updated_at  Unix timestamp the job last changed state at.
+	 * @param string              $tick_secret Per-job secret authenticating the internal tick endpoint.
+	 * @param string              $artifact    Unguessable filename of the sealed artifact in the job directory.
+	 * @param Build_Progress|null $progress   How far the chunked build has got, or null before it begins.
 	 */
 	public function __construct(
 		public string $id,
@@ -79,6 +81,7 @@ final readonly class Extraction_Job {
 		public int $updated_at,
 		public string $tick_secret,
 		public string $artifact,
+		public ?Build_Progress $progress = null,
 	) {}
 
 	/**
@@ -95,7 +98,25 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress );
+
+	}
+
+	/**
+	 * Returns a copy carrying advanced build-progress, stamped as just updated.
+	 *
+	 * A tick that packages one bounded chunk records the point it reached this way,
+	 * leaving the job in its current state (running) with a fresh heartbeat so a
+	 * concurrent poll can tell it is actively progressing (ADR-0007).
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Build_Progress $progress The progress the latest chunk reached.
+	 * @return self A new record identical to this one but carrying the progress.
+	 */
+	public function with_progress( Build_Progress $progress ): self {
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress );
 
 	}
 
@@ -107,7 +128,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>}|null}
 	 */
 	public function to_array(): array {
 
@@ -123,6 +144,7 @@ final readonly class Extraction_Job {
 			'updated_at' => $this->updated_at,
 			'tick_secret' => $this->tick_secret,
 			'artifact' => $this->artifact,
+			'progress' => $this->progress?->to_array(),
 		];
 
 	}
@@ -159,6 +181,10 @@ final readonly class Extraction_Job {
 		$tick_secret = $data['tick_secret'] ?? null;
 		$artifact = $data['artifact'] ?? null;
 
+		// Build-progress is a schema-3 addition; an older record (or one whose build
+		// has not begun) simply carries none, so its absence is never disqualifying.
+		$progress = array_key_exists( 'progress', $data ) && $data['progress'] !== null ? Build_Progress::from_array( $data['progress'] ) : null;
+
 		// Reject the record unless every field is present and correctly typed; a
 		// pre-execution record without the tick secret or artifact name is a schema
 		// this release cannot drive, so it reads as no readable job here.
@@ -175,7 +201,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $files, $created_at, $updated_at, $tick_secret, $artifact );
+		return new self( $id, $state, $owner, $public_key, $tables, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress );
 
 	}
 

@@ -298,6 +298,29 @@ final class Job_Store {
 	}
 
 	/**
+	 * Returns the path the in-progress sealed container is built at across ticks.
+	 *
+	 * The chunked build (ADR-0007) appends one bounded segment per tick, so the
+	 * partially-built container must persist between ticks somewhere it is never
+	 * web-reachable and never observed as a finished artifact. That is the job's own
+	 * deny-hardened state directory — the same one that holds job.json — under a fixed
+	 * basename derived from the artifact token, so every tick reopens the same file.
+	 * Only at finalize is it published into the served downloads directory with the
+	 * atomic rename {@see artifact_path()} names, so a ready poll never sees a partial
+	 * container (ADR-0004/0008/0009).
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose in-progress container path to resolve.
+	 * @return string Absolute path to the in-progress container inside the job's state directory.
+	 */
+	public function container_build_path( Extraction_Job $job ): string {
+
+		return $this->base_path() . '/' . $job->id . '/' . $job->artifact . '.building';
+
+	}
+
+	/**
 	 * Returns the URL a ready job's artifact is downloaded from, or null.
 	 *
 	 * The artifact is a static file the web server serves directly (ADR-0004): safe

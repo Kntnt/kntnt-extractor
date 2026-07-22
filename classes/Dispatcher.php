@@ -17,18 +17,23 @@ use Throwable;
  * The extraction job's driver: it ticks a job forward and nudges an untended one.
  *
  * A job is advanced by a tick — a call authenticated by the job's own secret, so
- * the loopback driver can drive it without a WordPress session (ADR-0007). One
- * tick takes a queued small selection all the way to ready: it stamps the job
- * running, seals every table and file through the {@see Artifact_Builder}, and
- * marks it ready for download. A build that throws drops the job to failed rather
- * than leaving it wedged in running.
+ * the loopback driver can drive it without a WordPress session (ADR-0007). Each
+ * tick packages exactly ONE bounded chunk through the {@see Artifact_Builder} — one
+ * table dump, or one file part up to the configured chunk size — persists the
+ * progress, and leaves the job running with a fresh heartbeat while work remains, so
+ * the next tick resumes where this one stopped. Only the last chunk finalizes the
+ * container and marks the job ready for download; a large selection therefore
+ * completes across many ticks and survives an interruption between them. A build
+ * that throws drops the job to failed rather than leaving it wedged in running.
  *
- * The liveness signal is the job's own state and heartbeat, not a separate lock:
- * a running job whose updated-at is recent is being ticked right now, so neither a
- * second tick nor a poll's nudge competes for it; once that heartbeat goes stale
- * the job counts as stalled and a nudge may restart it. That is what lets a status
- * poll opportunistically nudge a job that is not currently being ticked, and only
- * such a job.
+ * Two liveness signals share the job's own state and heartbeat rather than a lock.
+ * A tick is the authenticated driver, so it advances any queued or still-running
+ * job — that is what lets each chunk's continuation carry the build forward. The
+ * poll-nudge, by contrast, treats a running job with a recent heartbeat as being
+ * ticked right now and leaves it alone, nudging only a queued or stalled one; once
+ * the heartbeat goes stale the job counts as stalled and a nudge may restart it.
+ * That split is what lets a status poll opportunistically restart a stalled queue
+ * without ever competing with a live driver mid-build.
  *
  * @since 0.1.0
  */
@@ -71,12 +76,15 @@ final class Dispatcher {
 	) {}
 
 	/**
-	 * Advances a job one tick, returning the job in whatever state it reached.
+	 * Advances a job by one bounded chunk, returning the job in the state it reached.
 	 *
-	 * A queued or stalled job is driven queued/running -> running -> ready in this
-	 * single call; a job that is finished, ready, or actively running is left
-	 * untouched, so a racing loopback and poll-nudge cannot rebuild a live or done
-	 * job. A build failure lands the job in failed.
+	 * A queued or running job is packaged one chunk further in this call: the first
+	 * chunk stamps it running, each subsequent one appends the next segment, and the
+	 * last one finalizes and publishes the container and marks the job ready. While
+	 * work remains the job is left running with a fresh heartbeat and a continuation
+	 * loopback is fired so the next chunk runs without waiting for a poll (ADR-0007).
+	 * A finished, ready, or terminal job is left untouched, so a duplicate loopback is
+	 * a harmless no-op. A build failure lands the job in failed.
 	 *
 	 * @since 0.1.0
 	 *
@@ -85,32 +93,50 @@ final class Dispatcher {
 	 */
 	public function tick( Extraction_Job $job ): Extraction_Job {
 
-		// Only an untended, unfinished job may run; everything else is a no-op.
-		if ( ! $this->needs_advance( $job ) ) {
+		// Only a queued or still-building job may advance; a ready or terminal job is a
+		// no-op, so a duplicate or late loopback never rebuilds a done job.
+		if ( $job->state !== Job_State::Queued && $job->state !== Job_State::Running ) {
 			return $job;
 		}
 
-		// Stamp the job running before any heavy work, so its fresh heartbeat marks
-		// it as actively ticking for any concurrent poll (ADR-0007), and announce it
-		// so observers can react to the transition.
+		// Stamp the job running with a fresh heartbeat before any heavy work, so a
+		// concurrent poll sees it as actively progressing (ADR-0007), and announce the
+		// queued -> running transition once so observers can react to it.
+		$was_queued = $job->state === Job_State::Queued;
 		$running = $job->with_state( Job_State::Running );
 		$this->store->save( $running );
-		do_action( 'kntnt_extractor_job_running', $running );
+		if ( $was_queued ) {
+			do_action( 'kntnt_extractor_job_running', $running );
+		}
 
-		// Seal the selection, then mark the job ready for download; a build that
-		// throws drops the job to failed rather than leaving it stuck in running.
+		// Package exactly one bounded chunk; a build that throws drops the job to failed
+		// rather than leaving it stuck in running.
 		try {
-			$this->builder->build( $running, $this->store->artifact_path( $running ) );
+			$progress = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
 		} catch ( Throwable ) {
 			$failed = $running->with_state( Job_State::Failed );
 			$this->store->save( $failed );
 			return $failed;
 		}
-		$ready = $running->with_state( Job_State::Ready );
-		$this->store->save( $ready );
-		do_action( 'kntnt_extractor_job_ready', $ready );
 
-		return $ready;
+		// A null result means the last chunk finalized and published the container, so
+		// the job is ready for download and its completion is announced.
+		if ( $progress === null ) {
+			$ready = $running->with_state( Job_State::Ready );
+			$this->store->save( $ready );
+			do_action( 'kntnt_extractor_job_ready', $ready );
+			return $ready;
+		}
+
+		// Work remains: persist the advanced progress, keep the job running with a fresh
+		// heartbeat, and fire the continuation loopback so the next chunk resumes without
+		// waiting for a poll. The nudge is unconditional here because this tick IS the
+		// driver scheduling its own next chunk, not the poll-nudge that defers to a live one.
+		$advanced = $running->with_progress( $progress );
+		$this->store->save( $advanced );
+		$this->nudge( $advanced );
+
+		return $advanced;
 
 	}
 

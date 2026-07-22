@@ -261,9 +261,17 @@ $observe_running = static function ( $job ) use ( &$mid_tick_state, $state_path 
 add_action( 'kntnt_extractor_job_running', $observe_running );
 
 // An anonymous caller holding the secret drives the job — proving the secret, not
-// a WordPress capability, authorizes the internal tick.
+// a WordPress capability, authorizes the internal tick. The build is chunked (one
+// bounded segment per tick, ADR-0007), so drive it across ticks until it is ready,
+// exactly as the loopback loop would; the first tick makes the queued -> running
+// transition the observer below captures.
 wp_set_current_user( 0 );
 $tick_response = $tick( $id, $tick_secret );
+$driven = 0;
+while ( $driven < 200 && ( $get_extraction( $id )->get_data()['state'] ?? null ) !== 'ready' ) {
+	$tick( $id, $tick_secret );
+	$driven++;
+}
 remove_action( 'kntnt_extractor_job_running', $observe_running );
 kntnt_extractor_assert( $tick_response->get_status() === 200, 'An anonymous caller holding the secret drives the tick (200) (AC1)' );
 kntnt_extractor_assert( $mid_tick_state === 'running', 'The job is persisted as running mid-tick (queued -> running -> ready) (AC2)' );

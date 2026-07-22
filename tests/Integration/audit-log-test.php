@@ -119,7 +119,18 @@ $drive_to_ready = static function ( array $selection ) use ( $post_extractions, 
 	}
 	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
 	$secret = is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
-	$tick( $id, $secret );
+
+	// The build is chunked (one bounded segment per tick, ADR-0007), so drive it
+	// across ticks until it reaches ready, exactly as the loopback loop would.
+	$driven = 0;
+	while ( $driven < 200 ) {
+		$current = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+		if ( is_array( $current ) && ( $current['state'] ?? null ) === 'ready' ) {
+			break;
+		}
+		$tick( $id, $secret );
+		$driven++;
+	}
 	return $id;
 };
 

@@ -1,6 +1,6 @@
 <?php
 /**
- * Builds a job's sealed artifact from its resolved table and file selection.
+ * Packages a job's resolved selection into its sealed artifact, one chunk per tick.
  *
  * @package Kntnt\Extractor
  * @since   0.1.0
@@ -12,64 +12,85 @@ namespace Kntnt\Extractor;
 
 use Kntnt\Extractor\Crypto\Sealed_Writer;
 use RuntimeException;
-use Throwable;
 
 /**
- * Packages a job's selection into one sealed, per-segment-encrypted artifact.
+ * Seals a job's selection into a per-segment-encrypted container, chunk by chunk.
  *
- * This is the seam between a resolved job and the crypto container: it draws each
- * table's dump and each file's bytes and hands them to {@see Sealed_Writer} as
- * ordered segments, so plaintext is only ever the single segment being sealed and
- * never a whole plain archive on disk (ADR-0009). Tables come first, then files,
- * and that order is the sealed index the caller reads back.
+ * This is the seam between a resolved job and the crypto container (ADR-0009). It
+ * draws each table's dump and each bounded part of each file and hands them to
+ * {@see Sealed_Writer} as ordered segments, so plaintext is only ever the single
+ * part being sealed and never a whole plain archive on disk. Tables come first,
+ * each a single segment; then files, each split into bounded parts sealed under its
+ * installation-root-relative path, so the sealed index can reassemble the ordered
+ * parts by that path (AC1).
  *
- * Files are packaged whole here. Splitting a large file into bounded parts — the
- * other half of ADR-0009's resumable format — is a later concern; the tracer
- * bullet this belongs to seals a small selection in a single pass.
+ * The build is resumable by construction (ADR-0007): {@see advance()} packages
+ * exactly ONE bounded chunk — one table dump, or one file part up to the configured
+ * chunk size — appends it to the in-progress container, and returns the progress the
+ * next tick resumes from, or null once the last chunk has finalized and published
+ * the container. Because each segment is sealed independently there is no
+ * cross-segment authentication state to serialise: resuming reopens the container
+ * and appends, never re-encrypting a completed segment.
  *
  * @since 0.1.0
  */
 final class Artifact_Builder {
 
 	/**
-	 * Binds the builder to the table dumper it draws SQL segments from.
+	 * Bytes of a file packaged per bounded part when the knob does not override it.
+	 *
+	 * A file larger than this is split into several independently-sealed parts, so a
+	 * large selection completes across many ticks and no single tick must hold a whole
+	 * file in memory (ADR-0007). Resolved through the Config seam under the knob
+	 * `chunk_size`, so a site tunes it with the `KNTNT_EXTRACTOR_CHUNK_SIZE` constant
+	 * or its filter, and tests force multi-chunk behaviour on small fixtures. This is
+	 * only the fallback when neither is set.
+	 *
+	 * @since 0.1.0
+	 */
+	private const int DEFAULT_CHUNK_SIZE = 8388608;
+
+	/**
+	 * Binds the builder to the table dumper and the Config seam it reads.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param Table_Dumper $dumper Produces each table's `mysqldump`-compatible SQL.
+	 * @param Config       $config The constant-then-filter configuration seam the chunk size resolves through.
 	 */
 	public function __construct(
 		private readonly Table_Dumper $dumper,
+		private readonly Config $config,
 	) {}
 
 	/**
-	 * Seals the job's selection into the container at the given destination.
+	 * Packages one bounded chunk of the job, or finalizes and publishes the container.
 	 *
-	 * The job's public key seals every segment, so only the caller's private key can
-	 * open the result. The write is encrypt-as-you-go: each table dump and each file
-	 * is sealed and appended in turn, and the container is finalized once.
+	 * A single call seals exactly one segment — the next table dump, or the next
+	 * bounded part of the file currently being packaged — into the in-progress
+	 * container at `$build_path`, appending to whatever earlier ticks left. When that
+	 * segment is the last of the selection the container's sealed index is written and
+	 * the finished container is published to `$download_path` with a single atomic
+	 * rename, so a ready poll never observes a partial container (ADR-0004/0008).
 	 *
-	 * The container is built into a private temporary file and published into place
-	 * with a single atomic rename. The extraction driver is deliberately lock-free
-	 * (ADR-0007), so two ticks can briefly race the same job; building to a temp file
-	 * and renaming means such a race can only ever replace one complete artifact with
-	 * another complete one, never leave the served path holding a half-written,
-	 * truncated container a ready poll would hand out. A build that fails removes its
-	 * temporary file rather than leaving a partial one behind in the served directory.
+	 * The job's own persisted {@see Build_Progress} (null before the first chunk) says
+	 * where to resume; the return value is the progress the next tick resumes from, or
+	 * null once the build is complete and published. The build is crash-safe: reopening
+	 * truncates the container back to the committed offset, so a partial write a crashed
+	 * tick left behind is discarded rather than sealed into the result (AC3).
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param Extraction_Job $job              The running job whose selection to seal.
-	 * @param string         $destination_path Absolute path the sealed container is published to.
-	 * @return void
+	 * @param Extraction_Job $job           The running job whose selection to package.
+	 * @param string         $build_path    Absolute path of the in-progress container in the job's state directory.
+	 * @param string         $download_path Absolute path the finished container is published to.
+	 * @return Build_Progress|null The progress to persist and resume from, or null once complete.
 	 *
-	 * @throws RuntimeException When the job's public key is undecodable, a requested
-	 *                          file resolves outside the root or cannot be opened, or
-	 *                          the container cannot be written or published.
-	 * @throws Throwable        Re-raised after a failed build removes its partial temp
-	 *                          artifact, so the driver can move the job to failed.
+	 * @throws RuntimeException When the public key is undecodable, a file resolves outside
+	 *                          the root or cannot be read, or the container cannot be
+	 *                          written or published.
 	 */
-	public function build( Extraction_Job $job, string $destination_path ): void {
+	public function advance( Extraction_Job $job, string $build_path, string $download_path ): ?Build_Progress {
 
 		// Recover the 32 raw bytes the seal draws each segment's key against from the
 		// canonical base64 the job persisted; an undecodable key is a corrupt record.
@@ -78,94 +99,166 @@ final class Artifact_Builder {
 			throw new RuntimeException( 'The job public key is not decodable base64.' );
 		}
 
-		// Build into a private temp file beside the destination so the rename below is a
-		// same-directory, atomic swap; a random suffix keeps two racing builds from
-		// sharing a temp path.
-		$temp_path = $destination_path . '.' . bin2hex( random_bytes( 8 ) ) . '.part';
-
-		try {
-
-			// Seal the selection in order — every table as a SQL segment, then every file
-			// as its own segment — and close the container exactly once.
-			$writer = new Sealed_Writer( $temp_path );
+		// Resume from the job's persisted progress, or start fresh when the build has not
+		// begun. A fresh build opens a new container and writes its header; a resumed one
+		// reopens the in-progress container at the committed offset to append.
+		$progress = $job->progress;
+		$writer = new Sealed_Writer( $build_path );
+		if ( $progress === null ) {
+			$tables_done = 0;
+			$file_index = 0;
+			$file_offset = 0;
+			$names = [];
 			$writer->open( $public_key );
-			foreach ( $job->tables as $table ) {
-				$writer->add_segment( $table, $this->sql_stream( $this->dumper->dump( $table ) ) );
-			}
-			foreach ( $job->files as $file ) {
-				$writer->add_segment( $file, $this->file_stream( $file ) );
-			}
-			$writer->finalize();
-
-			// Publish the finished container in one atomic rename, so the served path is
-			// never observed mid-write.
-			if ( ! rename( $temp_path, $destination_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic same-directory publish of the plugin's own sealed artifact; WP_Filesystem::move offers no atomicity guarantee.
-				throw new RuntimeException( 'Unable to publish the sealed artifact into place.' );
-			}
-
-		} catch ( Throwable $error ) {
-
-			// Never leave a partial temp file behind in the served directory; drop it and
-			// re-raise so the driver can move the job to failed.
-			if ( is_file( $temp_path ) ) {
-				unlink( $temp_path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own abandoned temp artifact from its scratch area.
-			}
-			throw $error;
-
+		} else {
+			$tables_done = $progress->tables_done;
+			$file_index = $progress->file_index;
+			$file_offset = $progress->file_offset;
+			$names = $progress->segment_names;
+			$writer->resume( $public_key, $names, $progress->container_bytes );
 		}
+
+		// Seal the next bounded chunk: every table as one segment first, then each file
+		// as bounded parts under its relative path. When both selections are exhausted
+		// there is no data segment left and only the trailer remains to be written.
+		if ( $tables_done < count( $job->tables ) ) {
+			$table = $job->tables[ $tables_done ];
+			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump( $table ) ) );
+			$names[] = $table;
+			++$tables_done;
+		} elseif ( $file_index < count( $job->files ) ) {
+			$file = $job->files[ $file_index ];
+			[ $part, $next_offset, $file_done ] = $this->read_part( $file, $file_offset );
+			$writer->add_segment( $file, $this->stream_of( $part ) );
+			$names[] = $file;
+			if ( $file_done ) {
+				++$file_index;
+				$file_offset = 0;
+			} else {
+				$file_offset = $next_offset;
+			}
+		} else {
+			$writer->finalize();
+			$this->publish( $build_path, $download_path );
+			return null;
+		}
+
+		// The build is complete once the last table and the last file part are sealed:
+		// finalize the sealed index and publish the container in one atomic rename.
+		// Otherwise suspend the container and hand back the offset the next tick resumes
+		// from, so a completed segment is never redone or re-encrypted.
+		if ( $tables_done >= count( $job->tables ) && $file_index >= count( $job->files ) ) {
+			$writer->finalize();
+			$this->publish( $build_path, $download_path );
+			return null;
+		}
+		$container_bytes = $writer->suspend();
+
+		return new Build_Progress( $tables_done, $file_index, $file_offset, $container_bytes, $names );
 
 	}
 
 	/**
-	 * Wraps a table dump in an in-memory stream for the sealed writer to consume.
+	 * Reads the next bounded part of a file, reporting whether it reaches the end.
+	 *
+	 * The part is at most the configured chunk size, read from the given offset; an
+	 * empty file yields a single empty part so it still appears in the sealed index.
+	 * The returned flag is true once the part reaches or passes the file's end, which
+	 * is how {@see advance()} knows to move on to the next file.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string $sql The table's dumped SQL.
-	 * @return resource A rewound readable stream over the SQL.
+	 * @param string $file   The installation-root-relative file path.
+	 * @param int    $offset Byte offset the part starts at.
+	 * @return array{0: string, 1: int, 2: bool} The part bytes, the offset after it, and
+	 *                                            whether the file is now fully packaged.
 	 *
-	 * @throws RuntimeException When the in-memory stream cannot be opened.
+	 * @throws RuntimeException When the path resolves outside the root or cannot be read.
 	 */
-	private function sql_stream( string $sql ) {
+	private function read_part( string $file, int $offset ): array {
 
-		// A php://temp stream keeps the segment in memory for small dumps and spills
-		// to a temp file only if it grows large, matching the writer's one-segment
-		// working set.
-		$stream = fopen( 'php://temp', 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- an in-memory buffer handed to the streaming sealed writer, not a filesystem write.
-		if ( $stream === false ) {
-			throw new RuntimeException( 'Unable to open an in-memory stream for a table dump.' );
+		// Re-resolve the path inside the root every time (defence in depth against a
+		// record altered after create-time validation), then measure the file so the
+		// end-of-file decision does not depend on a short read alone.
+		$abs = $this->resolve_in_root( $file );
+		$size = filesize( $abs );
+		if ( $size === false ) {
+			throw new RuntimeException( 'Unable to size a requested file for packaging.' );
 		}
-		fwrite( $stream, $sql ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- writing to the in-memory buffer above.
-		rewind( $stream );
 
-		return $stream;
+		// Open the validated path, seek to the part's offset, and read one bounded chunk;
+		// past the end this reads nothing, which still yields a single empty part for an
+		// empty file. Direct stream I/O is required because a part is read incrementally.
+		$handle = fopen( $abs, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- streaming a bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
+		if ( $handle === false ) {
+			throw new RuntimeException( 'Unable to open a requested file for packaging.' );
+		}
+		if ( $offset > 0 && fseek( $handle, $offset ) === -1 ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing after a failed seek; see the fopen above.
+			throw new RuntimeException( 'Unable to seek a requested file for packaging.' );
+		}
+		$part = $offset < $size ? (string) fread( $handle, max( 1, $this->chunk_size() ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading one bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the read handle after one bounded part; see the fopen above.
+
+		// Report the offset after this part and whether it reached the file's end, so the
+		// caller advances to the next file only once the whole file is packaged.
+		$next_offset = $offset + strlen( $part );
+
+		return [ $part, $next_offset, $next_offset >= $size ];
 
 	}
 
 	/**
-	 * Opens a requested file for reading after re-checking it is inside the root.
+	 * Publishes the finished container into the served downloads directory atomically.
+	 *
+	 * The in-progress container is built in the job's deny-hardened state directory and
+	 * moved into the served directory only here, with a single rename, so a ready poll
+	 * never observes a partial container and no plaintext ever lands in the served area
+	 * (ADR-0008/0009). Both directories are siblings on one filesystem, so the rename is
+	 * atomic.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param string $build_path    Absolute path of the finished container in the state directory.
+	 * @param string $download_path Absolute path in the served downloads directory to publish to.
+	 * @return void
+	 *
+	 * @throws RuntimeException When the container cannot be published into place.
+	 */
+	private function publish( string $build_path, string $download_path ): void {
+
+		// Move the sealed container into the served directory in one atomic step.
+		if ( ! rename( $build_path, $download_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic same-filesystem publish of the plugin's own sealed artifact; WP_Filesystem::move offers no atomicity guarantee.
+			throw new RuntimeException( 'Unable to publish the sealed artifact into place.' );
+		}
+
+	}
+
+	/**
+	 * Resolves a requested file to a real absolute path at or under the root, or fails.
 	 *
 	 * The path was validated when the job was created, but a job record can be read
 	 * again much later; re-resolving it against the installation root here is defence
-	 * in depth against a record altered in between, and it is a boundary check, never
-	 * a sanitiser — a path that resolves outside the root fails the build outright.
+	 * in depth against a record altered in between, and it is a boundary check, never a
+	 * sanitiser — a path that resolves outside the root fails the build outright. The
+	 * root and the resolved path are compared on `wp_normalize_path`'d separators so the
+	 * boundary holds on Windows/IIS too, where `realpath` renders paths with backslashes
+	 * a forward-slash prefix would never match — the same normalisation the create-time
+	 * check applies (Extractions_Controller::first_out_of_root_file). A null byte counts
+	 * as out of root because `realpath` would raise a ValueError on it.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param string $file The installation-root-relative file path.
-	 * @return resource A readable stream over the file.
+	 * @return string The validated absolute path.
 	 *
-	 * @throws RuntimeException When the path resolves outside the root or cannot be opened.
+	 * @throws RuntimeException When the path resolves outside the root.
 	 */
-	private function file_stream( string $file ) {
+	private function resolve_in_root( string $file ): string {
 
 		// Fail closed unless the path resolves to a real location at or under the
-		// canonical installation root. The root and the resolved path are compared on
-		// wp_normalize_path'd separators so the boundary holds on Windows/IIS too, where
-		// realpath renders paths with backslashes a forward-slash prefix would never
-		// match — the same normalisation the create-time check applies
-		// (Extractions_Controller::first_out_of_root_file). A null byte counts as out of
-		// root because realpath would raise a ValueError on it.
+		// canonical installation root, comparing on normalised separators so the boundary
+		// holds on every platform.
 		$root = realpath( ABSPATH );
 		$root = $root === false ? false : wp_normalize_path( $root );
 		$abs = $root === false || str_contains( $file, "\0" ) ? false : realpath( $root . '/' . $file );
@@ -174,13 +267,49 @@ final class Artifact_Builder {
 			throw new RuntimeException( 'A requested file resolves outside the installation root.' );
 		}
 
-		// Open the validated absolute path for the writer to seal.
-		$stream = fopen( $abs, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- streaming a selected file into the sealed writer; WP_Filesystem has no incremental-read API.
+		return $abs;
+
+	}
+
+	/**
+	 * Wraps a byte string in a rewound in-memory stream for the sealed writer.
+	 *
+	 * A `php://temp` stream keeps the segment in memory for small chunks and spills to a
+	 * temp file only if it grows large, matching the writer's one-segment working set.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param string $data The segment's plaintext — a table dump or a bounded file part.
+	 * @return resource A rewound readable stream over the data.
+	 *
+	 * @throws RuntimeException When the in-memory stream cannot be opened.
+	 */
+	private function stream_of( string $data ) {
+
+		// Buffer the bounded chunk in memory and rewind it for the streaming writer.
+		$stream = fopen( 'php://temp', 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- an in-memory buffer handed to the streaming sealed writer, not a filesystem write.
 		if ( $stream === false ) {
-			throw new RuntimeException( 'Unable to open a requested file for packaging.' );
+			throw new RuntimeException( 'Unable to open an in-memory stream for a segment.' );
 		}
+		fwrite( $stream, $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- writing to the in-memory buffer above.
+		rewind( $stream );
 
 		return $stream;
+
+	}
+
+	/**
+	 * Resolves the file-part chunk size through the Config seam, clamped to at least one.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @return int The maximum bytes packaged into one file part.
+	 */
+	private function chunk_size(): int {
+
+		$configured = $this->config->get( 'chunk_size', self::DEFAULT_CHUNK_SIZE );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_CHUNK_SIZE );
 
 	}
 
