@@ -108,12 +108,24 @@ final class Artifact_Builder {
 			$tables_done = 0;
 			$file_index = 0;
 			$file_offset = 0;
+			$file_size = null;
+			$file_mtime = null;
 			$names = [];
 			$writer->open( $public_key );
 		} else {
+
+			// A prior tick may have finalized and published the container, then died in
+			// the window before its ready state was saved; the build file is gone but the
+			// finished artifact already sits at the download path. Treat that as complete
+			// rather than failing to resume a container that was correctly moved away.
+			if ( ! is_file( $build_path ) && is_file( $download_path ) ) {
+				return null;
+			}
 			$tables_done = $progress->tables_done;
 			$file_index = $progress->file_index;
 			$file_offset = $progress->file_offset;
+			$file_size = $progress->file_size;
+			$file_mtime = $progress->file_mtime;
 			$names = $progress->segment_names;
 			$writer->resume( $public_key, $names, $progress->container_bytes );
 		}
@@ -128,12 +140,14 @@ final class Artifact_Builder {
 			++$tables_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
-			[ $part, $next_offset, $file_done ] = $this->read_part( $file, $file_offset );
+			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime );
 			$writer->add_segment( $file, $this->stream_of( $part ) );
 			$names[] = $file;
 			if ( $file_done ) {
 				++$file_index;
 				$file_offset = 0;
+				$file_size = null;
+				$file_mtime = null;
 			} else {
 				$file_offset = $next_offset;
 			}
@@ -154,7 +168,7 @@ final class Artifact_Builder {
 		}
 		$container_bytes = $writer->suspend();
 
-		return new Build_Progress( $tables_done, $file_index, $file_offset, $container_bytes, $names );
+		return new Build_Progress( $tables_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime );
 
 	}
 
@@ -166,24 +180,45 @@ final class Artifact_Builder {
 	 * The returned flag is true once the part reaches or passes the file's end, which
 	 * is how {@see advance()} knows to move on to the next file.
 	 *
+	 * The file's size and mtime are pinned when its first part is sealed and enforced
+	 * on every later part: a multi-tick build spans minutes, and a file under the
+	 * installation root (an upload, a cache, a log) can be rewritten, grow, or be
+	 * truncated between ticks. Splicing two versions into one segment stream would
+	 * publish a hybrid the caller cannot detect, so a changed identity fails the build
+	 * outright rather than sealing corrupt data as an authentic extraction (AC2/AC5).
+	 * The returned identity is the pinned one — captured now on the first part, carried
+	 * through unchanged on later parts — for the caller to persist.
+	 *
 	 * @since 0.1.0
 	 *
-	 * @param string $file   The installation-root-relative file path.
-	 * @param int    $offset Byte offset the part starts at.
-	 * @return array{0: string, 1: int, 2: bool} The part bytes, the offset after it, and
-	 *                                            whether the file is now fully packaged.
+	 * @param string   $file           The installation-root-relative file path.
+	 * @param int      $offset         Byte offset the part starts at.
+	 * @param int|null $expected_size  Pinned size from the first part, or null on the first part.
+	 * @param int|null $expected_mtime Pinned mtime from the first part, or null on the first part.
+	 * @return array{0: string, 1: int, 2: bool, 3: int, 4: int} The part bytes, the offset
+	 *         after it, whether the file is now fully packaged, and the pinned size and mtime.
 	 *
-	 * @throws RuntimeException When the path resolves outside the root or cannot be read.
+	 * @throws RuntimeException When the path resolves outside the root, cannot be read, or
+	 *                          changed since its first part was sealed.
 	 */
-	private function read_part( string $file, int $offset ): array {
+	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime ): array {
 
 		// Re-resolve the path inside the root every time (defence in depth against a
 		// record altered after create-time validation), then measure the file so the
 		// end-of-file decision does not depend on a short read alone.
 		$abs = $this->resolve_in_root( $file );
 		$size = filesize( $abs );
-		if ( $size === false ) {
+		$mtime = filemtime( $abs );
+		if ( $size === false || $mtime === false ) {
 			throw new RuntimeException( 'Unable to size a requested file for packaging.' );
+		}
+
+		// Enforce the file's pinned identity on every part after the first: a size or
+		// mtime that no longer matches means the file was rewritten, grew, or shrank
+		// mid-build, so the parts would splice two versions — fail rather than seal a
+		// hybrid. The first part (null expectation) pins the identity the rest hold to.
+		if ( ( $expected_size !== null && $size !== $expected_size ) || ( $expected_mtime !== null && $mtime !== $expected_mtime ) ) {
+			throw new RuntimeException( 'A requested file changed while it was being packaged.' );
 		}
 
 		// Open the validated path, seek to the part's offset, and read one bounded chunk;
@@ -204,7 +239,7 @@ final class Artifact_Builder {
 		// caller advances to the next file only once the whole file is packaged.
 		$next_offset = $offset + strlen( $part );
 
-		return [ $part, $next_offset, $next_offset >= $size ];
+		return [ $part, $next_offset, $next_offset >= $size, $size, $mtime ];
 
 	}
 

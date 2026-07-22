@@ -86,6 +86,14 @@ final class Dispatcher {
 	 * A finished, ready, or terminal job is left untouched, so a duplicate loopback is
 	 * a harmless no-op. A build failure lands the job in failed.
 	 *
+	 * Ticks on one job are serialised by a per-job advisory lock. The lock-free queue
+	 * (ADR-0007) lets a continuation loopback and a poll-nudge fire against the same
+	 * job at once, and both appending to the single in-progress container would corrupt
+	 * it or clobber a finished job back to failed. This call takes the lock for its
+	 * whole duration; a racer that cannot take it touches nothing and no-ops. Under the
+	 * lock the job is re-read so the decision runs on its committed state, not a
+	 * snapshot a racing tick may already have carried to ready or failed.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job to advance.
@@ -93,11 +101,50 @@ final class Dispatcher {
 	 */
 	public function tick( Extraction_Job $job ): Extraction_Job {
 
-		// Only a queued or still-building job may advance; a ready or terminal job is a
+		// Cheap pre-check before touching the filesystem: a ready or terminal job is a
 		// no-op, so a duplicate or late loopback never rebuilds a done job.
 		if ( $job->state !== Job_State::Queued && $job->state !== Job_State::Running ) {
 			return $job;
 		}
+
+		// Serialise ticks on this job; a racer that cannot take the lock no-ops rather
+		// than racing the shared container.
+		$lock = $this->lock( $job );
+		if ( $lock === null ) {
+			return $job;
+		}
+
+		try {
+
+			// Re-read under the lock and re-check the guard against the committed state, so
+			// a tick that lost the race to finish this job cannot rebuild it or clobber the
+			// state the winner already saved.
+			$current = $this->store->find( $job->id ) ?? $job;
+			if ( $current->state !== Job_State::Queued && $current->state !== Job_State::Running ) {
+				return $current;
+			}
+
+			return $this->advance_one_chunk( $current );
+
+		} finally {
+			$this->unlock( $lock );
+		}
+
+	}
+
+	/**
+	 * Packages one bounded chunk of a lock-held, queued-or-running job to its next state.
+	 *
+	 * Split from {@see tick()} so the locking and re-read stay readable above it: by the
+	 * time this runs the per-job lock is held and the job's committed state has been
+	 * confirmed to be queued or running.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job, freshly read under the tick lock.
+	 * @return Extraction_Job The job in its resulting state.
+	 */
+	private function advance_one_chunk( Extraction_Job $job ): Extraction_Job {
 
 		// Stamp the job running with a fresh heartbeat before any heavy work, so a
 		// concurrent poll sees it as actively progressing (ADR-0007), and announce the
@@ -137,6 +184,51 @@ final class Dispatcher {
 		$this->nudge( $advanced );
 
 		return $advanced;
+
+	}
+
+	/**
+	 * Takes the per-job tick lock, returning the held handle or null under contention.
+	 *
+	 * An exclusive non-blocking advisory lock on the job's lock file
+	 * ({@see Job_Store::container_lock_path()}) is what serialises overlapping ticks.
+	 * A null return means another tick holds it (or the lock file cannot be opened), and
+	 * the caller no-ops — the live tick, or the cron watchdog, carries the job forward.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job to lock.
+	 * @return resource|null The held lock handle to pass to {@see unlock()}, or null under contention.
+	 */
+	private function lock( Extraction_Job $job ) {
+
+		// Open the job's lock file, creating it if absent, and try to take it without
+		// blocking; hand the still-open handle back so the lock is held until unlock().
+		$handle = fopen( $this->store->container_lock_path( $job ), 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- opening the plugin's own per-job advisory lock file, not a filesystem write.
+		if ( $handle === false ) {
+			return null;
+		}
+		if ( ! flock( $handle, LOCK_EX | LOCK_NB ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the lock handle when the lock is already held elsewhere.
+			return null;
+		}
+
+		return $handle;
+
+	}
+
+	/**
+	 * Releases the per-job tick lock held on the given handle.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param resource $handle The lock handle returned by {@see lock()}.
+	 * @return void
+	 */
+	private function unlock( $handle ): void {
+
+		flock( $handle, LOCK_UN );
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the per-job advisory lock handle after the tick.
 
 	}
 

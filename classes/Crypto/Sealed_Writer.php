@@ -181,6 +181,13 @@ final class Sealed_Writer {
 	 * crashed tick left past it is discarded here rather than sealed into the result —
 	 * the write path's counterpart to {@see write()}'s short-write guard.
 	 *
+	 * The anchor is trusted only after it is proven consistent with the file on disk.
+	 * A container shorter than the anchor — a torn progress/container write (they live
+	 * in separate files with no ordering guarantee), a truncated file, or tampering —
+	 * would otherwise have `ftruncate` EXTEND it with NUL bytes, sealing a run of zeros
+	 * into the record stream and publishing a well-framed but unopenable artifact.
+	 * Every neighbouring path in this seam fails closed; so does this one.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param string             $public_key      The caller's ephemeral X25519 public key, exactly
@@ -191,8 +198,9 @@ final class Sealed_Writer {
 	 *
 	 * @throws LogicException     When a container is already open on this writer.
 	 * @throws Invalid_Public_Key When the key is absent or the wrong length.
-	 * @throws RuntimeException    When the container cannot be reopened, truncated, or
-	 *                             positioned for appending.
+	 * @throws RuntimeException    When the anchor is inconsistent with the container on
+	 *                             disk, or the container cannot be reopened, truncated,
+	 *                             or positioned for appending.
 	 */
 	public function resume( string $public_key, array $committed_names, int $committed_bytes ): void {
 
@@ -205,14 +213,30 @@ final class Sealed_Writer {
 			throw new Invalid_Public_Key( 'A sealed container requires a 32-byte X25519 public key.' );
 		}
 
-		// Reopen the existing container for in-place update, drop anything past the
-		// committed offset a crashed tick may have left, and position at the end so the
-		// next segment appends cleanly.
+		// Fail closed on an anchor that cannot describe a real in-progress container:
+		// it must at least cover the format header, and the file on disk must already be
+		// that long. A shorter file means the anchor and the container disagree, and
+		// extending it with zeros would corrupt the sealed result — so it is rejected
+		// rather than coerced.
+		$header_length = strlen( self::MAGIC ) + 1;
+		$size = is_file( $this->destination_path ) ? filesize( $this->destination_path ) : false;
+		if ( $committed_bytes < $header_length || $size === false || $size < $committed_bytes ) {
+			throw new RuntimeException( 'The in-progress sealed container is shorter than its committed offset.' );
+		}
+
+		// Reopen the existing container for in-place update and verify it still begins
+		// with this format's header before trusting the anchor, then drop anything past
+		// the committed offset a crashed tick may have left and position at the end so
+		// the next segment appends cleanly.
 		$handle = fopen( $this->destination_path, 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming a streaming encrypt-as-you-go write; WP_Filesystem has no incremental-append API.
 		if ( $handle === false ) {
 			throw new RuntimeException( 'Unable to reopen the in-progress sealed container.' );
 		}
-		$committed_bytes = max( 0, $committed_bytes );
+		$header = (string) fread( $handle, $header_length ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading the container's own format header to validate the resume anchor.
+		if ( $header !== self::MAGIC . chr( self::FORMAT_VERSION ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a rejected header; see open().
+			throw new RuntimeException( 'The in-progress sealed container is missing its format header.' );
+		}
 		if ( ftruncate( $handle, $committed_bytes ) === false || fseek( $handle, $committed_bytes ) === -1 ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a failed reopen; see open().
 			throw new RuntimeException( 'Unable to position the in-progress sealed container for appending.' );

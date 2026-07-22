@@ -19,14 +19,21 @@ namespace Kntnt\Extractor;
  * tick needs to resume without redoing or corrupting a completed segment: how many
  * table segments are sealed, which file is being packaged and the byte offset
  * within it already sealed, the committed byte length of the in-progress container,
- * and the ordered names of every segment written so far (the sealed index the
- * container is finalized with).
+ * the ordered names of every segment written so far (the sealed index the container
+ * is finalized with), and the identity of the file currently being split into parts.
  *
  * The container-byte offset is the resume anchor: a tick reopens the in-progress
  * container, truncates it back to this length — discarding any partial write a
  * crashed prior tick left past it — and appends the next sealed segment. Because
  * each segment is sealed independently (ADR-0009), resuming needs no cross-segment
  * authentication state, only this bookkeeping.
+ *
+ * The file identity — the size and mtime captured when a file's first part was
+ * sealed — pins the version being packaged. A multi-tick build spans minutes, and a
+ * file under the installation root can be rewritten, grow, or be truncated between
+ * ticks; verifying the identity on every later part is what stops two versions from
+ * being spliced into one segment stream and published as an authentic extraction.
+ * Both are null between files, when no file is mid-package.
  *
  * @since 0.1.0
  */
@@ -42,6 +49,8 @@ final readonly class Build_Progress {
 	 * @param int                $file_offset     Bytes of that file already sealed into earlier parts.
 	 * @param int                $container_bytes Committed byte length of the in-progress container.
 	 * @param array<int, string> $segment_names   Names of every sealed segment so far, in write order.
+	 * @param int|null           $file_size       Size of the mid-package file when its first part was sealed, or null between files.
+	 * @param int|null           $file_mtime      Mtime of the mid-package file when its first part was sealed, or null between files.
 	 */
 	public function __construct(
 		public int $tables_done,
@@ -49,6 +58,8 @@ final readonly class Build_Progress {
 		public int $file_offset,
 		public int $container_bytes,
 		public array $segment_names,
+		public ?int $file_size = null,
+		public ?int $file_mtime = null,
 	) {}
 
 	/**
@@ -56,7 +67,7 @@ final readonly class Build_Progress {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{tables_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>}
+	 * @return array{tables_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}
 	 */
 	public function to_array(): array {
 
@@ -66,6 +77,8 @@ final readonly class Build_Progress {
 			'file_offset' => $this->file_offset,
 			'container_bytes' => $this->container_bytes,
 			'segment_names' => $this->segment_names,
+			'file_size' => $this->file_size,
+			'file_mtime' => $this->file_mtime,
 		];
 
 	}
@@ -84,8 +97,10 @@ final readonly class Build_Progress {
 	 */
 	public static function from_array( mixed $data ): ?self {
 
-		// A progress record is a map of the four integer counters plus a list of
-		// segment names; anything missing or ill-typed disqualifies it.
+		// A progress record is a map of the four counters plus a list of segment names
+		// and an optional file identity; anything missing or ill-typed disqualifies it.
+		// The counters are byte offsets and indices, so a negative one is nonsensical
+		// and rejected outright rather than fed to a truncate that would misread it.
 		if ( ! is_array( $data ) ) {
 			return null;
 		}
@@ -94,15 +109,37 @@ final readonly class Build_Progress {
 		$file_offset = $data['file_offset'] ?? null;
 		$container_bytes = $data['container_bytes'] ?? null;
 		$segment_names = self::string_list( $data['segment_names'] ?? null );
-		if ( ! is_int( $tables_done )
-			|| ! is_int( $file_index )
-			|| ! is_int( $file_offset )
-			|| ! is_int( $container_bytes )
-			|| $segment_names === null ) {
+		$file_size = self::non_negative_or_null( $data['file_size'] ?? null );
+		$file_mtime = self::non_negative_or_null( $data['file_mtime'] ?? null );
+		if ( ! is_int( $tables_done ) || $tables_done < 0
+			|| ! is_int( $file_index ) || $file_index < 0
+			|| ! is_int( $file_offset ) || $file_offset < 0
+			|| ! is_int( $container_bytes ) || $container_bytes < 0
+			|| $segment_names === null
+			|| $file_size === false
+			|| $file_mtime === false ) {
 			return null;
 		}
 
-		return new self( $tables_done, $file_index, $file_offset, $container_bytes, $segment_names );
+		return new self( $tables_done, $file_index, $file_offset, $container_bytes, $segment_names, $file_size, $file_mtime );
+
+	}
+
+	/**
+	 * Narrows a decoded value to a non-negative int, null, or `false` when neither.
+	 *
+	 * The file identity is optional (null between files) but, when present, is a size
+	 * or mtime that cannot be negative; a `false` result signals a disqualifying value
+	 * the caller rejects, distinct from a legitimately absent identity of null.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param mixed $value A decoded `file_size` or `file_mtime` value.
+	 * @return int|null|false The non-negative int, null when absent, or false when invalid.
+	 */
+	private static function non_negative_or_null( mixed $value ): int|null|false {
+
+		return $value === null ? null : ( is_int( $value ) && $value >= 0 ? $value : false );
 
 	}
 

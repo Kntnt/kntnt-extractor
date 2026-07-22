@@ -392,10 +392,12 @@ final class Extractions_Controller {
 	 * Advances a job one tick and reports the state it reached.
 	 *
 	 * The permission callback has already authenticated the secret and proven the job
-	 * exists, so this reloads it and hands it to the driver. A tick on a finished or
-	 * actively-running job is a no-op there, so a duplicate loopback is harmless. The
-	 * job can still be swept between the permission check and here, which reads as a
-	 * 404 rather than a fatal on a vanished record.
+	 * exists, so this reloads it and hands it to the driver. The driver advances a
+	 * queued or still-building job by one bounded chunk and leaves a ready or terminal
+	 * one untouched; overlapping ticks are serialised by a per-job lock there, so a
+	 * duplicate or racing loopback is a harmless no-op. The job can still be swept
+	 * between the permission check and here, which reads as a 404 rather than a fatal on
+	 * a vanished record.
 	 *
 	 * @since 0.1.0
 	 *

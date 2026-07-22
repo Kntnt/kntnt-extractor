@@ -321,6 +321,32 @@ final class Job_Store {
 	}
 
 	/**
+	 * Returns the path of the per-job lock a tick holds while it advances the build.
+	 *
+	 * The extraction driver is lock-free at the queue level (ADR-0007), so a
+	 * continuation loopback and a status poll's nudge can fire against the same job at
+	 * once. Both would otherwise reopen and append to the single in-progress container
+	 * ({@see container_build_path()}), interleaving writes that corrupt already-sealed
+	 * segments or clobber a finished job. A tick takes an exclusive advisory lock on
+	 * this sibling file for its whole duration; a losing racer touches nothing and
+	 * no-ops. It lives in the job's own deny-hardened state directory, never web-
+	 * reachable and never published, and is removed with the directory when the job is
+	 * purged. A dedicated file (rather than the container or job.json) is used so the
+	 * lock outlives the rename that publishes the container and the rewrites that save
+	 * the record.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job whose tick lock path to resolve.
+	 * @return string Absolute path to the per-job tick lock file inside the state directory.
+	 */
+	public function container_lock_path( Extraction_Job $job ): string {
+
+		return $this->base_path() . '/' . $job->id . '/' . $job->artifact . '.lock';
+
+	}
+
+	/**
 	 * Returns the URL a ready job's artifact is downloaded from, or null.
 	 *
 	 * The artifact is a static file the web server serves directly (ADR-0004): safe

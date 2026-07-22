@@ -323,11 +323,21 @@ kntnt_extractor_assert( is_int( $progress['container_bytes'] ?? null ) && $progr
 $build_glob = glob( $work . '/' . $r_id . '/*' );
 $build_file = '';
 foreach ( is_array( $build_glob ) ? $build_glob : [] as $candidate ) {
-	if ( is_file( $candidate ) && basename( $candidate ) !== 'job.json' && basename( $candidate ) !== 'index.html' ) {
+	if ( is_file( $candidate ) && str_ends_with( $candidate, '.building' ) ) {
 		$build_file = $candidate;
 	}
 }
 kntnt_extractor_assert( $build_file !== '' && is_file( $build_file ), 'The in-progress container lives in the per-job working directory, not the served downloads (AC3)' );
+
+// Snapshot the committed prefix — the first container_bytes of the in-progress
+// container, the two completed segments and the header. A true resume appends after
+// this and never rewrites it, so the published artifact must begin with exactly
+// these bytes; a rebuild-from-scratch reseals those segments under fresh random keys
+// and nonces, changing the bytes, so this is a precise no-redo detector (AC3).
+$committed_bytes = is_array( $progress ) && is_int( $progress['container_bytes'] ?? null ) ? $progress['container_bytes'] : 0;
+$committed_prefix = $build_file !== '' && $committed_bytes > 0 ? substr( (string) file_get_contents( $build_file ), 0, $committed_bytes ) : '';
+kntnt_extractor_assert( strlen( $committed_prefix ) === $committed_bytes && $committed_bytes > 0, 'The committed prefix of the in-progress container is captured before the interruption (AC3)' );
+
 if ( $build_file !== '' ) {
 	file_put_contents( $build_file, random_bytes( 32 ), FILE_APPEND );
 }
@@ -348,6 +358,11 @@ $r_names = $open_index( $r_container['sealed_index'], $keypair );
 // not sealed as an extra segment.
 $expected_segments = 1 + $expected_parts;
 kntnt_extractor_assert( is_array( $r_names ) && count( $r_names ) === $expected_segments && count( $r_container['records'] ) === $expected_segments, 'The resumed container has exactly the expected segments — none redone, duplicated, or corrupted (AC3)' );
+
+// The published artifact begins with the exact committed prefix captured before the
+// interruption: the completed segments were resumed, not resealed. Any redo would
+// have changed these bytes (fresh keys and nonces), so this fails on a rebuild.
+kntnt_extractor_assert( $committed_prefix !== '' && str_starts_with( $r_raw, $committed_prefix ), 'The resumed artifact keeps the exact committed prefix — completed segments are not redone or re-encrypted (AC3)' );
 
 $r_reassembled = '';
 foreach ( $r_container['records'] as $i => $record ) {
