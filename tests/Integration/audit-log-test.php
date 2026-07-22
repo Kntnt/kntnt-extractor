@@ -150,7 +150,9 @@ $entries = is_array( $audit ) && isset( $audit['entries'] ) && is_array( $audit[
 kntnt_extractor_assert( count( $entries ) === 1, 'Reaching ready appends exactly one audit entry (AC1)' );
 
 $entry = $entries[0] ?? [];
-kntnt_extractor_assert( is_int( $entry['ts'] ?? null ) && $entry['ts'] >= $before, 'The entry stamps a recent ts (AC1)' );
+$ts = $entry['ts'] ?? null;
+kntnt_extractor_assert( is_string( $ts ) && preg_match( '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', (string) $ts ) === 1, 'The entry stamps ts as an ISO-8601 UTC string (AC1)' );
+kntnt_extractor_assert( is_string( $ts ) && strtotime( (string) $ts ) >= $before, 'The ts is a recent instant (AC1)' );
 kntnt_extractor_assert( ( $entry['user_id'] ?? null ) === $owner->ID, 'The entry records the owning user_id (AC1)' );
 kntnt_extractor_assert( ( $entry['user_login'] ?? null ) === $owner->user_login, 'The entry records the user_login (AC1)' );
 kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 1, 'The entry records the api_version (AC1)' );
