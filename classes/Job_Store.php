@@ -481,11 +481,17 @@ final class Job_Store {
 	/**
 	 * Recursively removes a directory, bounded to stay strictly under a trusted root.
 	 *
-	 * Every level re-resolves the directory and refuses to act unless it sits strictly
-	 * beneath the boundary, and it unlinks a symlink rather than descending through it,
-	 * so this irreversible walk can never escape the job's own directory even if a
-	 * hostile entry were planted inside it. A path that is not a real directory is
-	 * simply nothing to remove.
+	 * A symlinked top-level path is treated as residue in itself — the link is unlinked
+	 * and never followed — so a link planted at the directory this walk is aimed at can
+	 * never redirect the irreversible removal into a directory it does not own. Below
+	 * that, every level re-resolves the directory and refuses to act unless it sits
+	 * strictly beneath the boundary, and it unlinks a symlink child rather than
+	 * descending through it, so the walk can never escape the job's own directory even
+	 * if a hostile entry were planted inside it. The boundary comparison runs on
+	 * `wp_normalize_path()`'d separators and stays root-safe (a boundary of `/` still
+	 * yields a usable `/` prefix), so the strict-beneath check holds on every platform —
+	 * Windows realpath yields backslashes a forward-slash needle would otherwise miss.
+	 * A path that is not a real directory is simply nothing to remove.
 	 *
 	 * @since 0.1.0
 	 *
@@ -495,11 +501,27 @@ final class Job_Store {
 	 */
 	private function delete_tree( string $dir, string $boundary ): void {
 
+		// Treat a symlinked top-level path as residue in itself: unlink the link rather
+		// than descend through it, so a link planted at the working or downloads path can
+		// never redirect this walk into a sibling it does not own. The recursion below
+		// already unlinks child links rather than following them, and never re-enters
+		// here with a link, so this guard fires only for the caller-supplied top level.
+		if ( is_link( $dir ) ) {
+			unlink( $dir ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing a symlink planted at the plugin's own scratch path during cleanup.
+			return;
+		}
+
 		// Refuse to touch anything that is not a real directory strictly beneath the
-		// boundary, so the walk can never climb above the job's own directory.
+		// boundary, comparing on normalised separators so the check holds on Windows and
+		// staying root-safe so a boundary of '/' still yields a usable prefix.
 		$target = realpath( $dir );
 		$root = realpath( $boundary );
-		if ( $target === false || $root === false || ! str_starts_with( $target, $root . '/' ) ) {
+		if ( $target === false || $root === false ) {
+			return;
+		}
+		$target = wp_normalize_path( $target );
+		$root = wp_normalize_path( $root );
+		if ( ! str_starts_with( $target, rtrim( $root, '/' ) . '/' ) ) {
 			return;
 		}
 

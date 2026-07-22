@@ -170,8 +170,16 @@ kntnt_extractor_assert( is_string( $log_path ) && is_file( $log_path ) && is_dir
 kntnt_extractor_assert( is_dir( $ready_dir ) && is_file( $ready_artifact ), 'A ready job leaves a working directory and a sealed artifact (AC2/AC3 precondition)' );
 kntnt_extractor_assert( is_dir( $queued_dir ), 'A queued job leaves a residual working directory (AC2 precondition)' );
 
-// Run the cleanup the guarded uninstall.php delegates to.
-Uninstaller::purge_all();
+// Run the cleanup through the real production entry point: uninstall_plugin()
+// (from the plugin.php required above) defines WP_UNINSTALL_PLUGIN and includes
+// the plugin's uninstall.php for real, so this block exercises the actual wiring —
+// the autoloader path, the class reference, the guard, and the delegation — that a
+// direct Uninstaller::purge_all() call would bypass. A wiring defect there would
+// leave the residue below in place and fail the AC assertions, rather than passing
+// vacuously. The active work_dir filter still resolves every collaborator, so the
+// under-test cleanup targets this file's isolated directory. Block B below then
+// covers the override case through the routine directly (include_once fires once).
+uninstall_plugin( 'kntnt-extractor/kntnt-extractor.php' );
 
 // AC1: the audit log file and its directory are gone and the path is forgotten.
 kntnt_extractor_assert( ! is_file( (string) $log_path ), 'Uninstall deletes the audit log file (AC1)' );

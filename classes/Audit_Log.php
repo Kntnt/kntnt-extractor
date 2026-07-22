@@ -273,6 +273,15 @@ final class Audit_Log {
 		// the folder itself; a missing folder is simply nothing to remove.
 		delete_option( self::OPTION );
 		$dir = $this->dir_path();
+
+		// Treat a symlinked audit folder as residue in itself: unlink the link rather
+		// than follow it, so a link planted at the audit path can never redirect these
+		// unlinks into a directory the folder does not own — is_dir() and scandir() would
+		// both otherwise resolve through it.
+		if ( is_link( $dir ) ) {
+			unlink( $dir ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing a symlink planted at the plugin's own audit path on uninstall.
+			return;
+		}
 		if ( ! is_dir( $dir ) ) {
 			return;
 		}

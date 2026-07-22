@@ -20,9 +20,12 @@ namespace Kntnt\Extractor;
  * subsystems that own on-disk residue erase their own: the {@see Audit_Log}
  * deletes its randomly-named log file and its directory and forgets the recorded
  * path (ADR-0006), and the {@see Job_Store} deletes every job and the working and
- * served-downloads directories whole (ADR-0008). Both resolve their location
- * through the same Config seam the running plugin does, so a `KNTNT_EXTRACTOR_WORK_DIR`
- * override is honoured and nothing is left outside the resolved directories. A
+ * served-downloads directories whole (ADR-0008). The {@see Job_Store} resolves its
+ * location through the same Config seam the running plugin does, so a
+ * `KNTNT_EXTRACTOR_WORK_DIR` override is honoured and nothing is left outside the
+ * resolved working and served-downloads directories; the {@see Audit_Log} is
+ * deliberately always under the uploads directory (ADR-0006), resolving its folder
+ * through `wp_upload_dir()` rather than Config, and so needs no such override. A
  * location that was never created is simply nothing to remove, so the routine is
  * safe on a partially-present install.
  *
