@@ -31,7 +31,7 @@
  * its listed state is a known point.
  *
  * @package Kntnt\Extractor
- * @since   0.1.1
+ * @since   0.2.0
  */
 
 declare( strict_types = 1 );

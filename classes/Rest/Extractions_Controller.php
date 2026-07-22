@@ -269,7 +269,7 @@ final class Extractions_Controller {
 	 * job, so this listing discloses no delivery path. The caller with no live jobs
 	 * gets an empty array.
 	 *
-	 * @since 0.1.1
+	 * @since 0.2.0
 	 *
 	 * @return WP_REST_Response A 200 with `{ jobs: [ { id, state, created_at, updated_at, progress? } ] }`.
 	 */

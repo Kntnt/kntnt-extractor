@@ -6,11 +6,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
-- Structure-only table extraction: `POST /extractions` accepts a `tables_structure_only` sibling list alongside `tables`, dumping those tables' `DROP`/`CREATE TABLE` DDL into the sealed artifact without any rows, so an artifact can carry every selected table's structure while carrying only some tables' data. A table may appear in `tables` or `tables_structure_only` but not both (422); an unknown structure-only table is a 404 decided before the capability gate; structure-only tables count toward the poll's table progress totals and are recorded in the sealed index and audit log like any other table.
+- Structure-only table extraction (#16): `POST /extractions` accepts a `tables_structure_only` sibling list alongside `tables`, dumping those tables' `DROP`/`CREATE TABLE` DDL into the sealed artifact without any rows, so an artifact can carry every selected table's structure while carrying only some tables' data. A table may appear in `tables` or `tables_structure_only` but not both (422); an unknown structure-only table is a 404 decided before the capability gate; structure-only tables count toward the poll's table progress totals and are recorded in the sealed index and audit log like any other table.
+- Authorized `GET /kntnt-extractor/v1/environment` endpoint (#15) returning read-only site and runtime facts about the host — no extraction is created — so a caller can inspect the environment behind the same capability gate that guards the operational endpoints.
+- Authorized `GET /kntnt-extractor/v1/extractions` endpoint (#17) listing the caller's own non-terminal jobs (queued / running / ready), each with the same id, state, and timestamps a create and poll report and `progress` on the jobs that have advanced. A caller never sees another user's job, a terminal job is the audit log's concern and is omitted, and the listing discloses no `download_url`.
 
 ### Changed
 
-- Bumped the REST API version to `2` for the structure-only request/artifact change.
+- Bumped the REST API version to `2` for the coordinated #15/#16/#17 trio: the `tables_structure_only` request field and its structure-only artifact segments (#16) and the two new read endpoints `GET /environment` (#15) and `GET /extractions` (#17) are one caller-visible contract change shipped under a single version bump rather than one bump each.
 
 ## [0.1.1] – 2026-07-22
 
