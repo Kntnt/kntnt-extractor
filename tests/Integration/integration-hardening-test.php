@@ -219,6 +219,34 @@ try {
 kntnt_extractor_assert( ! $threw, 'A single job whose tick throws does not abort the watchdog patrol (finding 3)' );
 kntnt_extractor_assert( ( $store->find( $healthy )->state ?? Job_State::Queued ) !== Job_State::Queued, 'The patrol still restarts a healthy stalled queue despite a poison job in the set (finding 3)' );
 
+// --- Schema 4→5 back-compat: a pre-#16 record still parses and resumes (issue #16) ---
+
+// A job persisted by the previous release carries no top-level `structure_only` and, in
+// its progress, no `structure_done`. Drive a real job one chunk so it has a genuine
+// in-progress container, then strip both #16 fields to reproduce that on-disk shape, and
+// prove the store still reads it — an absent `structure_only` as `[]`, an absent
+// `structure_done` as 0 — rather than tightening into a required-key read that would
+// break every in-flight job on upgrade.
+$legacy = $create();
+$dispatcher->tick( $store->find( $legacy ) );
+$data = $read_json( $legacy );
+unset( $data['structure_only'] );
+if ( is_array( $data['progress'] ?? null ) ) {
+	unset( $data['progress']['structure_done'] );
+}
+$write_json( $legacy, $data );
+
+// The stripped record must reconstruct with the two #16 fields defaulted, not disqualify.
+$reloaded = $store->find( $legacy );
+kntnt_extractor_assert( $reloaded !== null, 'A pre-#16 record missing structure_only and progress.structure_done still parses (schema 4→5 back-compat)' );
+kntnt_extractor_assert( $reloaded !== null && $reloaded->structure_only === [], 'An absent structure_only reads as the empty selection (schema 4→5 back-compat)' );
+kntnt_extractor_assert( $reloaded !== null && $reloaded->progress !== null && $reloaded->progress->structure_done === 0, 'An absent progress.structure_done reads as zero (schema 4→5 back-compat)' );
+
+// A further tick must resume the build from that record rather than fail on the missing
+// keys — the caller-visible upgrade guarantee the back-compat read exists to keep.
+$resumed = $reloaded !== null ? $dispatcher->tick( $reloaded ) : null;
+kntnt_extractor_assert( $resumed !== null && $resumed->state !== Job_State::Failed, 'A further tick resumes the pre-#16 record rather than failing on the missing keys (schema 4→5 back-compat)' );
+
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
 remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );

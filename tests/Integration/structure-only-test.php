@@ -75,6 +75,12 @@ $tick = static function ( string $id, string $secret ): WP_REST_Response {
 	return rest_get_server()->dispatch( $request );
 };
 
+// Reads a job's persisted per-job tick secret from its on-disk state.
+$secret_of = static function ( string $work, string $id ): string {
+	$state = is_file( $work . '/' . $id . '/job.json' ) ? json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true ) : null;
+	return is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
+};
+
 // Reads a length-prefixed 64-bit-LE field at $offset, advancing it.
 $read_length = static function ( string $raw, int &$offset ): int {
 	$value = unpack( 'P', substr( $raw, $offset, 8 ) )[1];
@@ -152,6 +158,12 @@ add_filter( 'kntnt_extractor_config_work_dir', $force_work );
 // Short-circuit every loopback so a nudge never touches the real network.
 $intercept = static fn( $pre, $args, $url ) => [ 'headers' => [], 'body' => '', 'response' => [ 'code' => 202, 'message' => 'Accepted' ], 'cookies' => [], 'filename' => null ];
 add_filter( 'pre_http_request', $intercept, 10, 3 );
+
+// Raise the concurrency ceiling: this file drives three independent jobs — the mixed
+// end-to-end one, a mid-build one polled while running, and a structure-only-only one —
+// and a ready job still holds its slot until consumed, so one job at a time is too few.
+$force_max = static fn(): int => 20;
+add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 
 // Seed a distinctive marker into the options table so the full-data segment proves
 // real rows survive the seal, and confirm the structure-only table genuinely holds
@@ -234,8 +246,76 @@ kntnt_extractor_assert( is_string( $full_sql ) && str_contains( $full_sql, 'INSE
 kntnt_extractor_assert( is_string( $structure_sql ) && str_contains( $structure_sql, 'DROP TABLE IF EXISTS `' . $wpdb->users . '`' ) && str_contains( $structure_sql, 'CREATE TABLE `' . $wpdb->users . '`' ), 'The structure-only segment carries DROP TABLE and CREATE TABLE (AC1)' );
 kntnt_extractor_assert( is_string( $structure_sql ) && ! str_contains( $structure_sql, 'INSERT INTO' ), 'The structure-only segment carries NO INSERT, even though the table has rows (AC1)' );
 
+// --- AC5: a structure-only table counts toward tables_done while the job runs ---
+
+// A ready job reports every table done by definition, so it cannot prove the RUNNING
+// arm folds structure-only segments into tables_done — only a mid-build poll can. Drive
+// a fresh mixed job to exactly the point where its full table and its structure-only
+// table are both sealed but its file is not, so the running poll must count the sealed
+// structure-only table toward advancement, reporting 2, not 1.
+$mid_selection = [
+	'tables' => [ $wpdb->options ],
+	'tables_structure_only' => [ $wpdb->users ],
+	'files' => [ 'wp-load.php' ],
+	'public_key' => base64_encode( $public_key ),
+];
+wp_set_current_user( $owner->ID );
+$mid_response = $post_extractions( $mid_selection );
+$mid_id = is_array( $mid_response->get_data() ) && is_string( $mid_response->get_data()['id'] ?? null ) ? $mid_response->get_data()['id'] : '';
+$mid_secret = $secret_of( $work, $mid_id );
+
+// Two ticks seal the full table then the structure-only table; the file segment is left,
+// so the job is still running when polled — the one window the running arm is reachable.
+wp_set_current_user( 0 );
+$tick( $mid_id, $mid_secret );
+$tick( $mid_id, $mid_secret );
+
+wp_set_current_user( $owner->ID );
+$mid_poll = $get_extraction( $mid_id )->get_data();
+kntnt_extractor_assert( is_array( $mid_poll ) && ( $mid_poll['state'] ?? null ) === 'running', 'The mid-build job is still running before its file is sealed (AC5)' );
+$mid_prog = is_array( $mid_poll ) && is_array( $mid_poll['progress'] ?? null ) ? $mid_poll['progress'] : [];
+kntnt_extractor_assert( ( $mid_prog['tables_done'] ?? null ) === 2, 'A running poll counts the sealed structure-only table toward tables_done (AC5)' );
+kntnt_extractor_assert( ( $mid_prog['tables_total'] ?? null ) === 2 && ( $mid_prog['files_done'] ?? null ) === 0, 'The mid-build poll reports both tables in the total and no file done yet (AC5)' );
+
+// --- AC4: a structure-only-only selection is a valid end-to-end build ---
+
+// The one selection shape #16 newly makes legal — no full tables, no files, only a
+// structure-only table. It must drive to a sealed artifact carrying a single DDL-only
+// segment, exercising the builder's empty-tables/empty-files path end to end: the first
+// tick enters directly at the structure branch and finalizes with no full table sealed.
+$only_selection = [
+	'tables_structure_only' => [ $wpdb->users ],
+	'public_key' => base64_encode( $public_key ),
+];
+wp_set_current_user( $owner->ID );
+$only_response = $post_extractions( $only_selection );
+kntnt_extractor_assert( $only_response->get_status() === 201, 'A structure-only-only selection creates a job (201) (AC4)' );
+$only_id = is_array( $only_response->get_data() ) && is_string( $only_response->get_data()['id'] ?? null ) ? $only_response->get_data()['id'] : '';
+$only_secret = $secret_of( $work, $only_id );
+
+wp_set_current_user( 0 );
+$tick( $only_id, $only_secret );
+$driven = 0;
+while ( $driven < 200 && ( $get_extraction( $only_id )->get_data()['state'] ?? null ) !== 'ready' ) {
+	$tick( $only_id, $only_secret );
+	$driven++;
+}
+
+wp_set_current_user( $owner->ID );
+$only_ready = $get_extraction( $only_id )->get_data();
+kntnt_extractor_assert( is_array( $only_ready ) && ( $only_ready['state'] ?? null ) === 'ready', 'The structure-only-only job reaches ready (AC4)' );
+
+// Unseal the artifact and confirm it holds exactly one DDL-only segment.
+$only_url = is_string( $only_ready['download_url'] ?? null ) ? $only_ready['download_url'] : '';
+$only_path = rtrim( $uploads['basedir'], '/' ) . substr( $only_url, strlen( rtrim( $uploads['baseurl'], '/' ) ) );
+$only_container = $parse( is_file( $only_path ) ? (string) file_get_contents( $only_path ) : '' );
+kntnt_extractor_assert( $only_container['header_ok'] && count( $only_container['records'] ) === 1, 'The structure-only-only artifact holds exactly one segment (AC4)' );
+$only_sql = $open_segment( $only_container['records'][0], $keypair );
+kntnt_extractor_assert( is_string( $only_sql ) && str_contains( $only_sql, 'CREATE TABLE `' . $wpdb->users . '`' ) && ! str_contains( $only_sql, 'INSERT INTO' ), 'The structure-only-only segment carries CREATE TABLE and no INSERT (AC4)' );
+
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
 delete_option( 'kntnt_extractor_structonly_marker' );
 $rmrf( $work );
