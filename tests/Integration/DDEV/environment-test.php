@@ -68,6 +68,21 @@ $assert( is_string( $db['collation'] ?? null ) && ( $db['collation'] ?? '' ) !==
 // same PHP process the endpoint answered in, so the two must agree exactly.
 $assert( ( $data['php_version'] ?? null ) === PHP_VERSION, 'php_version matches the container PHP version' );
 
+// No defines value discloses an absolute server path. Unlike the SQLite harness's
+// synthetic fixture, this runs against the container's real wp-config.php — which
+// ships ABSPATH and may carry other path-valued defines — so the relativisation is
+// proven where a genuine absolute install root is actually in play.
+$defines = is_array( $data['defines'] ?? null ) ? $data['defines'] : [];
+$abspath_root = untrailingslashit( wp_normalize_path( ABSPATH ) );
+$no_absolute_define = true;
+foreach ( $defines as $define ) {
+	$value = is_array( $define ) ? ( $define['value'] ?? null ) : null;
+	if ( is_string( $value ) && ( str_starts_with( $value, '/' ) || preg_match( '#^[A-Za-z]:#', $value ) === 1 || str_contains( $value, $abspath_root ) ) ) {
+		$no_absolute_define = false;
+	}
+}
+$assert( $no_absolute_define, 'no defines value discloses an absolute server path against a real wp-config.php' );
+
 // Leave no authenticated user behind, then fail the process on any failed check.
 wp_set_current_user( 0 );
 if ( $failed > 0 ) {

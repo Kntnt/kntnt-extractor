@@ -70,7 +70,11 @@ define( 'LOGGED_IN_KEY', 'seeded-logged-in-key' );
 define( 'AUTH_SALT', 'seeded-auth-salt' );
 define( 'NONCE_SALT', 'seeded-nonce-salt' );
 define( 'NONCE_KEY', 'seeded-nonce-key' );
+define( 'KNTNT_TEST_CUSTOM_SALT', 'seeded-custom-salt-literal' );
+define( 'NONCE_KNTNT_TEST', 'seeded-nonce-prefix-literal' );
 define( 'KNTNT_ENV_TEST_DEFINE', 'resolved-value' );
+define( 'ABSPATH', '/must/never/be/read-from-source' );
+define( 'KNTNT_ENV_TEST_ABS_PATH', '/must/never/be/read-from-source' );
 PHP );
 $point_config = static fn(): string => $fixture;
 add_filter( 'kntnt_extractor_config_wp_config_path', $point_config );
@@ -78,6 +82,24 @@ add_filter( 'kntnt_extractor_config_wp_config_path', $point_config );
 // Define the non-secret constant at runtime so its live value is resolvable.
 if ( ! defined( 'KNTNT_ENV_TEST_DEFINE' ) ) {
 	define( 'KNTNT_ENV_TEST_DEFINE', 'resolved-value' );
+}
+
+// Define the non-canonical secret-family members live with distinctive literals,
+// so the response proving their value is null also proves the controller never
+// reads the live constant of a suffix/prefix-matched name (AC3).
+if ( ! defined( 'KNTNT_TEST_CUSTOM_SALT' ) ) {
+	define( 'KNTNT_TEST_CUSTOM_SALT', 'live-custom-salt-value' );
+}
+if ( ! defined( 'NONCE_KNTNT_TEST' ) ) {
+	define( 'NONCE_KNTNT_TEST', 'live-nonce-prefix-value' );
+}
+
+// Define a path-valued non-secret constant at runtime, under the install root, so
+// the response can prove absolute paths are relativised (AC4). ABSPATH is already
+// a real constant resolving to the absolute install root; the controller must
+// relativise it too rather than echo the server path.
+if ( ! defined( 'KNTNT_ENV_TEST_ABS_PATH' ) ) {
+	define( 'KNTNT_ENV_TEST_ABS_PATH', ABSPATH . 'wp-content/uploads' );
 }
 
 // Move the uploads base to a non-default location so the relative uploads_dir is
@@ -157,16 +179,21 @@ kntnt_extractor_assert( $defines_ok, 'AC1: defines is a non-empty list of { name
 
 // AC3: every secret in the redaction family appears by name with value null, and
 // its seeded literal never appears anywhere in the serialised body.
-$secret_names = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'AUTH_SALT', 'NONCE_SALT', 'NONCE_KEY' ];
+// The family is the four exact names PLUS the suffix *_SALT PLUS the prefix
+// NONCE_* — a pattern rule, not a name list. KNTNT_TEST_CUSTOM_SALT (suffix) and
+// NONCE_KNTNT_TEST (prefix) are non-canonical members that must be redacted too:
+// a regression to a hardcoded list of the seven canonical names would let these
+// through, so they stand guard over the pattern behaviour.
+$secret_names = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'AUTH_SALT', 'NONCE_SALT', 'NONCE_KEY', 'KNTNT_TEST_CUSTOM_SALT', 'NONCE_KNTNT_TEST' ];
 $all_redacted = true;
 foreach ( $secret_names as $name ) {
 	if ( ! array_key_exists( $name, $by_name ) || $by_name[ $name ] !== null ) {
 		$all_redacted = false;
 	}
 }
-kntnt_extractor_assert( $all_redacted, 'AC3: every secret-family define is present by name with value null' );
+kntnt_extractor_assert( $all_redacted, 'AC3: every secret-family define — including a *_SALT-suffix and a NONCE_-prefix member — is present by name with value null' );
 $body = (string) wp_json_encode( $data );
-$literals = [ 'super-secret-db-password', 'seeded-auth-key', 'seeded-secure-auth-key', 'seeded-logged-in-key', 'seeded-auth-salt', 'seeded-nonce-salt', 'seeded-nonce-key' ];
+$literals = [ 'super-secret-db-password', 'seeded-auth-key', 'seeded-secure-auth-key', 'seeded-logged-in-key', 'seeded-auth-salt', 'seeded-nonce-salt', 'seeded-nonce-key', 'seeded-custom-salt-literal', 'seeded-nonce-prefix-literal', 'live-custom-salt-value', 'live-nonce-prefix-value' ];
 $leaked = false;
 foreach ( $literals as $literal ) {
 	if ( str_contains( $body, $literal ) ) {
@@ -178,6 +205,29 @@ kntnt_extractor_assert( ! $leaked, 'AC3: no seeded secret literal appears anywhe
 // A non-secret define resolves to its live value.
 kntnt_extractor_assert( ( $by_name['KNTNT_ENV_TEST_DEFINE'] ?? null ) === 'resolved-value', 'AC3: a non-secret define resolves to its live constant() value' );
 
+// AC4: no defines value discloses an absolute server path. ABSPATH ships in every
+// stock wp-config.php and always resolves to the absolute install root; a path-
+// valued define does likewise. Both must be relativised, never echoed verbatim.
+$abspath_root = untrailingslashit( wp_normalize_path( ABSPATH ) );
+$no_absolute_define = true;
+foreach ( $by_name as $define_value ) {
+	if ( is_string( $define_value ) && ( str_starts_with( $define_value, '/' ) || preg_match( '#^[A-Za-z]:#', $define_value ) === 1 || str_contains( $define_value, $abspath_root ) ) ) {
+		$no_absolute_define = false;
+	}
+}
+kntnt_extractor_assert( $no_absolute_define, 'AC4: no defines value starts with an absolute path or discloses the install root' );
+kntnt_extractor_assert( array_key_exists( 'ABSPATH', $by_name ) && $by_name['ABSPATH'] === '', 'AC4: ABSPATH is relativised to the empty root-relative path, not the absolute root' );
+kntnt_extractor_assert( ( $by_name['KNTNT_ENV_TEST_ABS_PATH'] ?? null ) === 'wp-content/uploads', 'AC4: a path-valued define under the root is relativised to the root-relative path' );
+
+// AC5: the flavour classifier is the rule itself, pinned against fixed banners of
+// both engines — the Playground/SQLite backend never exercises a real MySQL or
+// MariaDB banner, so the rule is asserted directly rather than only via VERSION().
+$flavour = \Kntnt\Extractor\Rest\Environment_Controller::database_flavour( ... );
+kntnt_extractor_assert( $flavour( 'MySQL Community Server - GPL', '8.0.36' ) === 'mysql', 'AC5: a MySQL banner classifies as mysql' );
+kntnt_extractor_assert( $flavour( 'mariadb.org binary distribution', '10.11.6-MariaDB-1:10.11.6+maria~ubu2204' ) === 'mariadb', 'AC5: a MariaDB @@version_comment classifies as mariadb' );
+kntnt_extractor_assert( $flavour( '', '5.5.5-10.6.16-MariaDB' ) === 'mariadb', 'AC5: a MariaDB VERSION() alone (empty comment) classifies as mariadb' );
+kntnt_extractor_assert( $flavour( '', '8.0.36' ) === 'mysql', 'AC5: a bare MySQL VERSION() with no comment classifies as mysql' );
+
 // AC4: content_dir and uploads_dir are relative to the install root — no leading
 // slash, no drive letter, no absolute server path — and correct.
 $content_dir = $wp['content_dir'] ?? '';
@@ -188,9 +238,30 @@ $abspath = untrailingslashit( wp_normalize_path( ABSPATH ) );
 kntnt_extractor_assert( ! str_contains( $content_dir, $abspath ) && ! str_contains( $uploads_dir, $abspath ), 'AC4: neither relative path discloses the absolute install root' );
 kntnt_extractor_assert( $uploads_dir === 'wp-content/kntnt-custom-uploads', 'AC4: uploads_dir tracks a non-default uploads layout, relative to the root' );
 
+// AC4: an uploads base moved OUTSIDE the install root exercises relative_to_root's
+// walk-up branch — the common-prefix walk plus '..' segments — which the under-root
+// layout above never reaches. WP_CONTENT_DIR cannot be redefined in-process, but
+// the same code path is reachable through the uploads override.
+remove_filter( 'upload_dir', $move_uploads );
+$outside_uploads = untrailingslashit( wp_normalize_path( dirname( ABSPATH ) ) ) . '/kntnt-outside-uploads';
+$move_outside = static function ( array $dirs ) use ( $outside_uploads ): array {
+	$dirs['basedir'] = $outside_uploads;
+	$dirs['baseurl'] = 'http://example.test/kntnt-outside-uploads';
+	$dirs['path'] = $outside_uploads;
+	$dirs['url'] = $dirs['baseurl'];
+	return $dirs;
+};
+add_filter( 'upload_dir', $move_outside );
+$outside_data = $get_environment()->get_data();
+$outside_data = is_array( $outside_data ) ? $outside_data : [];
+$outside_wp = is_array( $outside_data['wordpress'] ?? null ) ? $outside_data['wordpress'] : [];
+$outside_dir = $outside_wp['uploads_dir'] ?? '';
+kntnt_extractor_assert( $outside_dir === '../kntnt-outside-uploads', 'AC4: an uploads base outside the root is expressed with a leading ../ walk-up' );
+kntnt_extractor_assert( is_string( $outside_dir ) && ! str_starts_with( $outside_dir, '/' ) && preg_match( '#^[A-Za-z]:#', $outside_dir ) === 0 && ! str_contains( $outside_dir, $abspath ), 'AC4: the walk-up path discloses no absolute prefix' );
+remove_filter( 'upload_dir', $move_outside );
+
 // --- Clean up so later suite files see a neutral state -----------------------
 
-remove_filter( 'upload_dir', $move_uploads );
 remove_filter( 'kntnt_extractor_config_wp_config_path', $point_config );
 @unlink( $fixture );
 wp_set_current_user( 0 );

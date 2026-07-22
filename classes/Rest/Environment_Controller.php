@@ -224,11 +224,31 @@ final class Environment_Controller {
 		$collation = (string) $wpdb->get_var( 'SELECT @@collation_database' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
 
 		return [
-			'server' => stripos( $version_comment . ' ' . $version, 'mariadb' ) !== false ? 'mariadb' : 'mysql',
+			'server' => self::database_flavour( $version_comment, $version ),
 			'version' => $version,
 			'collation' => $collation,
 		];
 
+	}
+
+	/**
+	 * Classifies the database engine's flavour from its version banners.
+	 *
+	 * A pure classifier over the two strings a live engine reports for itself —
+	 * `@@version_comment` and `VERSION()`. Any banner mentioning MariaDB — which
+	 * brands itself in both — resolves to `mariadb`; every other engine, MySQL
+	 * included, resolves to `mysql`. Kept pure and static so the classification
+	 * rule can be pinned directly against fixed MySQL and MariaDB banners, without
+	 * a live engine of each flavour to hand.
+	 *
+	 * @since 0.2.0
+	 *
+	 * @param string $version_comment The engine's `@@version_comment` banner.
+	 * @param string $version         The engine's `VERSION()` string.
+	 * @return string Either `mariadb` or `mysql`.
+	 */
+	public static function database_flavour( string $version_comment, string $version ): string {
+		return stripos( $version_comment . ' ' . $version, 'mariadb' ) !== false ? 'mariadb' : 'mysql';
 	}
 
 	/**
@@ -304,7 +324,7 @@ final class Environment_Controller {
 			$value = null;
 			if ( ! $this->is_secret_define( $name ) && defined( $name ) ) {
 				$resolved = constant( $name );
-				$value = is_scalar( $resolved ) ? $resolved : null;
+				$value = is_scalar( $resolved ) ? $this->relativise_define_value( $resolved ) : null;
 			}
 			$defines[] = [
 				'name' => $name,
@@ -313,6 +333,41 @@ final class Environment_Controller {
 		}
 
 		return $defines;
+
+	}
+
+	/**
+	 * Relativises any absolute filesystem path carried by a define's value.
+	 *
+	 * Least disclosure applies to define values just as it does to the reported
+	 * paths: the stock `wp-config.php` always defines `ABSPATH` to the absolute
+	 * install root, and a site may set path-valued defines (`WP_CONTENT_DIR`,
+	 * `WP_TEMP_DIR`, a path-form `WP_DEBUG_LOG`, a socket-path `DB_HOST`). Emitting
+	 * those verbatim would hand out the very absolute prefix {@see self::relative_to_root()}
+	 * strips from `content_dir`/`uploads_dir`. Any string value that normalises to
+	 * an absolute path (a leading `/` or a drive letter) is therefore expressed
+	 * relative to the install root; every other scalar passes through unchanged.
+	 *
+	 * @since 0.2.0
+	 *
+	 * @param string|int|float|bool $value The resolved scalar define value.
+	 * @return string|int|float|bool The value, with any absolute path relativised.
+	 */
+	private function relativise_define_value( string|int|float|bool $value ): string|int|float|bool {
+
+		// Only string values can be paths; leave every other scalar untouched.
+		if ( ! is_string( $value ) ) {
+			return $value;
+		}
+
+		// An absolute path (POSIX root or a drive letter) is relativised to the
+		// install root; anything else is not a path and is emitted as-is.
+		$normalized = wp_normalize_path( $value );
+		if ( str_starts_with( $normalized, '/' ) || preg_match( '#^[A-Za-z]:/#', $normalized ) === 1 ) {
+			return $this->relative_to_root( $value );
+		}
+
+		return $value;
 
 	}
 
