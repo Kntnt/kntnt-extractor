@@ -35,8 +35,16 @@ use Throwable;
  * poll-nudge, by contrast, treats a running job with a recent heartbeat as being
  * ticked right now and leaves it alone, nudging only a queued or stalled one; once
  * the heartbeat goes stale the job counts as stalled and a nudge may restart it.
- * That split is what lets a status poll opportunistically restart a stalled queue
- * without ever competing with a live driver mid-build.
+ * That split is what lets a status poll restart a stalled queue without ever
+ * competing with a live driver mid-build.
+ *
+ * The poll and create endpoints reach that signal through a third path that never
+ * couples their response latency to it (ADR-0010): {@see continue_after_response()}
+ * schedules the work for after the body is echoed. Post-detach it is a full
+ * in-process {@see tick()} — no loopback at all, driving a dead-loopback host at
+ * poll cadence — and where the worker cannot detach it is the same guarded
+ * poll-nudge, now hard-bounded and paid only after the response is already sent.
+ * The cron watchdog remains the backstop under both.
  *
  * @since 0.1.0
  */
@@ -257,6 +265,78 @@ final class Dispatcher {
 		if ( $this->needs_advance( $job ) ) {
 			$this->nudge( $job );
 		}
+
+	}
+
+	/**
+	 * Schedules a job's continuation to run after the current response is sent.
+	 *
+	 * The create and poll endpoints must never couple their response latency to
+	 * the continuation's network or packaging work (ADR-0010): this registers a
+	 * shutdown callback that first tries to detach the worker from the client —
+	 * fastcgi_finish_request() on FPM, litespeed_finish_request() on LiteSpeed —
+	 * and, once detached, drives the job in-process through {@see tick()}, needing
+	 * no loopback at all. Where the worker cannot detach it falls back to the
+	 * guarded {@see maybe_nudge()}, whose delivery is hard-bounded, so the caller
+	 * waits at most about a second after the body has already been echoed.
+	 *
+	 * The detached branch deliberately calls tick() rather than maybe_nudge():
+	 * after detaching, driving is free for the client, the per-job lock and state
+	 * guard in tick() already make a racer a no-op, and skipping the staleness
+	 * gate lets a dead-loopback host advance at poll cadence instead of only
+	 * after tick_stale_after. A job past running is left alone: a ready or
+	 * terminal job needs no continuation.
+	 *
+	 * @since 0.2.1
+	 *
+	 * @param Extraction_Job $job The job the just-answered request concerned.
+	 * @return void
+	 */
+	public function continue_after_response( Extraction_Job $job ): void {
+
+		// Only a job that can still advance warrants scheduling anything.
+		if ( $job->state !== Job_State::Queued && $job->state !== Job_State::Running ) {
+			return;
+		}
+
+		// Defer the work to shutdown: driving the job in-process once detached, or the
+		// guarded nudge where the SAPI cannot detach — never before the body is echoed.
+		add_action(
+			'shutdown',
+			function () use ( $job ): void {
+				if ( $this->detach() ) {
+					$this->tick( $job );
+				} else {
+					$this->maybe_nudge( $job );
+				}
+			},
+		);
+
+	}
+
+	/**
+	 * Detaches the PHP worker from the client, reporting whether it succeeded.
+	 *
+	 * After a successful detach the response is fully delivered and the process
+	 * is free to keep working without the client waiting; on SAPIs offering no
+	 * detach primitive this reports false and the caller must stay cheap.
+	 *
+	 * @since 0.2.1
+	 *
+	 * @return bool True when the client no longer waits on this process.
+	 */
+	private function detach(): bool {
+
+		// Prefer the FPM primitive, then LiteSpeed's; a SAPI offering neither cannot
+		// detach, so the caller must keep the post-response work cheap.
+		if ( function_exists( 'fastcgi_finish_request' ) ) {
+			return fastcgi_finish_request();
+		}
+		if ( function_exists( 'litespeed_finish_request' ) ) {
+			return (bool) litespeed_finish_request();
+		}
+
+		return false;
 
 	}
 

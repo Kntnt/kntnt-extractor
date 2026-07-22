@@ -180,15 +180,21 @@ $selection = [
 	'public_key' => base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keypair() ) ),
 ];
 
-// --- AC1: creating a job fires the first loopback tick ---
-
+// --- AC1: creating a job schedules the first loopback tick, delivered at shutdown ---
+//
+// The create no longer nudges inline (#19/ADR-0010): it registers a `shutdown`
+// continuation and returns, so the 201 never waits on its own HTTP. do_action(
+// 'shutdown' ) then delivers that continuation — under Playground the guarded
+// maybe_nudge(), which for the fresh queued job is the non-blocking loopback tick.
+remove_all_actions( 'shutdown' );
 $captured = [];
 $created = $post_extractions( $selection )->get_data();
 $id = is_array( $created ) ? (string) ( $created['id'] ?? '' ) : '';
 kntnt_extractor_assert( $id !== '', 'POST /extractions creates a job' );
 $secret = $secret_of( $id );
-kntnt_extractor_assert( $nudged_tick( $captured, $id, $secret ), 'Creating a job fires a loopback tick carrying its secret (AC1)' );
-kntnt_extractor_assert( $nudged_nonblocking( $captured, $id, $secret ), 'The creation loopback tick is fired non-blocking, so create never waits on its own HTTP round-trip (AC1)' );
+do_action( 'shutdown' );
+kntnt_extractor_assert( $nudged_tick( $captured, $id, $secret ), 'Creating a job schedules the first loopback tick carrying its secret, delivered at shutdown (AC1)' );
+kntnt_extractor_assert( $nudged_nonblocking( $captured, $id, $secret ), 'The scheduled creation loopback tick is fired non-blocking, so create never waits on its own HTTP round-trip (AC1)' );
 
 // --- AC1: finishing a chunk fires the NEXT chunk's loopback tick ---
 
@@ -201,30 +207,44 @@ kntnt_extractor_assert( $after_chunk !== null && $after_chunk->state === Job_Sta
 kntnt_extractor_assert( $nudged_tick( $captured, $id, $secret ), 'Finishing a chunk fires the next chunk\'s loopback tick carrying its secret (AC1)' );
 kntnt_extractor_assert( $nudged_nonblocking( $captured, $id, $secret ), 'The continuation loopback tick is fired non-blocking, so each chunk never waits on its own HTTP round-trip (AC1)' );
 
-// --- AC3: a status poll nudges an untended queue, never a tended one ---
-
+// --- AC3: a status poll schedules a nudge for an untended queue, never a tended one ---
+//
+// As with create, the poll registers its continuation on `shutdown` rather than
+// nudging inline (#19/ADR-0010), so each block fires it with do_action( 'shutdown' )
+// and remove_all_actions( 'shutdown' ) isolates one block's closure from the next.
 $poll_created = $post_extractions( $selection )->get_data();
 $poll_id = is_array( $poll_created ) ? (string) ( $poll_created['id'] ?? '' ) : '';
 $poll_secret = $secret_of( $poll_id );
 
-// A fresh queued job nothing is dispatching: polling it nudges its tick endpoint.
+// A fresh queued job nothing is dispatching: its poll schedules a nudge to its tick
+// endpoint, delivered at shutdown.
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $poll_id );
-kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a queued, untended job nudges its tick endpoint (AC3)' );
+do_action( 'shutdown' );
+kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a queued, untended job schedules a nudge to its tick endpoint, delivered at shutdown (AC3)' );
 
 // A running job with a fresh heartbeat is being ticked right now: a poll leaves it
-// to its live driver and fires no nudge.
+// to its live driver, so the guarded continuation fires no nudge even at shutdown.
 $store->save( $store->find( $poll_id )->with_state( Job_State::Running ) );
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $poll_id );
-kntnt_extractor_assert( ! $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a freshly-ticked running job fires no nudge (AC3)' );
+do_action( 'shutdown' );
+kntnt_extractor_assert( ! $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a freshly-ticked running job fires no nudge, even at shutdown (AC3)' );
 
 // The same job, once its heartbeat goes stale, is untended again and a poll re-nudges
-// it — the fallback that restarts a queue whose driver died.
+// it at shutdown — the fallback that restarts a queue whose driver died.
 $stall( $store->find( $poll_id ) );
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $poll_id );
-kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a stalled running job re-nudges its tick endpoint (AC3)' );
+do_action( 'shutdown' );
+kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a stalled running job re-nudges its tick endpoint at shutdown (AC3)' );
+
+// Clear this block's continuation so no leftover shutdown closure fires into the
+// watchdog and sweep sections that follow, which drive the job directly.
+remove_all_actions( 'shutdown' );
 
 // --- AC2: the watchdog detects and restarts a stalled queue ---
 

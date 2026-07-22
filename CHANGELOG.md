@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Heavy extractions no longer crawl at the cron watchdog's cadence on hosts where the self-loopback continuation never completes (#18): a tick is now time-budgeted, packaging as many bounded chunks as fit in a configurable wall-clock budget (`tick_budget`, default 15 s; zero preserves the previous one-chunk-per-tick behaviour) within a single PHP invocation, so one tick or one watchdog patrol can carry a multi-chunk job all the way to ready instead of one chunk per cron cycle. The continuation nudge now fires once per tick, after the per-job lock is released and only while work remains, and its delivery is hardened (`ignore_user_abort`, a bounded cURL connect phase) so a dead loopback can neither stall the nudging process nor kill the tick it spawned mid-chunk.
+- `GET /extractions/{id}` and `POST /extractions` no longer block on the best-effort loopback nudge (#19): the continuation that keeps a queued or stalled job's driver alive now runs after the response has been sent, not before it, so a poll that should cost milliseconds is never held for tens of seconds on a host where loopback HTTP is slow to fail. Once the response is out, the worker drives the job in-process where it can detach from the client (`fastcgi_finish_request`/`litespeed_finish_request`), and otherwise falls back to the same guarded, hard-bounded nudge — now paid after the body is echoed. The REST responses are byte-identical and the API version is unchanged.
 
 ## [0.2.0] – 2026-07-22
 

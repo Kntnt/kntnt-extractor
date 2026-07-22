@@ -33,10 +33,12 @@ use WP_REST_Server;
  *
  * `POST /extractions` turns an already-resolved selection of tables and/or files,
  * plus the caller's ephemeral X25519 public key, into a queued Extraction job
- * bound to the caller (ADR-0004) and fires the first loopback that starts its
- * execution. `GET /extractions/{id}` reports that job's state to its owner, hands
- * back the sealed artifact's download link once the job is ready, and
- * opportunistically nudges a stalled queue. `POST /extractions/{id}/tick` is the
+ * bound to the caller (ADR-0004) and schedules the first continuation that starts
+ * its execution for after the 201 is sent. `GET /extractions/{id}` reports that
+ * job's state to its owner, hands back the sealed artifact's download link once the
+ * job is ready, and schedules a stalled queue's continuation for after the
+ * response, never coupling its poll latency to loopback health (ADR-0010).
+ * `POST /extractions/{id}/tick` is the
  * internal driver endpoint: authenticated by the job's own secret rather than by a
  * capability, so the loopback loop can advance the job without a session (ADR-0007),
  * it is the one route here that is not behind the capability gate.
@@ -206,7 +208,8 @@ final class Extractions_Controller {
 	 * only new gate here is concurrency: a second non-terminal job beyond the
 	 * configured ceiling is refused with 429. The payload is re-derived from the
 	 * request — parsing it is how this callback obtains its inputs, not a second
-	 * validation of them.
+	 * validation of them. The job's first continuation is scheduled for after this
+	 * 201 is sent, so no loopback or packaging work precedes the response (ADR-0010).
 	 *
 	 * @since 0.1.0
 	 *
@@ -233,10 +236,11 @@ final class Extractions_Controller {
 			);
 		}
 
-		// Persist a queued job bound to the caller, then fire the initial loopback so
-		// its execution begins without waiting for the first poll (ADR-0007).
+		// Persist a queued job bound to the caller, then schedule its first continuation
+		// for after this 201 is sent, so the response never waits on loopback or
+		// packaging work — the job's execution begins post-response (ADR-0007/0010).
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'] );
-		$this->dispatcher->maybe_nudge( $job );
+		$this->dispatcher->continue_after_response( $job );
 
 		return new WP_REST_Response(
 			[
@@ -311,7 +315,8 @@ final class Extractions_Controller {
 	 * before ownership, mirroring the create path's existence-before-capability
 	 * order. The capability gate has already admitted the caller through the
 	 * route's permission callback, so this only adds the per-job ownership binding
-	 * (AC4).
+	 * (AC4). The stalled-queue continuation is scheduled for after the response, so
+	 * the poll never blocks on loopback or packaging work (ADR-0010).
 	 *
 	 * @since 0.1.0
 	 *
@@ -329,11 +334,11 @@ final class Extractions_Controller {
 			return $job;
 		}
 
-		// Opportunistically restart a queued or stalled job's loopback, but never one
-		// currently being ticked — the poll kicks the driver, it does not do the work
-		// (ADR-0007). A ready job reports the download link its sealed artifact is
-		// fetched through; a job not yet ready reports it as null.
-		$this->dispatcher->maybe_nudge( $job );
+		// Schedule the continuation for after this response is sent — never inline, so
+		// the poll's latency is independent of loopback health (ADR-0010). Post-detach
+		// it drives a queued or stalled job in-process; otherwise it is the same guarded
+		// nudge, now paid after the body is echoed and left alone for a job being ticked.
+		$this->dispatcher->continue_after_response( $job );
 
 		// Start from the fields every poll carries: the id, the current state, and the
 		// download link — null until the sealed artifact is published at ready.

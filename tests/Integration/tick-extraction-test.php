@@ -383,65 +383,83 @@ foreach ( array_merge( [ $secret_key ], $symmetric_keys ) as $secret ) {
 kntnt_extractor_assert( count( $symmetric_keys ) === 3 && ! $leaks, 'The persisted job state holds no key able to open the artifact (AC6)' );
 kntnt_extractor_assert( str_contains( $state_raw, base64_encode( $public_key ) ), 'The key-leak scan is genuine: the harmless public key IS present in the job state (AC6 positive control)' );
 
-// --- AC7: a status poll opportunistically nudges an untended job, never a tended one ---
+// --- AC7: a status poll schedules a nudge for an untended job, never a tended one ---
+//
+// The nudge no longer fires inline during the poll (#19/ADR-0010): the poll only
+// registers a `shutdown` continuation and returns, so each block fires that
+// continuation with do_action( 'shutdown' ) and inspects what it dispatched. Under
+// Playground the worker cannot detach, so the continuation is the guarded
+// maybe_nudge() — exactly the untended-vs-tended split this AC pins. remove_all_actions(
+// 'shutdown' ) isolates each block so an earlier poll's closure cannot fire into it.
 
-// A fresh queued job that nothing is ticking: polling it fires exactly one loopback
-// nudge to its own tick endpoint, carrying its secret.
+// A fresh queued job that nothing is ticking: its poll schedules exactly one loopback
+// nudge to its own tick endpoint, carrying its secret, delivered at shutdown.
 wp_set_current_user( $owner->ID );
 $n_response = $post_extractions( $selection );
 $n_id = is_array( $n_response->get_data() ) ? (string) ( $n_response->get_data()['id'] ?? '' ) : '';
 $n_state = json_decode( (string) file_get_contents( $work . '/' . $n_id . '/job.json' ), true );
 $n_secret = is_array( $n_state ) ? (string) ( $n_state['tick_secret'] ?? '' ) : '';
 
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $n_id );
+do_action( 'shutdown' );
 $nudged = false;
 foreach ( $captured as $call ) {
 	if ( str_contains( $call['url'], '/extractions/' . $n_id . '/tick' ) && ( $call['headers'][ Dispatcher::TICK_SECRET_HEADER ] ?? '' ) === $n_secret ) {
 		$nudged = true;
 	}
 }
-kntnt_extractor_assert( $nudged, 'A poll of a queued, untended job nudges its tick endpoint with the secret (AC7)' );
+kntnt_extractor_assert( $nudged, 'A poll of a queued, untended job schedules a nudge to its tick endpoint with the secret, delivered at shutdown (AC7)' );
 
 // A job currently being ticked (running with a fresh heartbeat) must not be nudged:
-// a live driver already owns it.
+// a live driver already owns it, so the guarded continuation is a no-op even at shutdown.
 $store = new Job_Store( new Config() );
 $n_job = $store->find( $n_id );
 $store->save( $n_job->with_state( Job_State::Running ) );
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $n_id );
+do_action( 'shutdown' );
 $nudged_running = false;
 foreach ( $captured as $call ) {
 	if ( str_contains( $call['url'], '/extractions/' . $n_id . '/tick' ) ) {
 		$nudged_running = true;
 	}
 }
-kntnt_extractor_assert( ! $nudged_running, 'A poll of a job currently being ticked fires no nudge (AC7)' );
+kntnt_extractor_assert( ! $nudged_running, 'A poll of a job currently being ticked fires no nudge, even at shutdown (AC7)' );
 
-// A stalled job (running, but with a stale heartbeat) is untended again, so a poll
-// re-nudges it — the fallback that restarts a queue whose driver died.
+// A stalled job (running, but with a stale heartbeat) is untended again, so its poll
+// re-nudges it at shutdown — the fallback that restarts a queue whose driver died.
 $stalled = new Extraction_Job( $n_job->id, Job_State::Running, $n_job->owner, $n_job->public_key, $n_job->tables, $n_job->structure_only, $n_job->files, $n_job->created_at, time() - 86400, $n_job->tick_secret, $n_job->artifact );
 $store->save( $stalled );
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $n_id );
+do_action( 'shutdown' );
 $nudged_stalled = false;
 foreach ( $captured as $call ) {
 	if ( str_contains( $call['url'], '/extractions/' . $n_id . '/tick' ) ) {
 		$nudged_stalled = true;
 	}
 }
-kntnt_extractor_assert( $nudged_stalled, 'A poll of a stalled job re-nudges its tick endpoint (AC7)' );
+kntnt_extractor_assert( $nudged_stalled, 'A poll of a stalled job re-nudges its tick endpoint at shutdown (AC7)' );
 
-// A finished (ready) job needs no advancing, so polling it fires no nudge.
+// A finished (ready) job needs no advancing, so its poll schedules nothing at all.
+remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $id );
+do_action( 'shutdown' );
 $nudged_ready = false;
 foreach ( $captured as $call ) {
 	if ( str_contains( $call['url'], '/extractions/' . $id . '/tick' ) ) {
 		$nudged_ready = true;
 	}
 }
-kntnt_extractor_assert( ! $nudged_ready, 'A poll of a ready job fires no nudge (AC7)' );
+kntnt_extractor_assert( ! $nudged_ready, 'A poll of a ready job fires no nudge, even at shutdown (AC7)' );
+
+// Clear the last block's continuation so no leftover shutdown closure fires later.
+remove_all_actions( 'shutdown' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
