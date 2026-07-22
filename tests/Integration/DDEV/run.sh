@@ -65,6 +65,7 @@ mkdir -p "${plugin_dest}"
 cp "${plugin_root}/kntnt-extractor.php" "${plugin_dest}/"
 cp "${plugin_root}/autoloader.php" "${plugin_dest}/"
 cp -R "${plugin_root}/classes" "${plugin_dest}/"
+cp -R "${plugin_root}/lib" "${plugin_dest}/"
 cp -R "${plugin_root}/languages" "${plugin_dest}/" 2>/dev/null || true
 ddev wp plugin activate kntnt-extractor >/dev/null
 
