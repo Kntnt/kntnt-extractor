@@ -3,9 +3,9 @@
  * Plugin Name:       Kntnt Extractor
  * Plugin URI:        https://github.com/Kntnt/kntnt-extractor
  * Description:       Capability-gated REST API for extracting a selection of database tables and files from a site.
- * Version:           0.1.0
+ * Version:           0.1.1
  * Requires at least: 6.0
- * Requires PHP:      8.5
+ * Requires PHP:      8.4
  * Author:            Thomas Barregren
  * Author URI:        https://www.kntnt.com
  * License:           GPL-2.0-or-later
@@ -26,7 +26,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 // The PHP floor, mirroring the `Requires PHP` header above. WordPress reads the
 // header, but PHP itself cannot, so the guard below needs its own copy.
-const KNTNT_EXTRACTOR_MINIMUM_PHP = '8.5';
+const KNTNT_EXTRACTOR_MINIMUM_PHP = '8.4';
 
 /**
  * Guards against running on a PHP version older than the declared floor.

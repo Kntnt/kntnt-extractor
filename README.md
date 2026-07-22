@@ -38,7 +38,7 @@ The plugin exposes exactly the operations this kind of task needs — list what 
 ## Requirements
 
 - WordPress 6.0 or later
-- PHP 8.5 or later
+- PHP 8.4 or later
 
 ## Installation
 

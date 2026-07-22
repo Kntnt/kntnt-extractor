@@ -426,7 +426,7 @@ final class Sealed_Writer {
 	/**
 	 * Scrubs a secret's bytes from the given variable once it is no longer needed.
 	 *
-	 * The native `sodium` extension bundled with the required PHP 8.5 overwrites
+	 * The native `sodium` extension bundled with the required PHP 8.4 overwrites
 	 * the string in place in constant time (and leaves the variable `null`).
 	 * WordPress's pure-PHP `sodium_compat` fallback cannot do that and throws
 	 * from {@see sodium_memzero()} rather than feign a secure wipe, so where the

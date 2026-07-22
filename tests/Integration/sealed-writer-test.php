@@ -21,7 +21,7 @@ declare( strict_types = 1 );
 use Kntnt\Extractor\Crypto\Invalid_Public_Key;
 use Kntnt\Extractor\Crypto\Sealed_Writer;
 
-// Precondition: the sodium API must be reachable (ADR-0007). Production PHP 8.5
+// Precondition: the sodium API must be reachable (ADR-0007). Production PHP 8.4
 // bundles the native extension; WordPress supplies sodium_compat where it is not
 // compiled in (as in this WASM harness), so both paths present the same API.
 kntnt_extractor_assert( function_exists( 'sodium_crypto_box_seal' ) && function_exists( 'sodium_crypto_secretbox' ), 'The sodium crypto API is available in the harness' );

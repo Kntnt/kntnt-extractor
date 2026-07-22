@@ -25,7 +25,7 @@ parameters:
     # non-ignorable, so no baseline can bury it. phpcs cannot do this job: its
     # `testVersion` belongs to PHPCompatibility, whose last stable (9.3.5, 2019)
     # knows nothing after PHP 7.4 and passes 8.x code in silence.
-    phpVersion: 80500
+    phpVersion: 80400
 
     # The bootstrap guard tests PHP_VERSION against the floor above. Left on,
     # PHPStan folds that test to a constant true and calls the whole fallback

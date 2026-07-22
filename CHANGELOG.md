@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.1.1] – 2026-07-22
+
+### Changed
+
+- Lowered the minimum PHP requirement from 8.5 to 8.4. No code depended on a PHP 8.5-only feature, so the plugin now installs and runs on PHP 8.4 hosts as well.
+
 ## [0.1.0] – 2026-07-22
 
 ### Added
@@ -25,5 +31,6 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.0
