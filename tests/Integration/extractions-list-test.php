@@ -182,6 +182,17 @@ wp_set_current_user( $single_user->ID );
 kntnt_extractor_assert( current_user_can( $operate ) && ! current_user_can( 'manage_options' ), 'The single-capability caller holds Operate but not manage_options' );
 kntnt_extractor_assert( $get_extractions()->get_status() === 403, 'A single-capability caller is refused the listing (403) (AC4)' );
 
+// The gate is composite in the other direction too, so manage_options alone
+// (without Operate) never admits — pinning both single-capability directions
+// keeps the composite Authorizer (ADR-0002) from drifting to a manage_options-only
+// check that would still pass every other assertion here.
+$manage_only = wp_insert_user( [ 'user_login' => 'kntnt_list_manage_cap', 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ] );
+$manage_user = get_user_by( 'id', is_int( $manage_only ) ? $manage_only : 0 );
+$manage_user->add_cap( 'manage_options' );
+wp_set_current_user( $manage_user->ID );
+kntnt_extractor_assert( current_user_can( 'manage_options' ) && ! current_user_can( $operate ), 'The single-capability caller holds manage_options but not Operate' );
+kntnt_extractor_assert( $get_extractions()->get_status() === 403, 'A manage_options-only caller is refused the listing (403) (AC4)' );
+
 // --- AC5: an authorized caller with no live jobs gets an empty listing ---
 
 wp_set_current_user( $owner->ID );
@@ -226,6 +237,16 @@ kntnt_extractor_assert( $terminal_job !== null, 'The job seeded for the terminal
 $store->save( $terminal_job->with_state( Job_State::Failed ) );
 kntnt_extractor_assert( $store->find( $terminal_id )->state === Job_State::Failed, 'The seeded job is now persisted terminal (failed)' );
 kntnt_extractor_assert( ! in_array( $terminal_id, $listed_ids( $get_extractions() ), true ), 'A terminal (failed) job is omitted from the listing (AC2)' );
+
+// Seed a second terminal job in the expired state — the TTL-sweep end of a job's
+// life — so a hand-rolled state list that omits Job_State::Expired cannot pass
+// while an expired job pollutes the recovery listing the health check enumerates.
+$expired_id = (string) ( $post_extractions( $selection() )->get_data()['id'] ?? '' );
+$expired_job = $store->find( $expired_id );
+kntnt_extractor_assert( $expired_job !== null, 'The job seeded for the expired case exists on disk' );
+$store->save( $expired_job->with_state( Job_State::Expired ) );
+kntnt_extractor_assert( $store->find( $expired_id )->state === Job_State::Expired, 'The seeded job is now persisted terminal (expired)' );
+kntnt_extractor_assert( ! in_array( $expired_id, $listed_ids( $get_extractions() ), true ), 'A terminal (expired) job is omitted from the listing (AC2)' );
 
 // --- AC3: a job owned by another user never appears in this caller's listing ---
 
