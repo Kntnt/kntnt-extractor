@@ -279,11 +279,11 @@ kntnt_extractor_assert( ! in_array( $fresh_id, $driven_ids, true ), 'The watchdo
 
 // --- #18/AC2: a generous budget lets one patrol complete a stalled multi-chunk job ---
 
-// A tiny chunk size makes the selection span many chunks; a generous local tick
-// budget then lets the single in-process advance the patrol drives package the
-// whole job to ready in one cron cycle instead of one chunk per cycle. The
+// A small chunk size makes the selection span several chunks; a generous local
+// tick budget then lets the single in-process advance the patrol drives package
+// the whole job to ready in one cron cycle instead of one chunk per cycle. The
 // suite-wide budget-0 pin is overridden locally at a higher priority and restored.
-$force_chunk = static fn(): int => 16;
+$force_chunk = static fn(): int => 1024;
 add_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );
 $force_budget = static fn(): int => 30;
 add_filter( 'kntnt_extractor_config_tick_budget', $force_budget, 20 );

@@ -17,14 +17,17 @@ use Throwable;
  * The extraction job's driver: it ticks a job forward and nudges an untended one.
  *
  * A job is advanced by a tick — a call authenticated by the job's own secret, so
- * the loopback driver can drive it without a WordPress session (ADR-0007). Each
- * tick packages exactly ONE bounded chunk through the {@see Artifact_Builder} — one
- * table dump, or one file part up to the configured chunk size — persists the
- * progress, and leaves the job running with a fresh heartbeat while work remains, so
- * the next tick resumes where this one stopped. Only the last chunk finalizes the
- * container and marks the job ready for download; a large selection therefore
- * completes across many ticks and survives an interruption between them. A build
- * that throws drops the job to failed rather than leaving it wedged in running.
+ * the loopback driver can drive it without a WordPress session (ADR-0007). Each tick
+ * packages bounded chunks through the {@see Artifact_Builder} — one table dump, or one
+ * file part up to the configured chunk size — within a wall-clock budget (`tick_budget`,
+ * default 15 s; zero means exactly one chunk per tick), persisting the progress after
+ * each chunk so the heartbeat stays fresh, and leaves the job running while work remains
+ * so the next tick resumes where this one stopped. Only the last chunk finalizes the
+ * container and marks the job ready for download; a large selection therefore completes
+ * across one or more budgeted ticks and survives an interruption between them. Once the
+ * lock is released the tick fires the continuation loopback once, and only when work
+ * remains. A build that throws drops the job to failed rather than leaving it wedged in
+ * running (ADR-0010).
  *
  * Two liveness signals share the job's own state and heartbeat rather than a lock.
  * A tick is the authenticated driver, so it advances any queued or still-running
@@ -61,6 +64,19 @@ final class Dispatcher {
 	private const int DEFAULT_STALE_AFTER = 120;
 
 	/**
+	 * Seconds of wall clock one tick may keep packaging chunks before yielding.
+	 *
+	 * Resolved through the Config seam under the knob `tick_budget`, so a site tunes
+	 * it with the `KNTNT_EXTRACTOR_TICK_BUDGET` constant or its filter. Zero means
+	 * exactly one chunk per tick. The default of 15 s is deliberately well under the
+	 * common 30 s FPM/PHP execution limits. This is only the fallback when neither is
+	 * set.
+	 *
+	 * @since 0.2.1
+	 */
+	private const int DEFAULT_TICK_BUDGET = 15;
+
+	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
 	 *
 	 * @since 0.1.0
@@ -76,15 +92,22 @@ final class Dispatcher {
 	) {}
 
 	/**
-	 * Advances a job by one bounded chunk, returning the job in the state it reached.
+	 * Advances a job by up to a budget of bounded chunks, returning the state it reached.
 	 *
-	 * A queued or running job is packaged one chunk further in this call: the first
+	 * A queued or running job is packaged forward under a single held lock: the first
 	 * chunk stamps it running, each subsequent one appends the next segment, and the
-	 * last one finalizes and publishes the container and marks the job ready. While
-	 * work remains the job is left running with a fresh heartbeat and a continuation
-	 * loopback is fired so the next chunk runs without waiting for a poll (ADR-0007).
-	 * A finished, ready, or terminal job is left untouched, so a duplicate loopback is
-	 * a harmless no-op. A build failure lands the job in failed.
+	 * last one finalizes and publishes the container and marks the job ready. The loop
+	 * always runs one chunk and keeps going while the job is still running and the
+	 * `tick_budget` wall-clock deadline has not passed, so a zero budget is one chunk
+	 * per tick and a positive one collapses many cron/loopback round trips into a single
+	 * PHP invocation (ADR-0010). While work remains the job is left running with a fresh
+	 * heartbeat, and the continuation loopback is fired once after the lock is released
+	 * so the next tick runs without waiting for a poll. A finished, ready, or terminal
+	 * job is left untouched, so a duplicate loopback is a harmless no-op. A build failure
+	 * lands the job in failed.
+	 *
+	 * The nudger's client disconnects almost immediately by design, so the tick calls
+	 * {@see ignore_user_abort()} first and keeps packaging through that abort.
 	 *
 	 * Ticks on one job are serialised by a per-job advisory lock. The lock-free queue
 	 * (ADR-0007) lets a continuation loopback and a poll-nudge fire against the same
@@ -100,6 +123,10 @@ final class Dispatcher {
 	 * @return Extraction_Job The job in its resulting state.
 	 */
 	public function tick( Extraction_Job $job ): Extraction_Job {
+
+		// The nudging client disconnects almost immediately by design; the tick must
+		// keep packaging after that abort rather than dying mid-chunk (ADR-0010).
+		ignore_user_abort( true );
 
 		// Cheap pre-check before touching the filesystem: a ready or terminal job is a
 		// no-op, so a duplicate or late loopback never rebuilds a done job.
@@ -131,11 +158,29 @@ final class Dispatcher {
 				return $current;
 			}
 
-			return $this->advance_one_chunk( $current );
+			// Package chunks until the job leaves running or the wall-clock budget is spent;
+			// the first chunk always runs, so a zero budget means exactly one chunk per tick
+			// and a positive one collapses many cron/loopback round trips into a single PHP
+			// invocation (ADR-0010). Each iteration saves the job, so the heartbeat stays
+			// fresh throughout the budget.
+			$deadline = microtime( true ) + $this->tick_budget();
+			do {
+				$current = $this->advance_one_chunk( $current );
+			} while ( $current->state === Job_State::Running && microtime( true ) < $deadline );
 
 		} finally {
 			$this->store->unlock( $lock );
 		}
+
+		// Fire the continuation only now that the lock is released, so the tick it spawns
+		// can take the lock instead of no-opping against this one, and only when work
+		// remains — a finished or failed job needs no successor (ADR-0010). The early
+		// returns above (terminal state, lost lock, vanished job) correctly fire none.
+		if ( $current->state === Job_State::Running ) {
+			$this->nudge( $current );
+		}
+
+		return $current;
 
 	}
 
@@ -144,7 +189,9 @@ final class Dispatcher {
 	 *
 	 * Split from {@see tick()} so the locking and re-read stay readable above it: by the
 	 * time this runs the per-job lock is held and the job's committed state has been
-	 * confirmed to be queued or running.
+	 * confirmed to be queued or running. Firing the continuation loopback is not this
+	 * method's job — the budgeted loop in {@see tick()} owns that, once, after the lock
+	 * is released (ADR-0010).
 	 *
 	 * @since 0.1.0
 	 *
@@ -182,13 +229,11 @@ final class Dispatcher {
 			return $ready;
 		}
 
-		// Work remains: persist the advanced progress, keep the job running with a fresh
-		// heartbeat, and fire the continuation loopback so the next chunk resumes without
-		// waiting for a poll. The nudge is unconditional here because this tick IS the
-		// driver scheduling its own next chunk, not the poll-nudge that defers to a live one.
+		// Work remains: persist the advanced progress and keep the job running with a
+		// fresh heartbeat. The continuation loopback for the next chunk is fired once by
+		// the budgeted loop in tick() after the lock is released, not per chunk here.
 		$advanced = $running->with_progress( $progress );
 		$this->store->save( $advanced );
-		$this->nudge( $advanced );
 
 		return $advanced;
 
@@ -252,6 +297,15 @@ final class Dispatcher {
 	 * surfaced. The secret rides an HTTP header, which is what lets the tick endpoint
 	 * authenticate the driver without any WordPress session.
 	 *
+	 * Delivery is hardened so a dead loopback can never stall the nudging process:
+	 * the connect phase is hard-bounded through the `http_api_curl` action (a
+	 * sub-second `blocking => false` timeout alone does not bound cURL's connect/DNS,
+	 * and `CURLOPT_NOSIGNAL` is required for short timeouts to be honoured with the
+	 * synchronous resolver at all). The `timeout => 1` gives a healthy host time to
+	 * finish connect-and-send before teardown; the receiving tick runs
+	 * {@see ignore_user_abort()} so it survives the nudger aborting at that bound
+	 * (ADR-0010).
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job to drive.
@@ -259,15 +313,31 @@ final class Dispatcher {
 	 */
 	private function nudge( Extraction_Job $job ): void {
 
-		wp_remote_post(
-			$this->tick_url( $job->id ),
-			[
-				'blocking' => false,
-				'timeout' => 0.01,
-				'sslverify' => false,
-				'headers' => [ self::TICK_SECRET_HEADER => $job->tick_secret ],
-			],
-		);
+		// Hard-bound the connect phase so a dead loopback stalls no process; NOSIGNAL is
+		// required for sub-second cURL timeouts under the synchronous resolver (ADR-0010).
+		$harden = static function ( \CurlHandle $handle ): void {
+			// phpcs:disable WordPress.WP.AlternativeFunctions.curl_curl_setopt -- the http_api_curl action hands over the raw cURL handle precisely to set options the wp_remote_* API does not expose; CURLOPT_NOSIGNAL has no WordPress equivalent.
+			curl_setopt( $handle, CURLOPT_CONNECTTIMEOUT_MS, 1000 );
+			curl_setopt( $handle, CURLOPT_NOSIGNAL, true );
+			// phpcs:enable WordPress.WP.AlternativeFunctions.curl_curl_setopt
+		};
+		add_action( 'http_api_curl', $harden );
+
+		// Fire the loopback and remove the transient hardening whatever happens, so it
+		// never leaks onto an unrelated later request.
+		try {
+			wp_remote_post(
+				$this->tick_url( $job->id ),
+				[
+					'blocking' => false,
+					'timeout' => 1,
+					'sslverify' => false,
+					'headers' => [ self::TICK_SECRET_HEADER => $job->tick_secret ],
+				],
+			);
+		} finally {
+			remove_action( 'http_api_curl', $harden );
+		}
 
 	}
 
@@ -321,6 +391,25 @@ final class Dispatcher {
 		$configured = $this->config->get( 'tick_stale_after', self::DEFAULT_STALE_AFTER );
 
 		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_STALE_AFTER );
+
+	}
+
+	/**
+	 * Resolves the per-tick wall-clock budget through the Config seam, clamped to >= 0.
+	 *
+	 * Zero is a meaningful value — exactly one chunk per tick, which the test suite
+	 * pins — so it is not clamped up to one; only a negative or non-numeric override
+	 * is coerced back to a sane floor.
+	 *
+	 * @since 0.2.1
+	 *
+	 * @return float Seconds one tick may keep packaging chunks before yielding.
+	 */
+	private function tick_budget(): float {
+
+		$configured = $this->config->get( 'tick_budget', self::DEFAULT_TICK_BUDGET );
+
+		return max( 0.0, is_numeric( $configured ) ? (float) $configured : (float) self::DEFAULT_TICK_BUDGET );
 
 	}
 

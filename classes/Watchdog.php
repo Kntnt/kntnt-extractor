@@ -20,7 +20,7 @@ use Throwable;
  * loopback dies, that chain breaks and the queue stalls. This watchdog is the
  * backstop for exactly that case: answered on a recurring schedule the
  * {@see Installer} registers against {@see WATCHDOG_HOOK}, it walks the live job set
- * and hands each stalled job one chunk of progress through the {@see Dispatcher}.
+ * and hands each stalled job a budget of progress through the {@see Dispatcher}.
  *
  * It is a distinct concern from the {@see Sweeper}: the sweep RECLAIMS a
  * never-consumed job by expiring it, while this RESTARTS an unfinished one by
@@ -29,9 +29,10 @@ use Throwable;
  * {@see Dispatcher::needs_advance()} predicate, reused through
  * {@see Dispatcher::advance_stalled()}: a running job with a fresh heartbeat is
  * being ticked right now and is left untouched, and only a queued job or one whose
- * heartbeat has gone stale is restarted. Because that restart advances the chunk
+ * heartbeat has gone stale is restarted. Because that restart advances the job
  * in-process rather than firing another loopback, the job makes progress even where
- * the loopback is dead — one chunk per cron cycle until it reaches ready.
+ * the loopback is dead — one budget of chunks per cron cycle until it reaches ready
+ * (ADR-0010).
  *
  * @since 0.1.0
  */

@@ -99,9 +99,10 @@ $force_max = static fn(): int => 20;
 add_filter( 'kntnt_extractor_config_work_dir', $force_work );
 add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 
-// Force a tiny chunk size so a modest selection genuinely spans many chunks,
-// making the budget's multi-chunk packaging observable within one tick.
-$force_chunk = static fn(): int => 16;
+// Force a small chunk size so a modest selection genuinely spans several chunks —
+// making the budget's multi-chunk packaging observable within one tick — while
+// staying coarse enough that the whole job completes well inside the budget.
+$force_chunk = static fn(): int => 1024;
 add_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );
 
 // Short-circuit every loopback so a nudge never touches the network, and capture
