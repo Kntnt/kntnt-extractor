@@ -54,7 +54,7 @@ wp_set_current_user( $admin->ID );
 // trio plus one non-secret name, so the redaction rule (AC3) and the
 // "resolve live, never echo the source expression" rule are both exercised
 // deterministically rather than depending on Playground's generated config.
-$fixture = wp_tempnam( 'kntnt-env-wp-config' );
+$fixture = tempnam( get_temp_dir(), 'kntnt-env-wp-config' );
 file_put_contents(
 	$fixture,
 	"<?php\n"
