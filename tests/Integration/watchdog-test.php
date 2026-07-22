@@ -36,6 +36,8 @@ use Kntnt\Extractor\Dispatcher;
 use Kntnt\Extractor\Extraction_Job;
 use Kntnt\Extractor\Job_State;
 use Kntnt\Extractor\Job_Store;
+use Kntnt\Extractor\Rest\Status_Controller;
+use Kntnt\Extractor\Sweeper;
 use Kntnt\Extractor\Table_Dumper;
 use Kntnt\Extractor\Watchdog;
 
@@ -105,6 +107,19 @@ $nudged_tick = static function ( array $captured, string $id, string $secret ): 
 	return false;
 };
 
+// True when at least one nudge to this job's tick endpoint was fired NON-BLOCKING —
+// the AC1 property that keeps a real host's create/poll/tick from serialising on its
+// own HTTP round-trip. A regression to a blocking request would still be a nudge, so
+// $nudged_tick alone cannot catch it; this pins 'blocking' => false explicitly.
+$nudged_nonblocking = static function ( array $captured, string $id, string $secret ): bool {
+	foreach ( $captured as $call ) {
+		if ( str_contains( $call['url'], '/extractions/' . $id . '/tick' ) && ( $call['headers'][ Dispatcher::TICK_SECRET_HEADER ] ?? '' ) === $secret && ( $call['blocking'] ?? true ) === false ) {
+			return true;
+		}
+	}
+	return false;
+};
+
 // Make the Operate grant a precondition regardless of file order.
 if ( ! get_role( 'administrator' )->has_cap( 'kntnt_extractor_operate' ) ) {
 	deactivate_plugins( 'kntnt-extractor/kntnt-extractor.php' );
@@ -127,7 +142,12 @@ add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 $captured = [];
 $loopback_mode = 'ok';
 $intercept = static function ( $pre, $args, $url ) use ( &$captured, &$loopback_mode ) {
-	$captured[] = [ 'url' => (string) $url, 'headers' => is_array( $args['headers'] ?? null ) ? $args['headers'] : [] ];
+	$captured[] = [
+		'url' => (string) $url,
+		'headers' => is_array( $args['headers'] ?? null ) ? $args['headers'] : [],
+		'blocking' => $args['blocking'] ?? null,
+		'timeout' => $args['timeout'] ?? null,
+	];
 	if ( $loopback_mode === 'fail' ) {
 		return new WP_Error( 'kntnt_extractor_loopback_down', 'Loopback is unavailable on this host.' );
 	}
@@ -168,6 +188,7 @@ $id = is_array( $created ) ? (string) ( $created['id'] ?? '' ) : '';
 kntnt_extractor_assert( $id !== '', 'POST /extractions creates a job' );
 $secret = $secret_of( $id );
 kntnt_extractor_assert( $nudged_tick( $captured, $id, $secret ), 'Creating a job fires a loopback tick carrying its secret (AC1)' );
+kntnt_extractor_assert( $nudged_nonblocking( $captured, $id, $secret ), 'The creation loopback tick is fired non-blocking, so create never waits on its own HTTP round-trip (AC1)' );
 
 // --- AC1: finishing a chunk fires the NEXT chunk's loopback tick ---
 
@@ -178,6 +199,7 @@ $tick( $id, $secret );
 $after_chunk = $store->find( $id );
 kntnt_extractor_assert( $after_chunk !== null && $after_chunk->state === Job_State::Running, 'A first tick leaves the multi-chunk job running with work remaining (AC1)' );
 kntnt_extractor_assert( $nudged_tick( $captured, $id, $secret ), 'Finishing a chunk fires the next chunk\'s loopback tick carrying its secret (AC1)' );
+kntnt_extractor_assert( $nudged_nonblocking( $captured, $id, $secret ), 'The continuation loopback tick is fired non-blocking, so each chunk never waits on its own HTTP round-trip (AC1)' );
 
 // --- AC3: a status poll nudges an untended queue, never a tended one ---
 
@@ -205,6 +227,25 @@ $get_extraction( $poll_id );
 kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a stalled running job re-nudges its tick endpoint (AC3)' );
 
 // --- AC2: the watchdog detects and restarts a stalled queue ---
+
+// The watchdog is a WP-Cron backstop, so the plugin's wiring must actually stand it
+// up: the Installer schedules its event at activation, and the Plugin contributes its
+// sub-hourly recurrence to the cron intervals. Pin both, so deleting the schedule
+// block, mistyping the hook, or dropping the cron_schedules filter fails here rather
+// than silently leaving production with no watchdog at all (which would void AC4 too).
+kntnt_extractor_assert( wp_next_scheduled( Watchdog::WATCHDOG_HOOK ) !== false, 'Activation scheduled the watchdog cron event against WATCHDOG_HOOK (AC2)' );
+$schedules = wp_get_schedules();
+kntnt_extractor_assert( isset( $schedules[ Watchdog::WATCHDOG_SCHEDULE ] ), 'The watchdog\'s sub-hourly recurrence is registered as a cron schedule (AC2)' );
+kntnt_extractor_assert( ( $schedules[ Watchdog::WATCHDOG_SCHEDULE ]['interval'] ?? null ) === 900, 'The watchdog schedule runs every 900 seconds (AC2)' );
+
+// Drive a stalled queued job through the SCHEDULED HOOK itself — do_action fires the
+// exact add_action( WATCHDOG_HOOK, ... ) binding the Plugin registers against the
+// plugin-wired Watchdog, not a locally built instance — so this binds the production
+// callback, not just patrol() in isolation.
+$hooked_created = $post_extractions( $selection )->get_data();
+$hooked_id = is_array( $hooked_created ) ? (string) ( $hooked_created['id'] ?? '' ) : '';
+do_action( Watchdog::WATCHDOG_HOOK );
+kntnt_extractor_assert( ( $store->find( $hooked_id )->state ?? Job_State::Queued ) !== Job_State::Queued, 'The scheduled watchdog hook advances a stalled queued job past queued (AC2)' );
 
 // A queued job that nothing is driving is stalled by definition; the watchdog
 // callback advances it past queued.
@@ -267,16 +308,59 @@ $loopback_mode = 'ok';
 
 // --- AC5: no public route exposes the loop, and the tick still needs the secret ---
 
-$routes = array_keys( rest_get_server()->get_routes() );
-$exposes_loop = false;
-foreach ( $routes as $route ) {
-	if ( str_contains( $route, 'watchdog' ) || str_contains( $route, 'nudge' ) || str_contains( $route, 'dispatch' ) ) {
-		$exposes_loop = true;
-	}
-}
-kntnt_extractor_assert( ! $exposes_loop, 'No public route exposes the watchdog, nudge, or dispatch loop (AC5)' );
+// An allowlist, not a substring scan: collect every route the plugin registers under
+// its namespace and assert the set is EXACTLY the client surface plus the one secret-
+// guarded tick route. A substring scan for 'watchdog'/'nudge'/'dispatch' would pass a
+// loop route exposed under any other name ('advance', 'drive', 'cron', ...); this pins
+// the whole surface, so any new route whatsoever — whatever its name — fails.
+$namespace = Status_Controller::REST_NAMESPACE;
+$expected_routes = [
+	'/' . $namespace,
+	'/' . $namespace . '/status',
+	'/' . $namespace . '/tables',
+	'/' . $namespace . '/files',
+	'/' . $namespace . '/audit-log',
+	'/' . $namespace . '/extractions',
+	'/' . $namespace . '/extractions/(?P<id>[a-f0-9]{32})',
+	'/' . $namespace . '/extractions/(?P<id>[a-f0-9]{32})/consume',
+	'/' . $namespace . '/extractions/(?P<id>[a-f0-9]{32})/tick',
+];
+$actual_routes = array_values( array_filter(
+	array_keys( rest_get_server()->get_routes() ),
+	static fn( string $route ): bool => $route === '/' . $namespace || str_starts_with( $route, '/' . $namespace . '/' ),
+) );
+sort( $expected_routes );
+sort( $actual_routes );
+kntnt_extractor_assert( $actual_routes === $expected_routes, 'The plugin exposes exactly its client surface plus the secret-guarded tick route, and no route exposes the loop under any name (AC5)' );
 kntnt_extractor_assert( $tick( $id, null )->get_status() === 403, 'The tick endpoint still requires the per-job secret (AC5)' );
 kntnt_extractor_assert( $tick( $id, 'wrong-secret' )->get_status() === 403, 'A wrong secret cannot drive the tick loop (AC5)' );
+
+// --- Backstop: the watchdog's endless restarts cannot outlive the absolute ceiling ---
+
+// A job the watchdog keeps restarting carries a forever-fresh heartbeat — each patrol
+// stamps a new one — so the TTL's heartbeat window alone would retain its partial dump
+// and re-run its failing chunk without bound (a chunk that dies uncatchably every
+// attempt: an OOM or max_execution_time kill the tick's catch can never intercept). The
+// sweep's absolute lifetime ceiling, measured from creation and immune to heartbeat
+// refreshes, is the bound. Age one job's creation far past the default ceiling (six
+// one-hour TTLs) while leaving its heartbeat fresh — the exact state a watchdog restart
+// leaves behind each cycle — and confirm the sweep still reclaims it and purges its
+// working directory.
+$ceiling_created = $post_extractions( $selection )->get_data();
+$ceiling_id = is_array( $ceiling_created ) ? (string) ( $ceiling_created['id'] ?? '' ) : '';
+$ceiling_job = $store->find( $ceiling_id );
+$store->save( new Extraction_Job( $ceiling_job->id, $ceiling_job->state, $ceiling_job->owner, $ceiling_job->public_key, $ceiling_job->tables, $ceiling_job->files, time() - 30 * 3600, time(), $ceiling_job->tick_secret, $ceiling_job->artifact, $ceiling_job->progress ) );
+$ceiling_dir = $work . '/' . $ceiling_id;
+
+// A control created just now: fresh creation and heartbeat, so neither the heartbeat
+// window nor the absolute ceiling touches it — the sweep must leave it intact.
+$young_created = $post_extractions( $selection )->get_data();
+$young_id = is_array( $young_created ) ? (string) ( $young_created['id'] ?? '' ) : '';
+
+$sweeper = new Sweeper( $store, new Config() );
+$swept = array_map( static fn( Extraction_Job $j ): string => $j->id, $sweeper->sweep() );
+kntnt_extractor_assert( in_array( $ceiling_id, $swept, true ) && ! is_dir( $ceiling_dir ), 'The sweep reclaims an unfinished job past the absolute lifetime ceiling despite its fresh heartbeat, purging its partial dump (backstop)' );
+kntnt_extractor_assert( ! in_array( $young_id, $swept, true ) && is_dir( $work . '/' . $young_id ), 'The sweep leaves a young unfinished job with a fresh heartbeat untouched (backstop control)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

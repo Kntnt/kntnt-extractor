@@ -25,10 +25,23 @@ namespace Kntnt\Extractor;
  * being ticked keeps a fresh heartbeat, so an actively-running extraction is never
  * swept out from under its own driver while a stalled or long-unconsumed one is.
  *
- * The TTL is a Config knob (ADR-0004): the constant `KNTNT_EXTRACTOR_TTL` or the
- * `kntnt_extractor_config_ttl` filter, defaulting to the value below. The sweep is
- * answered on a recurring schedule the {@see Installer} registers against
- * {@see SWEEP_HOOK}.
+ * The heartbeat window alone is not enough, though: the stall {@see Watchdog}
+ * restarts an unfinished job every cron cycle and refreshes its heartbeat as it does,
+ * so a chunk that dies uncatchably every attempt — an OOM or `max_execution_time`
+ * kill the tick's `catch` can never intercept — would keep a fresh heartbeat forever
+ * and never fall past this heartbeat window, leaving its partial dump on disk and
+ * re-running its failing chunk without bound. So the sweep applies a SECOND,
+ * absolute ceiling measured from the job's creation, independent of any heartbeat
+ * refresh: an unfinished job that has outlived that ceiling is reclaimed regardless
+ * of how recently the watchdog touched it, which is what bounds the retry loop and
+ * purges the partial container the watchdog would otherwise retain indefinitely.
+ *
+ * Both thresholds are Config knobs (ADR-0004): the TTL heartbeat window through the
+ * constant `KNTNT_EXTRACTOR_TTL` or the `kntnt_extractor_config_ttl` filter, and the
+ * absolute ceiling through `KNTNT_EXTRACTOR_MAX_LIFETIME` or its filter — defaulting
+ * to several TTLs and floored at the TTL so the ceiling can never be tighter than the
+ * heartbeat window. The sweep is answered on a recurring schedule the {@see Installer}
+ * registers against {@see SWEEP_HOOK}.
  *
  * @since 0.1.0
  */
@@ -57,6 +70,19 @@ final class Sweeper {
 	private const int DEFAULT_TTL = 3600;
 
 	/**
+	 * How many TTLs an unfinished job may live from creation before the ceiling reclaims it.
+	 *
+	 * The default absolute lifetime ({@see max_lifetime()}) is this multiple of the
+	 * resolved TTL, so it always sits safely above the heartbeat window and scales with
+	 * a site that tunes the TTL. Six TTLs is a wide margin for a legitimate large
+	 * extraction that advances one chunk per cron cycle, yet still bounds a job the
+	 * watchdog keeps restarting forever.
+	 *
+	 * @since 0.1.0
+	 */
+	private const int MAX_LIFETIME_TTL_MULTIPLE = 6;
+
+	/**
 	 * Wires the sweep to the job store and the Config seam it reads the TTL through.
 	 *
 	 * @since 0.1.0
@@ -73,9 +99,12 @@ final class Sweeper {
 	 * Expires and purges every non-terminal job whose heartbeat has gone stale.
 	 *
 	 * Returns the jobs it expired, each already moved into the expired state, so the
-	 * caller — the cron event, or a test — can see exactly what was reclaimed. A job
-	 * whose heartbeat is still within the TTL, and every already-terminal job, is left
-	 * untouched.
+	 * caller — the cron event, or a test — can see exactly what was reclaimed. A
+	 * non-terminal job is reclaimed when its heartbeat has been silent longer than the
+	 * TTL, OR when it has outlived the absolute lifetime ceiling measured from creation;
+	 * the second test is what catches a job the watchdog keeps restarting with a forever-
+	 * fresh heartbeat. A job within both windows, and every already-terminal job, is
+	 * left untouched.
 	 *
 	 * @since 0.1.0
 	 *
@@ -83,13 +112,21 @@ final class Sweeper {
 	 */
 	public function sweep(): array {
 
-		// Reclaim every non-terminal job that has been silent longer than the TTL:
-		// delete its artifact and working directory, and record it as expired.
+		// Reclaim every non-terminal job that has either gone silent longer than the TTL
+		// or outlived the absolute lifetime ceiling from creation: delete its artifact and
+		// working directory, and record it as expired. The ceiling ignores heartbeat
+		// refreshes, so an unfinished job the watchdog restarts forever is still bounded.
 		$ttl = $this->ttl();
+		$max_lifetime = $this->max_lifetime( $ttl );
 		$now = time();
 		$expired = [];
 		foreach ( $this->store->all() as $job ) {
-			if ( ! $job->state->is_terminal() && ( $now - $job->updated_at ) > $ttl ) {
+			if ( $job->state->is_terminal() ) {
+				continue;
+			}
+			$silent = ( $now - $job->updated_at ) > $ttl;
+			$outlived = ( $now - $job->created_at ) > $max_lifetime;
+			if ( $silent || $outlived ) {
 				$this->store->purge( $job );
 				$expired[] = $job->with_state( Job_State::Expired );
 			}
@@ -131,6 +168,29 @@ final class Sweeper {
 		$configured = $this->config->get( 'ttl', self::DEFAULT_TTL );
 
 		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_TTL );
+
+	}
+
+	/**
+	 * Resolves the absolute lifetime ceiling through the Config seam, floored at the TTL.
+	 *
+	 * The knob `max_lifetime` (`KNTNT_EXTRACTOR_MAX_LIFETIME` or its filter) overrides the
+	 * default of {@see MAX_LIFETIME_TTL_MULTIPLE} times the resolved TTL. The result is
+	 * floored at the TTL so the absolute ceiling can never be tighter than the heartbeat
+	 * window — a misconfiguration cannot turn it into a reaper that sweeps an actively
+	 * running job the heartbeat window still protects.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param int $ttl The resolved heartbeat TTL, the ceiling's floor and default basis.
+	 * @return int Seconds a job may live from creation before the ceiling reclaims it.
+	 */
+	private function max_lifetime( int $ttl ): int {
+
+		$default = $ttl * self::MAX_LIFETIME_TTL_MULTIPLE;
+		$configured = $this->config->get( 'max_lifetime', $default );
+
+		return max( $ttl, is_numeric( $configured ) ? (int) $configured : $default );
 
 	}
 
