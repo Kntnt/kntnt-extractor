@@ -169,7 +169,7 @@ $secret_of = static function ( string $id ) use ( $work ): string {
 // Ages a job's heartbeat far into the past so the stalled-heartbeat predicate treats
 // it as untended again, preserving its state and build progress.
 $stall = static function ( Extraction_Job $job ) use ( $store ): void {
-	$store->save( new Extraction_Job( $job->id, $job->state, $job->owner, $job->public_key, $job->tables, $job->files, $job->created_at, time() - 86400, $job->tick_secret, $job->artifact, $job->progress ) );
+	$store->save( new Extraction_Job( $job->id, $job->state, $job->owner, $job->public_key, $job->tables, $job->structure_only, $job->files, $job->created_at, time() - 86400, $job->tick_secret, $job->artifact, $job->progress ) );
 };
 
 // A multi-segment selection: two tables plus a file, so the build genuinely spans
@@ -350,7 +350,7 @@ kntnt_extractor_assert( $tick( $id, 'wrong-secret' )->get_status() === 403, 'A w
 $ceiling_created = $post_extractions( $selection )->get_data();
 $ceiling_id = is_array( $ceiling_created ) ? (string) ( $ceiling_created['id'] ?? '' ) : '';
 $ceiling_job = $store->find( $ceiling_id );
-$store->save( new Extraction_Job( $ceiling_job->id, $ceiling_job->state, $ceiling_job->owner, $ceiling_job->public_key, $ceiling_job->tables, $ceiling_job->files, time() - 30 * 3600, time(), $ceiling_job->tick_secret, $ceiling_job->artifact, $ceiling_job->progress ) );
+$store->save( new Extraction_Job( $ceiling_job->id, $ceiling_job->state, $ceiling_job->owner, $ceiling_job->public_key, $ceiling_job->tables, $ceiling_job->structure_only, $ceiling_job->files, time() - 30 * 3600, time(), $ceiling_job->tick_secret, $ceiling_job->artifact, $ceiling_job->progress ) );
 $ceiling_dir = $work . '/' . $ceiling_id;
 
 // A control created just now: fresh creation and heartbeat, so neither the heartbeat

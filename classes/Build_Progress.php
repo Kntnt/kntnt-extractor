@@ -17,7 +17,8 @@ namespace Kntnt\Extractor;
  * interruption between ticks, so the point the build reached is persisted in the
  * job record rather than held in memory. This value carries exactly what the next
  * tick needs to resume without redoing or corrupting a completed segment: how many
- * table segments are sealed, which file is being packaged and the byte offset
+ * full-data table segments and structure-only table segments are sealed, which file
+ * is being packaged and the byte offset
  * within it already sealed, the committed byte length of the in-progress container,
  * the ordered names of every segment written so far (the sealed index the container
  * is finalized with), and the identity of the file currently being split into parts.
@@ -44,7 +45,8 @@ final readonly class Build_Progress {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param int                $tables_done     Count of table segments already sealed, in the job's table order.
+	 * @param int                $tables_done     Count of full-data table segments already sealed, in the job's table order.
+	 * @param int                $structure_done  Count of structure-only table segments already sealed, in the job's structure-only order (issue #16).
 	 * @param int                $file_index      Index into the job's files of the file currently being packaged.
 	 * @param int                $file_offset     Bytes of that file already sealed into earlier parts.
 	 * @param int                $container_bytes Committed byte length of the in-progress container.
@@ -54,6 +56,7 @@ final readonly class Build_Progress {
 	 */
 	public function __construct(
 		public int $tables_done,
+		public int $structure_done,
 		public int $file_index,
 		public int $file_offset,
 		public int $container_bytes,
@@ -67,12 +70,13 @@ final readonly class Build_Progress {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{tables_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}
+	 * @return array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}
 	 */
 	public function to_array(): array {
 
 		return [
 			'tables_done' => $this->tables_done,
+			'structure_done' => $this->structure_done,
 			'file_index' => $this->file_index,
 			'file_offset' => $this->file_offset,
 			'container_bytes' => $this->container_bytes,
@@ -105,6 +109,7 @@ final readonly class Build_Progress {
 			return null;
 		}
 		$tables_done = $data['tables_done'] ?? null;
+		$structure_done = $data['structure_done'] ?? 0;
 		$file_index = $data['file_index'] ?? null;
 		$file_offset = $data['file_offset'] ?? null;
 		$container_bytes = $data['container_bytes'] ?? null;
@@ -112,6 +117,7 @@ final readonly class Build_Progress {
 		$file_size = self::non_negative_or_null( $data['file_size'] ?? null );
 		$file_mtime = self::non_negative_or_null( $data['file_mtime'] ?? null );
 		if ( ! is_int( $tables_done ) || $tables_done < 0
+			|| ! is_int( $structure_done ) || $structure_done < 0
 			|| ! is_int( $file_index ) || $file_index < 0
 			|| ! is_int( $file_offset ) || $file_offset < 0
 			|| ! is_int( $container_bytes ) || $container_bytes < 0
@@ -121,7 +127,7 @@ final readonly class Build_Progress {
 			return null;
 		}
 
-		return new self( $tables_done, $file_index, $file_offset, $container_bytes, $segment_names, $file_size, $file_mtime );
+		return new self( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $segment_names, $file_size, $file_mtime );
 
 	}
 

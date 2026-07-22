@@ -37,13 +37,14 @@ final readonly class Extraction_Job {
 	 * and migrate an older record rather than misreading it. Bumped only when the
 	 * field set or their meaning changes — raised to 2 when execution added the
 	 * per-job tick secret and the sealed artifact's filename, to 3 when the
-	 * chunked, resumable build added durable build-progress (ADR-0007), and to 4
+	 * chunked, resumable build added durable build-progress (ADR-0007), to 4
 	 * when the last-progress timestamp made the sweep's absolute lifetime ceiling
-	 * measure stalled progress rather than raw age.
+	 * measure stalled progress rather than raw age, and to 5 when the structure-only
+	 * table selection (issue #16) joined the tables/files sets.
 	 *
 	 * @since 0.1.0
 	 */
-	public const int SCHEMA_VERSION = 4;
+	public const int SCHEMA_VERSION = 5;
 
 	/**
 	 * Builds a job record from its fully-resolved fields.
@@ -64,7 +65,8 @@ final readonly class Extraction_Job {
 	 * @param Job_State           $state       Lifecycle state the job is in.
 	 * @param int                 $owner       WordPress user id the job is bound to.
 	 * @param string              $public_key  Caller's ephemeral X25519 public key, as base64.
-	 * @param array<int, string>  $tables      Requested table names, already resolved to existing tables.
+	 * @param array<int, string>  $tables      Requested full-data table names, already resolved to existing tables.
+	 * @param array<int, string>  $structure_only Requested structure-only (DDL, no rows) table names, already resolved to existing tables (issue #16).
 	 * @param array<int, string>  $files       Requested file paths, already resolved inside the root.
 	 * @param int                 $created_at  Unix timestamp the job was created at.
 	 * @param int                 $updated_at  Unix timestamp the job last changed state at.
@@ -79,6 +81,7 @@ final readonly class Extraction_Job {
 		public int $owner,
 		public string $public_key,
 		public array $tables,
+		public array $structure_only,
 		public array $files,
 		public int $created_at,
 		public int $updated_at,
@@ -102,7 +105,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at );
 
 	}
 
@@ -125,7 +128,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time() );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time() );
 
 	}
 
@@ -137,7 +140,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}|null, progressed_at: int|null}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}|null, progressed_at: int|null}
 	 */
 	public function to_array(): array {
 
@@ -148,6 +151,7 @@ final readonly class Extraction_Job {
 			'owner' => $this->owner,
 			'public_key' => $this->public_key,
 			'tables' => $this->tables,
+			'structure_only' => $this->structure_only,
 			'files' => $this->files,
 			'created_at' => $this->created_at,
 			'updated_at' => $this->updated_at,
@@ -186,6 +190,12 @@ final readonly class Extraction_Job {
 		$public_key = $data['public_key'] ?? null;
 		$tables = self::string_list( $data['tables'] ?? null );
 		$files = self::string_list( $data['files'] ?? null );
+
+		// The structure-only selection is a schema-5 addition (issue #16); a record
+		// written before it simply carries none, so an absent value reads as the empty
+		// selection rather than disqualifying the record. A present-but-ill-typed value,
+		// by contrast, is a malformed selection and yields null, which fails the record.
+		$structure_only = array_key_exists( 'structure_only', $data ) ? self::string_list( $data['structure_only'] ) : [];
 		$created_at = $data['created_at'] ?? null;
 		$updated_at = $data['updated_at'] ?? null;
 		$tick_secret = $data['tick_secret'] ?? null;
@@ -210,6 +220,7 @@ final readonly class Extraction_Job {
 			|| ! is_int( $owner )
 			|| ! is_string( $public_key )
 			|| $tables === null
+			|| $structure_only === null
 			|| $files === null
 			|| ! is_int( $created_at )
 			|| ! is_int( $updated_at )
@@ -218,7 +229,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at );
 
 	}
 

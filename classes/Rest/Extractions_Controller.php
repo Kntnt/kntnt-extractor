@@ -220,7 +220,7 @@ final class Extractions_Controller {
 
 		// Persist a queued job bound to the caller, then fire the initial loopback so
 		// its execution begins without waiting for the first poll (ADR-0007).
-		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['files'] );
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'] );
 		$this->dispatcher->maybe_nudge( $job );
 
 		return new WP_REST_Response(
@@ -313,12 +313,16 @@ final class Extractions_Controller {
 	 */
 	private function progress_of( Extraction_Job $job ): ?array {
 
-		$tables_total = count( $job->tables );
+		// Structure-only tables are tables to the caller's eye, so they count toward the
+		// table totals alongside the full-data ones (issue #16, AC5): a single honest
+		// "N of M tables" that spans both selections, full then structure-only.
+		$tables_total = count( $job->tables ) + count( $job->structure_only );
 		$files_total = count( $job->files );
 
 		// A ready job is complete by definition, so report every table and file done
 		// rather than the penultimate chunk's persisted progress. A running job reports
-		// the sealed counts its persisted progress carries, or zero before the first chunk.
+		// the sealed counts its persisted progress carries — full-data plus structure-only
+		// table segments — or zero before the first chunk.
 		return match ( $job->state ) {
 			Job_State::Ready => [
 				'tables_done' => $tables_total,
@@ -327,9 +331,9 @@ final class Extractions_Controller {
 				'files_total' => $files_total,
 			],
 			Job_State::Running => [
-				'tables_done' => $job->progress?->tables_done ?? 0,
+				'tables_done' => $job->progress === null ? 0 : $job->progress->tables_done + $job->progress->structure_done,
 				'tables_total' => $tables_total,
-				'files_done' => $job->progress?->file_index ?? 0,
+				'files_done' => $job->progress === null ? 0 : $job->progress->file_index,
 				'files_total' => $files_total,
 			],
 			default => null,
@@ -555,16 +559,21 @@ final class Extractions_Controller {
 	 *
 	 * The checks run in the contract's fixed precedence: a body that is not a JSON
 	 * object, or a selection that is not a list of non-empty strings, or one that
-	 * selects nothing, is a 422; an absent or malformed public key is a 400; an
-	 * unknown table or a file resolving outside the installation root is a 404.
+	 * selects nothing, or one that lists a table as both full-data and structure-only,
+	 * is a 422; an absent or malformed public key is a 400; an unknown table (full-data
+	 * or structure-only) or a file resolving outside the installation root is a 404.
 	 * Existence is deliberately the last of the three so a well-formed request is
 	 * never told a resource is missing before it is told its own shape is wrong,
 	 * yet still ahead of the capability gate its caller runs afterwards.
 	 *
+	 * The structure-only selection (issue #16) is additive and independently
+	 * omittable: an absent or null `tables_structure_only` behaves as `[]`, so a
+	 * pre-#16 caller sending only `tables`/`files` is unchanged.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return array{tables: array<int, string>, files: array<int, string>, public_key: string}|WP_Error
+	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string}|WP_Error
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
@@ -574,12 +583,20 @@ final class Extractions_Controller {
 			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'The request body must be a JSON object.', 'kntnt-extractor' ) );
 		}
 
-		// Normalise both selections; a present-but-ill-typed selection, one holding
+		// Normalise the three selections; a present-but-ill-typed selection, one holding
 		// an empty entry, or a request that selects nothing at all is a malformed body.
+		// A structure-only-only selection is valid, so nothing-selected weighs all three.
 		$tables = $this->string_selection( $data['tables'] ?? [] );
+		$structure_only = $this->string_selection( $data['tables_structure_only'] ?? [] );
 		$files = $this->string_selection( $data['files'] ?? [] );
-		if ( $tables === null || $files === null || ( $tables === [] && $files === [] ) ) {
-			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'Provide tables and/or files as arrays of non-empty strings, selecting at least one.', 'kntnt-extractor' ) );
+		if ( $tables === null || $structure_only === null || $files === null || ( $tables === [] && $structure_only === [] && $files === [] ) ) {
+			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'Provide tables, tables_structure_only, and/or files as arrays of non-empty strings, selecting at least one.', 'kntnt-extractor' ) );
+		}
+
+		// A table is either dumped whole or structure-only, never both: the same name in
+		// both lists is a contradictory request, a malformed body rather than a not-found.
+		if ( array_intersect( $tables, $structure_only ) !== [] ) {
+			return $this->error( 422, 'kntnt_extractor_overlapping_selection', __( 'A table may appear in tables or tables_structure_only, but not both.', 'kntnt-extractor' ) );
 		}
 
 		// Require a well-formed key: present, valid base64, exactly a 32-byte X25519
@@ -589,15 +606,17 @@ final class Extractions_Controller {
 			return $this->error( 400, 'kntnt_extractor_invalid_public_key', __( 'A valid base64-encoded 32-byte X25519 public key is required.', 'kntnt-extractor' ) );
 		}
 
-		// Existence-first: an unknown table or an out-of-root file is a 404, decided
-		// before the capability gate (ADR-0003). Tables are checked before files.
-		$missing = $this->first_missing_table( $tables ) ?? $this->first_out_of_root_file( $files );
+		// Existence-first: an unknown table — full-data or structure-only — or an
+		// out-of-root file is a 404, decided before the capability gate (ADR-0003).
+		// Both table lists are existence-checked the same way, before files.
+		$missing = $this->first_missing_table( $tables ) ?? $this->first_missing_table( $structure_only ) ?? $this->first_out_of_root_file( $files );
 		if ( $missing !== null ) {
 			return $this->error( 404, 'kntnt_extractor_unknown_resource', __( 'A requested table or file does not exist within this installation.', 'kntnt-extractor' ) );
 		}
 
 		return [
 			'tables' => $tables,
+			'structure_only' => $structure_only,
 			'files' => $files,
 			'public_key' => $public_key,
 		];

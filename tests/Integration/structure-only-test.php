@@ -13,7 +13,7 @@
  *    other segment, and it counts toward the poll `progress` table totals.
  *
  * @package Kntnt\Extractor
- * @since   0.1.2
+ * @since   0.2.0
  */
 
 declare( strict_types = 1 );

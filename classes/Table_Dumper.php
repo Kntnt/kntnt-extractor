@@ -69,6 +69,34 @@ final class Table_Dumper {
 	}
 
 	/**
+	 * Returns only the structure block for one table — DDL, no rows.
+	 *
+	 * The same `--` header, `DROP TABLE IF EXISTS`, and `CREATE TABLE` that {@see dump()}
+	 * emits, but without any data block: a structure-only table (issue #16) carries its
+	 * schema into the artifact so a reload recreates it, yet ships none of its rows —
+	 * exactly what lets an operational table (analytics, cookie-consent, search-index)
+	 * be created empty rather than transferred whole. An empty `CREATE` still reloads
+	 * idempotently, so the recreated table is valid and ready to receive its own data.
+	 *
+	 * @since 0.2.0
+	 *
+	 * @param string $table The table to dump the structure of; must be an existing table name.
+	 * @return string The table's `DROP`/`CREATE` DDL as SQL, with no `INSERT`.
+	 *
+	 * @throws RuntimeException When the table is not in the live catalog or its
+	 *                          definition cannot be read.
+	 */
+	public function dump_structure( string $table ): string {
+
+		// Refuse anything not in the live catalog before the name reaches a query, then
+		// return the structure block alone — no data block, so no rows are dumped.
+		$this->require_known_table( $table );
+
+		return $this->structure_sql( $table );
+
+	}
+
+	/**
 	 * Rejects a table name that is not an existing table, closing the identifier hole.
 	 *
 	 * A table name cannot be a bound parameter, so it is interpolated directly into

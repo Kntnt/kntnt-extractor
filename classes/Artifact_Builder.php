@@ -19,8 +19,9 @@ use RuntimeException;
  * This is the seam between a resolved job and the crypto container (ADR-0009). It
  * draws each table's dump and each bounded part of each file and hands them to
  * {@see Sealed_Writer} as ordered segments, so plaintext is only ever the single
- * part being sealed and never a whole plain archive on disk. Tables come first,
- * each a single segment; then files, each split into bounded parts sealed under its
+ * part being sealed and never a whole plain archive on disk. Full-data tables come
+ * first, each a single segment; then structure-only tables (issue #16), each a single
+ * DDL-only segment; then files, each split into bounded parts sealed under its
  * installation-root-relative path, so the sealed index can reassemble the ordered
  * parts by that path (AC1).
  *
@@ -106,6 +107,7 @@ final class Artifact_Builder {
 		$writer = new Sealed_Writer( $build_path );
 		if ( $progress === null ) {
 			$tables_done = 0;
+			$structure_done = 0;
 			$file_index = 0;
 			$file_offset = 0;
 			$file_size = null;
@@ -122,6 +124,7 @@ final class Artifact_Builder {
 				return null;
 			}
 			$tables_done = $progress->tables_done;
+			$structure_done = $progress->structure_done;
 			$file_index = $progress->file_index;
 			$file_offset = $progress->file_offset;
 			$file_size = $progress->file_size;
@@ -130,14 +133,21 @@ final class Artifact_Builder {
 			$writer->resume( $public_key, $names, $progress->container_bytes );
 		}
 
-		// Seal the next bounded chunk: every table as one segment first, then each file
-		// as bounded parts under its relative path. When both selections are exhausted
-		// there is no data segment left and only the trailer remains to be written.
+		// Seal the next bounded chunk in a fixed order: every full-data table as one
+		// segment first, then every structure-only table as one DDL-only segment (issue
+		// #16), then each file as bounded parts under its relative path. When all three
+		// selections are exhausted there is no data segment left and only the trailer
+		// remains to be written.
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
 			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump( $table ) ) );
 			$names[] = $table;
 			++$tables_done;
+		} elseif ( $structure_done < count( $job->structure_only ) ) {
+			$table = $job->structure_only[ $structure_done ];
+			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump_structure( $table ) ) );
+			$names[] = $table;
+			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
 			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime );
@@ -161,14 +171,14 @@ final class Artifact_Builder {
 		// finalize the sealed index and publish the container in one atomic rename.
 		// Otherwise suspend the container and hand back the offset the next tick resumes
 		// from, so a completed segment is never redone or re-encrypted.
-		if ( $tables_done >= count( $job->tables ) && $file_index >= count( $job->files ) ) {
+		if ( $tables_done >= count( $job->tables ) && $structure_done >= count( $job->structure_only ) && $file_index >= count( $job->files ) ) {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
 			return null;
 		}
 		$container_bytes = $writer->suspend();
 
-		return new Build_Progress( $tables_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime );
+		return new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime );
 
 	}
 

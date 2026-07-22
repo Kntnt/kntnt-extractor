@@ -420,7 +420,7 @@ kntnt_extractor_assert( ! $nudged_running, 'A poll of a job currently being tick
 
 // A stalled job (running, but with a stale heartbeat) is untended again, so a poll
 // re-nudges it — the fallback that restarts a queue whose driver died.
-$stalled = new Extraction_Job( $n_job->id, Job_State::Running, $n_job->owner, $n_job->public_key, $n_job->tables, $n_job->files, $n_job->created_at, time() - 86400, $n_job->tick_secret, $n_job->artifact );
+$stalled = new Extraction_Job( $n_job->id, Job_State::Running, $n_job->owner, $n_job->public_key, $n_job->tables, $n_job->structure_only, $n_job->files, $n_job->created_at, time() - 86400, $n_job->tick_secret, $n_job->artifact );
 $store->save( $stalled );
 $captured = [];
 $get_extraction( $n_id );

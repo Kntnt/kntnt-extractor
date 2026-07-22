@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- Structure-only table extraction: `POST /extractions` accepts a `tables_structure_only` sibling list alongside `tables`, dumping those tables' `DROP`/`CREATE TABLE` DDL into the sealed artifact without any rows, so an artifact can carry every selected table's structure while carrying only some tables' data. A table may appear in `tables` or `tables_structure_only` but not both (422); an unknown structure-only table is a 404 decided before the capability gate; structure-only tables count toward the poll's table progress totals and are recorded in the sealed index and audit log like any other table.
+
+### Changed
+
+- Bumped the REST API version to `2` for the structure-only request/artifact change.
+
 ## [0.1.1] – 2026-07-22
 
 ### Changed

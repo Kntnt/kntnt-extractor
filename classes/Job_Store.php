@@ -106,15 +106,16 @@ final class Job_Store {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param int                $owner      WordPress user id the job is bound to.
-	 * @param string             $public_key Caller's ephemeral X25519 public key, as base64.
-	 * @param array<int, string> $tables     Requested table names, already resolved.
-	 * @param array<int, string> $files      Requested file paths, already resolved inside the root.
+	 * @param int                $owner          WordPress user id the job is bound to.
+	 * @param string             $public_key     Caller's ephemeral X25519 public key, as base64.
+	 * @param array<int, string> $tables         Requested full-data table names, already resolved.
+	 * @param array<int, string> $structure_only Requested structure-only table names, already resolved (issue #16).
+	 * @param array<int, string> $files          Requested file paths, already resolved inside the root.
 	 * @return Extraction_Job The persisted, queued job.
 	 *
 	 * @throws RuntimeException When the job's state file cannot be written whole.
 	 */
-	public function create( int $owner, string $public_key, array $tables, array $files ): Extraction_Job {
+	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files ): Extraction_Job {
 
 		// Resolve and harden the working directory, and lay down the separate served
 		// downloads directory the ready artifact will be fetched from, then mint an
@@ -126,7 +127,7 @@ final class Job_Store {
 		$this->ensure_downloads();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
-		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
+		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
 
 		// Give the job its own directory, drop an index.html into it as defence in
 		// depth, and persist the state file that lets a later request resume it.

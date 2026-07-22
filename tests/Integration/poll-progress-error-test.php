@@ -205,10 +205,12 @@ kntnt_extractor_assert( ! array_key_exists( 'progress', $failed ), 'A failed pol
 remove_filter( 'kntnt_extractor_config_chunk_size', $small_chunk );
 
 // --- AC6: the poll change surfaces v1 fields and is itself not a bump --------
-
-// Surfacing existing progress/error fields did not bump the contract; the
-// version reads 2 only because the kntnt-wp-skills cutover trio (GET /environment
-// and its siblings) added new caller-visible endpoints in a later change.
+//
+// Surfacing these progress/error fields did not bump the contract. The version
+// reads 2 because two later, unrelated cutovers each added new caller-visible
+// surface: the structure-only extraction (issue #16) and the kntnt-wp-skills
+// trio (GET /environment and its siblings). So assert the current reported
+// version rather than a frozen 1.
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
 kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 2, 'GET /status reports api_version 2 after the cutover bump (AC6)' );
 

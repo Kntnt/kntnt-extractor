@@ -43,6 +43,11 @@ final class Status_Controller {
 	 * Public because it is the single source of truth for the contract version: the
 	 * audit log stamps the same value into every record it writes (ADR-0006).
 	 *
+	 * Raised to 2 for the structure-only cutover trio (issues #15/#16/#17): the
+	 * `tables_structure_only` request field and the structure-only segments it seals
+	 * are a caller-visible change to the extraction contract (ADR-0005). The sibling
+	 * tickets ship under this one coordinated bump rather than one bump each.
+	 *
 	 * @since 0.1.0
 	 */
 	public const int API_VERSION = 2;

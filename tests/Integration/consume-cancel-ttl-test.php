@@ -263,7 +263,7 @@ $aged_artifact = $downloads . '/' . $state_field( $work, $aged_id, 'artifact' );
 $aged_dir = $work . '/' . $aged_id;
 kntnt_extractor_assert( is_file( $aged_artifact ) && is_dir( $aged_dir ), 'The aged job is ready with an artifact on disk before the sweep (precondition)' );
 $aged_job = $store->find( $aged_id );
-$store->save( new Extraction_Job( $aged_job->id, $aged_job->state, $aged_job->owner, $aged_job->public_key, $aged_job->tables, $aged_job->files, $aged_job->created_at, time() - 100000, $aged_job->tick_secret, $aged_job->artifact ) );
+$store->save( new Extraction_Job( $aged_job->id, $aged_job->state, $aged_job->owner, $aged_job->public_key, $aged_job->tables, $aged_job->structure_only, $aged_job->files, $aged_job->created_at, time() - 100000, $aged_job->tick_secret, $aged_job->artifact ) );
 
 // A fresh, ready job whose recent heartbeat must survive any sweep alongside it.
 $fresh_id = $id_of( $post_extractions( $selection ) );

@@ -90,6 +90,7 @@ $sweeper = new Sweeper( $store, new Config() );
 // A multi-segment selection, so a build genuinely spans several chunks.
 $selection = [
 	'tables' => [ $wpdb->options, $wpdb->users ],
+	'structure_only' => [],
 	'files' => [ 'wp-load.php' ],
 	'public_key' => base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keypair() ) ),
 ];
@@ -97,7 +98,7 @@ $selection = [
 // Creates a queued job through the store and returns its id, so every case starts
 // from a real on-disk job whose state file can then be rewritten to a fixture shape.
 $create = static function () use ( $store, $owner, $selection ): string {
-	return $store->create( $owner->ID, $selection['public_key'], $selection['tables'], $selection['files'] )->id;
+	return $store->create( $owner->ID, $selection['public_key'], $selection['tables'], $selection['structure_only'], $selection['files'] )->id;
 };
 
 // Reads and decodes a job's on-disk state file, so a test can rewrite individual

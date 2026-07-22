@@ -93,9 +93,11 @@ final class Audit_Log {
 			// entry, so the log never grows unbounded between reads.
 			$this->rotate();
 
-			// Build the entry from the job's own record — the owner, the full table
-			// list, and a privacy-conscious files digest (the full paths are only
-			// hashed, never stored) — and stamp the API version the contract reports.
+			// Build the entry from the job's own record — the owner, the full-data table
+			// list, the structure-only table list (issue #16, kept distinct so the record
+			// says which tables shipped without their rows), and a privacy-conscious files
+			// digest (the full paths are only hashed, never stored) — and stamp the API
+			// version the contract reports.
 			$entry = [
 				'ts' => time(),
 				'user_id' => $job->owner,
@@ -103,6 +105,7 @@ final class Audit_Log {
 				'api_version' => Status_Controller::API_VERSION,
 				'job_id' => $job->id,
 				'tables' => array_values( $job->tables ),
+				'tables_structure_only' => array_values( $job->structure_only ),
 				'files' => $this->files_summary( $job->files ),
 			];
 			$line = wp_json_encode( $entry, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );

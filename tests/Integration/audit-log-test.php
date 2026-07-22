@@ -9,8 +9,9 @@
  *
  * It pins every acceptance criterion of issue #11:
  *  - AC1: reaching ready appends one JSON Lines entry (under flock) recording ts,
- *    user_id, user_login, api_version, job_id, the full tables list, and a files
- *    summary (count, bytes, distinct top-level roots, SHA-256 of the sorted path list).
+ *    user_id, user_login, api_version, job_id, the full tables list, the
+ *    structure-only tables list (issue #16), and a files summary (count, bytes,
+ *    distinct top-level roots, SHA-256 of the sorted path list).
  *  - AC2: the entry is written at ready and never at consume — consuming (or never
  *    confirming) does not change that it was recorded, and it adds no second entry.
  *  - AC3: the log is a randomly-named file under the uploads directory, read only
@@ -141,7 +142,7 @@ $public_key = base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keyp
 
 wp_set_current_user( $owner->ID );
 $before = time();
-$job_id = $drive_to_ready( [ 'tables' => [ $wpdb->options, $wpdb->users ], 'files' => [ 'wp-load.php', 'wp-settings.php' ], 'public_key' => $public_key ] );
+$job_id = $drive_to_ready( [ 'tables' => [ $wpdb->options, $wpdb->users ], 'tables_structure_only' => [ $wpdb->posts ], 'files' => [ 'wp-load.php', 'wp-settings.php' ], 'public_key' => $public_key ] );
 kntnt_extractor_assert( $job_id !== '', 'A job is created and driven to ready' );
 
 // The endpoint is the sanctioned read path; read it back as the owning admin.
@@ -158,6 +159,7 @@ kntnt_extractor_assert( ( $entry['user_login'] ?? null ) === $owner->user_login,
 kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 2, 'The entry records the api_version (AC1)' );
 kntnt_extractor_assert( ( $entry['job_id'] ?? null ) === $job_id, 'The entry records the job_id (AC1)' );
 kntnt_extractor_assert( ( $entry['tables'] ?? null ) === [ $wpdb->options, $wpdb->users ], 'The entry records the full tables list (AC1)' );
+kntnt_extractor_assert( ( $entry['tables_structure_only'] ?? null ) === [ $wpdb->posts ], 'The entry records the structure-only tables list distinctly (issue #16)' );
 
 $files = is_array( $entry['files'] ?? null ) ? $entry['files'] : [];
 kntnt_extractor_assert( ( $files['count'] ?? null ) === 2, 'The files summary counts the files (AC1)' );
