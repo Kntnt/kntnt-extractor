@@ -11,13 +11,14 @@ declare( strict_types = 1 );
 namespace Kntnt\Extractor;
 
 /**
- * Switches the plugin's dormancy on and off, and schedules its TTL sweep.
+ * Switches the plugin's dormancy on and off, and schedules its recurring events.
  *
  * Activation grants the Operate capability to the administrator role — the
  * plugin's only persistent footprint and the reason its runtime surface stays
- * inert until deliberately switched on (ADR-0001/0002) — and schedules the
- * recurring TTL sweep that reclaims never-consumed jobs (ADR-0004). Deactivation
- * removes the grant and clears the sweep. Because activation re-runs the grant
+ * inert until deliberately switched on (ADR-0001/0002) — and schedules the two
+ * recurring events: the TTL sweep that reclaims never-consumed jobs (ADR-0004) and
+ * the stall watchdog that restarts a queue whose loopback died (ADR-0007).
+ * Deactivation removes the grant and clears both events. Because activation re-runs the grant
  * unconditionally, deactivating and reactivating restores a grant lost by any
  * means; that round trip is the only sanctioned recovery, and it is sufficient
  * precisely because the plugin leaves behind no dedicated account that could be
@@ -51,6 +52,12 @@ final class Installer {
 			wp_schedule_event( time(), 'hourly', Sweeper::SWEEP_HOOK );
 		}
 
+		// Schedule the stall watchdog (ADR-0007) on its own sub-hourly recurrence unless
+		// it is already pending, so a queue whose loopback died is restarted unattended.
+		if ( wp_next_scheduled( Watchdog::WATCHDOG_HOOK ) === false ) {
+			wp_schedule_event( time(), Watchdog::WATCHDOG_SCHEDULE, Watchdog::WATCHDOG_HOOK );
+		}
+
 	}
 
 	/**
@@ -66,9 +73,11 @@ final class Installer {
 	 */
 	public static function deactivate(): void {
 
-		// Revoke the on-switch and stop the recurring sweep; reactivation restores both.
+		// Revoke the on-switch and stop the recurring sweep and stall watchdog;
+		// reactivation restores all three.
 		get_role( 'administrator' )?->remove_cap( Authorizer::OPERATE_CAPABILITY );
 		wp_clear_scheduled_hook( Sweeper::SWEEP_HOOK );
+		wp_clear_scheduled_hook( Watchdog::WATCHDOG_HOOK );
 
 	}
 

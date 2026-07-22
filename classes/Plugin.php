@@ -103,7 +103,9 @@ final class Plugin {
 		// Artifact_Builder and its Table_Dumper, one secret-authenticated tick at a
 		// time (ADR-0007/0009). The Sweeper is the TTL backstop that reclaims a
 		// never-consumed job (ADR-0004); it answers the recurring cron event the
-		// Installer schedules against Sweeper::SWEEP_HOOK. The Audit_Log records every
+		// Installer schedules against Sweeper::SWEEP_HOOK. The Watchdog is the stall
+		// backstop that restarts a queue whose loopback died (ADR-0007); it answers its
+		// own recurring event against Watchdog::WATCHDOG_HOOK. The Audit_Log records every
 		// completed extraction at the ready transition — the non-evadable trigger — and
 		// answers the administrator-only GET /audit-log (ADR-0006).
 		$authorizer = new Authorizer();
@@ -111,6 +113,7 @@ final class Plugin {
 		$job_store = new Job_Store( $config );
 		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper(), $config ) );
 		$sweeper = new Sweeper( $job_store, $config );
+		$watchdog = new Watchdog( $job_store, $dispatcher );
 		$audit_log = new Audit_Log();
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
@@ -123,6 +126,16 @@ final class Plugin {
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $audit_log_controller->register_routes( ... ) );
 		add_action( Sweeper::SWEEP_HOOK, $sweeper->run( ... ) );
+
+		// Drive the job unattended (ADR-0007). The self-dispatching loopback on create
+		// and after each chunk is the primary driver, wired in the Dispatcher and the
+		// extractions controller; the Watchdog is the backstop that restarts a queue
+		// whose loopback died. Its recurring patrol answers the cron event the Installer
+		// schedules against Watchdog::WATCHDOG_HOOK, and its sub-hourly schedule is
+		// contributed to WordPress's cron intervals so that event has a recurrence to
+		// bind to at activation time.
+		add_filter( 'cron_schedules', $watchdog->register_schedule( ... ) ); // phpcs:ignore WordPress.WP.CronInterval.ChangeDetected -- the interval is declared as a 15-minute constant in Watchdog::register_schedule(); the sniff cannot follow the first-class-callable reference to read it.
+		add_action( Watchdog::WATCHDOG_HOOK, $watchdog->run( ... ) );
 
 		// Record every completed extraction the moment it reaches ready — the
 		// sanctioned, non-evadable trigger, never at consume (ADR-0004/0006).

@@ -254,6 +254,35 @@ final class Dispatcher {
 	}
 
 	/**
+	 * Advances a stalled job one chunk in-process, or leaves a tended one untouched.
+	 *
+	 * This is the watchdog's entry point (ADR-0007): it acts only on a job the SAME
+	 * {@see needs_advance()} predicate judges untended — a queued job, or a running one
+	 * whose heartbeat has gone stale — so it never competes with a live driver mid-build.
+	 * Unlike {@see maybe_nudge()}, which kicks the loopback loop, this drives the chunk
+	 * itself through {@see tick()}. That in-process advance is exactly what lets a job
+	 * make progress on a host where the loopback is dead: the cron watchdog runs this in
+	 * its own PHP process, so no working loopback is required to move the job forward.
+	 * A tick still fires the continuation loopback for the next chunk, so on a healthy
+	 * host this only restarts the queue and hands it back to the loopback loop.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job the watchdog is patrolling.
+	 * @return Extraction_Job|null The job in the state it reached, or null when it was
+	 *                             tended and left untouched.
+	 */
+	public function advance_stalled( Extraction_Job $job ): ?Extraction_Job {
+
+		if ( ! $this->needs_advance( $job ) ) {
+			return null;
+		}
+
+		return $this->tick( $job );
+
+	}
+
+	/**
 	 * Fires a non-blocking loopback tick, carrying the job's secret.
 	 *
 	 * Best-effort by design: on a host with no working loopback this simply does
