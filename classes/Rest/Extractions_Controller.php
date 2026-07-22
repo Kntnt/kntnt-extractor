@@ -22,9 +22,14 @@ use WP_REST_Response;
 use WP_REST_Server;
 
 /**
- * Registers and answers `POST /extractions`, `GET /extractions/{id}`,
- * `POST /extractions/{id}/consume`, `DELETE /extractions/{id}`, and the internal
- * `POST /extractions/{id}/tick`.
+ * Registers and answers `POST /extractions`, `GET /extractions`,
+ * `GET /extractions/{id}`, `POST /extractions/{id}/consume`,
+ * `DELETE /extractions/{id}`, and the internal `POST /extractions/{id}/tick`.
+ *
+ * `GET /extractions` (no id) lists the caller's own non-terminal jobs behind the
+ * same both-capabilities gate, so a job stranded by a crashed run can be found and
+ * cancelled before it blocks the next create for the whole TTL window (ADR-0004);
+ * it never discloses another user's job or a download link.
  *
  * `POST /extractions` turns an already-resolved selection of tables and/or files,
  * plus the caller's ephemeral X25519 public key, into a queued Extraction job
@@ -90,15 +95,18 @@ final class Extractions_Controller {
 	) {}
 
 	/**
-	 * Registers both extraction routes. Hooked on `rest_api_init`.
+	 * Registers every extraction route. Hooked on `rest_api_init`.
 	 *
-	 * The create route's permission callback runs the whole existence-and-key
-	 * validation before the capability check, which is what lets a 404 or 400
-	 * precede the 403 (ADR-0003). The id-addressed routes capture a 32-hex id
-	 * straight from the path, so a malformed id never matches and never reaches the
-	 * store. Poll and cancel share one route path — a `GET` reads the job, a `DELETE`
-	 * cancels it — behind the same capability gate, with the per-job ownership binding
-	 * layered on inside each callback.
+	 * The collection `/extractions` path answers two methods: a `POST` creates a job,
+	 * and a `GET` lists the caller's own non-terminal jobs behind the shared
+	 * both-capabilities gate. The create route's permission callback runs the whole
+	 * existence-and-key validation before the capability check, which is what lets a
+	 * 404 or 400 precede the 403 (ADR-0003); the list route only needs the capability
+	 * gate itself. The id-addressed routes capture a 32-hex id straight from the path,
+	 * so a malformed id never matches and never reaches the store. Poll and cancel
+	 * share one route path — a `GET` reads the job, a `DELETE` cancels it — behind the
+	 * same capability gate, with the per-job ownership binding layered on inside each
+	 * callback.
 	 *
 	 * @since 0.1.0
 	 *
@@ -110,9 +118,16 @@ final class Extractions_Controller {
 			Status_Controller::REST_NAMESPACE,
 			'/extractions',
 			[
-				'methods' => WP_REST_Server::CREATABLE,
-				'callback' => $this->create( ... ),
-				'permission_callback' => $this->can_create( ... ),
+				[
+					'methods' => WP_REST_Server::CREATABLE,
+					'callback' => $this->create( ... ),
+					'permission_callback' => $this->can_create( ... ),
+				],
+				[
+					'methods' => WP_REST_Server::READABLE,
+					'callback' => $this->list_jobs( ... ),
+					'permission_callback' => $this->authorizer->authorize( ... ),
+				],
 			],
 		);
 
@@ -230,6 +245,62 @@ final class Extractions_Controller {
 			],
 			201,
 		);
+
+	}
+
+	/**
+	 * Lists the caller's own non-terminal jobs for stranded-slot recovery.
+	 *
+	 * The collection surface the cutover health check enumerates its live jobs
+	 * through, so a job stranded by a crashed earlier run — queued, running, or ready,
+	 * holding the single global concurrency slot until the TTL sweep reclaims it
+	 * (ADR-0004) — can be found and cancelled rather than blocking the next create for
+	 * up to the sweep window. The route's permission callback has already run the
+	 * both-capabilities gate (ADR-0002), so this only applies the owner scoping and the
+	 * non-terminal filter: {@see Job_Store::all()} is narrowed to the caller's own jobs
+	 * whose state is not terminal, so a caller never sees another user's job and a
+	 * finished one is omitted — terminal jobs are the audit log's concern (ADR-0006),
+	 * not this slot-management listing's.
+	 *
+	 * Each entry carries the same id, state, and timestamps a create and poll report,
+	 * plus `progress` on exactly the jobs that have advanced — running or ready, in the
+	 * poll's four-counter shape and missing-key optionality. It never carries a
+	 * `download_url`: fetching an artifact stays the per-job {@see poll()} contract's
+	 * job, so this listing discloses no delivery path. The caller with no live jobs
+	 * gets an empty array.
+	 *
+	 * @since 0.1.1
+	 *
+	 * @return WP_REST_Response A 200 with `{ jobs: [ { id, state, created_at, updated_at, progress? } ] }`.
+	 */
+	public function list_jobs(): WP_REST_Response {
+
+		// Scope the enumeration to the caller's own live jobs: skip another user's job
+		// and any job that has reached a terminal state.
+		$owner = get_current_user_id();
+		$jobs = [];
+		foreach ( $this->store->all() as $job ) {
+			if ( $job->owner !== $owner || $job->state->is_terminal() ) {
+				continue;
+			}
+
+			// Report the fields every listed job carries, then append progress only where
+			// the job has advanced — the same optionality and four-counter shape the poll
+			// uses, and never a download_url.
+			$entry = [
+				'id' => $job->id,
+				'state' => $job->state->value,
+				'created_at' => $job->created_at,
+				'updated_at' => $job->updated_at,
+			];
+			$progress = $this->progress_of( $job );
+			if ( $progress !== null ) {
+				$entry['progress'] = $progress;
+			}
+			$jobs[] = $entry;
+		}
+
+		return new WP_REST_Response( [ 'jobs' => $jobs ] );
 
 	}
 
