@@ -11,11 +11,14 @@
  * only when work remains.
  *
  * It pins issue #18's acceptance criteria:
- *  - AC1: with `tick_budget` 0 a tick packages exactly one chunk — today's
- *    behaviour, which the suite-wide bootstrap pin relies on.
+ *  - AC1: with `tick_budget` 0 a tick packages exactly one chunk — asserted
+ *    directly against the persisted progress cursor (each budget-0 tick seals
+ *    exactly one further segment), the granularity the suite-wide bootstrap pin
+ *    relies on.
  *  - AC2: with a generous budget one tick invocation carries a multi-chunk job
  *    all the way to `ready`.
- *  - AC3: a tick that leaves work fires exactly one continuation nudge; a tick
+ *  - AC3: a tick that leaves work fires exactly one continuation nudge, and only
+ *    after the per-job lock is released (the nudge finds the lock free); a tick
  *    that finishes the job fires none.
  *
  * The cURL delivery hardening in `nudge()` (CULOPT_CONNECTTIMEOUT_MS / NOSIGNAL,
@@ -29,7 +32,9 @@
 
 declare( strict_types = 1 );
 
+use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Dispatcher;
+use Kntnt\Extractor\Job_Store;
 
 global $wpdb;
 
@@ -106,10 +111,25 @@ $force_chunk = static fn(): int => 1024;
 add_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );
 
 // Short-circuit every loopback so a nudge never touches the network, and capture
-// each one for the AC3 placement assertions.
+// each one for the AC3 placement assertions. When the lock probe is armed (only
+// in the budget-0 stepping section below), the interceptor also tries to take the
+// probed job's per-job lock the moment its nudge fires and records whether it was
+// free — the observable proof that tick() released the lock BEFORE nudging (AC3),
+// since a nudge fired under the still-held lock would find it unacquirable.
 $captured = [];
-$intercept = static function ( $pre, $args, $url ) use ( &$captured ) {
+$lock_probe_store = null;
+$lock_probe_id = '';
+$lock_free_at_nudge = [];
+$intercept = static function ( $pre, $args, $url ) use ( &$captured, &$lock_probe_store, &$lock_probe_id, &$lock_free_at_nudge ) {
 	$captured[] = [ 'url' => (string) $url, 'headers' => is_array( $args['headers'] ?? null ) ? $args['headers'] : [] ];
+	if ( $lock_probe_store !== null && $lock_probe_id !== '' && str_contains( (string) $url, '/extractions/' . $lock_probe_id . '/tick' ) ) {
+		$probed = $lock_probe_store->find( $lock_probe_id );
+		$handle = $probed !== null ? $lock_probe_store->lock( $probed ) : null;
+		$lock_free_at_nudge[] = $handle !== null;
+		if ( $handle !== null ) {
+			$lock_probe_store->unlock( $handle );
+		}
+	}
 	return [ 'headers' => [], 'body' => '', 'response' => [ 'code' => 202, 'message' => 'Accepted' ], 'cookies' => [], 'filename' => null ];
 };
 add_filter( 'pre_http_request', $intercept, 10, 3 );
@@ -118,6 +138,15 @@ add_filter( 'pre_http_request', $intercept, 10, 3 );
 $secret_of = static function ( string $id ) use ( $work ): string {
 	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
 	return is_array( $state ) ? (string) ( $state['tick_secret'] ?? '' ) : '';
+};
+
+// Reads the number of sealed segments from a job's persisted progress cursor.
+// Artifact_Builder seals exactly one segment per bounded chunk, so this count is a
+// direct, seam-free measure of how many chunks a tick has packaged.
+$segments_of = static function ( string $id ) use ( $work ): int {
+	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+	$names = is_array( $state ) ? ( $state['progress']['segment_names'] ?? null ) : null;
+	return is_array( $names ) ? count( $names ) : 0;
 };
 
 // Counts captured nudges to a given job's own tick endpoint.
@@ -171,25 +200,53 @@ $step_created = $post_extractions( $selection )->get_data();
 $step_id = is_array( $step_created ) ? (string) ( $step_created['id'] ?? '' ) : '';
 $step_secret = $secret_of( $step_id );
 
-// The first budget-0 tick advances a single chunk, leaving the job running with
-// work remaining, and fires exactly one continuation nudge (AC1 stepping, AC3).
+// Arm the lock probe on this stepping job, so every nudge it fires is checked to
+// have fired only after tick() released the per-job lock (AC3). The store reads the
+// same filtered work directory the driver writes, so it locks the very file a tick
+// holds.
+$lock_probe_store = new Job_Store( new Config() );
+$lock_probe_id = $step_id;
+$lock_free_at_nudge = [];
+
+// The first budget-0 tick advances a single chunk — sealing exactly one segment and
+// leaving the job running with work remaining — and fires exactly one continuation
+// nudge (AC1 exact-chunk, AC3). The cursor starts empty on a queued job.
+$before = $segments_of( $step_id );
 $captured = [];
 $tick( $step_id, $step_secret );
+kntnt_extractor_assert( $before === 0, 'A queued job carries no sealed segments before its first tick (AC1)' );
 kntnt_extractor_assert( $get_state( $step_id ) === 'running', 'With budget 0 a single tick advances one chunk and leaves the job running (AC1)' );
+kntnt_extractor_assert( $segments_of( $step_id ) - $before === 1, 'With budget 0 the first tick seals exactly one segment — exactly one chunk, not many (AC1)' );
 kntnt_extractor_assert( $nudges_to( $captured, $step_id ) === 1, 'A budget-0 tick that leaves work fires exactly one continuation nudge (AC3)' );
 
 // Step the job the rest of the way one chunk per tick; the tick that finally
-// reaches ready fires no nudge, every earlier one exactly one.
+// reaches ready fires no nudge, every earlier one exactly one. Each tick that
+// leaves the job running must seal exactly one further segment — the strict
+// per-tick granularity the suite-wide budget-0 pin depends on (AC1).
 $last_nudges = null;
+$every_step_one_chunk = true;
 $steps = 0;
 while ( $steps < 500 && $get_state( $step_id ) !== 'ready' ) {
+	$before = $segments_of( $step_id );
 	$captured = [];
 	$tick( $step_id, $step_secret );
 	$last_nudges = $nudges_to( $captured, $step_id );
+	if ( $get_state( $step_id ) === 'running' && $segments_of( $step_id ) - $before !== 1 ) {
+		$every_step_one_chunk = false;
+	}
 	++$steps;
 }
 kntnt_extractor_assert( $get_state( $step_id ) === 'ready', 'Budget-0 stepping still drives the job to ready across many ticks (AC1)' );
+kntnt_extractor_assert( $every_step_one_chunk, 'Every budget-0 tick that leaves work seals exactly one further segment — one chunk per tick (AC1)' );
 kntnt_extractor_assert( $last_nudges === 0, 'The budget-0 tick that finishes the job fires no continuation nudge (AC3)' );
+
+// Every nudge the stepping job fired found its per-job lock free — proof the nudge
+// is placed after the lock is released, not inside the tick's guarded section (AC3).
+kntnt_extractor_assert( $lock_free_at_nudge !== [] && ! in_array( false, $lock_free_at_nudge, true ), 'Each budget-0 continuation nudge fires only after tick() released the per-job lock (AC3)' );
+
+// Disarm the probe so no later interception attempts a lock on a purged job.
+$lock_probe_store = null;
+$lock_probe_id = '';
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

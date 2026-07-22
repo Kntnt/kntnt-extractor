@@ -76,7 +76,7 @@ final class Watchdog {
 	 * @since 0.1.0
 	 *
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
-	 * @param Dispatcher $dispatcher Drives a stalled job one chunk forward.
+	 * @param Dispatcher $dispatcher Drives a stalled job a budget of chunks forward (ADR-0010).
 	 */
 	public function __construct(
 		private readonly Job_Store $store,
@@ -86,9 +86,10 @@ final class Watchdog {
 	/**
 	 * Restarts every stalled job, returning the jobs it advanced.
 	 *
-	 * Walks the live job set and hands each untended, unfinished job one chunk of
-	 * progress through {@see Dispatcher::advance_stalled()}, which restarts only a
-	 * queued or stale-running job and leaves a freshly-ticked one to its live driver.
+	 * Walks the live job set and hands each untended, unfinished job a budget of chunks
+	 * of progress (per `tick_budget`, zero meaning one chunk) through
+	 * {@see Dispatcher::advance_stalled()}, which restarts only a queued or stale-running
+	 * job and leaves a freshly-ticked one to its live driver (ADR-0010).
 	 * Returns the jobs it drove, each in the state it reached, so a caller — the cron
 	 * event, or a test — can see exactly which queues were restarted.
 	 *

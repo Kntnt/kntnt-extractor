@@ -261,17 +261,19 @@ final class Dispatcher {
 	}
 
 	/**
-	 * Advances a stalled job one chunk in-process, or leaves a tended one untouched.
+	 * Advances a stalled job a budget of chunks in-process, or leaves a tended one alone.
 	 *
 	 * This is the watchdog's entry point (ADR-0007): it acts only on a job the SAME
 	 * {@see needs_advance()} predicate judges untended — a queued job, or a running one
 	 * whose heartbeat has gone stale — so it never competes with a live driver mid-build.
-	 * Unlike {@see maybe_nudge()}, which kicks the loopback loop, this drives the chunk
-	 * itself through {@see tick()}. That in-process advance is exactly what lets a job
-	 * make progress on a host where the loopback is dead: the cron watchdog runs this in
-	 * its own PHP process, so no working loopback is required to move the job forward.
-	 * A tick still fires the continuation loopback for the next chunk, so on a healthy
-	 * host this only restarts the queue and hands it back to the loopback loop.
+	 * Unlike {@see maybe_nudge()}, which kicks the loopback loop, this drives the chunks
+	 * itself through the now time-budgeted {@see tick()}: one call packages a whole
+	 * `tick_budget` of chunks (zero means exactly one) rather than a single one (ADR-0010).
+	 * That in-process advance is exactly what lets a job make progress on a host where the
+	 * loopback is dead: the cron watchdog runs this in its own PHP process, so no working
+	 * loopback is required to move the job forward. While work still remains the tick fires
+	 * one continuation loopback for the next budget, so on a healthy host this restarts the
+	 * queue and hands it back to the loopback loop.
 	 *
 	 * @since 0.1.0
 	 *
