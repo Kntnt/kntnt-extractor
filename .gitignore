@@ -19,5 +19,8 @@
 # Composer dependencies
 /vendor/
 
+# Build output; the release archive is a GitHub release asset, not a repo file.
+/dist/
+
 # PHPStan local override; phpstan.neon.dist is the committed config.
 /phpstan.neon
