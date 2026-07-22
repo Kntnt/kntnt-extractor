@@ -23,6 +23,10 @@ The enumeration of tables that exist in the site's database, the file-side manif
 The background job, created from an explicit, already-resolved list of table names and/or file paths, that packages and encrypts the requested selection. Runs detached and polled rather than inline in the request, so it is not bound by a single HTTP request's timeout.
 _Avoid_: export, backup, dump
 
+**Job state**:
+The stage an extraction job is in, reported verbatim to a polling caller. Seven states span the lifecycle: `queued` and `running` while the job is live and holds the single concurrency slot; `ready` once the sealed artifact awaits its download link; and four terminal states that release the slot — `consumed` (the caller confirmed the download and the artifact was deleted), `cancelled` (the caller aborted the job with a `DELETE` before it was consumed), `failed` (the run could not produce an artifact), and `expired` (the time-to-live sweep reclaimed a job never consumed). `cancelled` and `consumed` are distinct terminal ends: consume confirms a delivered artifact and is audited, whereas cancel discards the job at the caller's request and writes no audit record.
+_Avoid_: status
+
 **Download link**:
 The short-lived, single-use link an extraction job's artifact is fetched through once ready. Consumed (deleted server-side) after a verified download, rather than waiting on an expiry timer.
 
