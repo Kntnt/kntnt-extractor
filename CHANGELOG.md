@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] – 2026-07-22
+
 ### Added
 
 - Structure-only table extraction (#16): `POST /extractions` accepts a `tables_structure_only` sibling list alongside `tables`, dumping those tables' `DROP`/`CREATE TABLE` DDL into the sealed artifact without any rows, so an artifact can carry every selected table's structure while carrying only some tables' data. A table may appear in `tables` or `tables_structure_only` but not both (422); an unknown structure-only table is a 404 decided before the capability gate; structure-only tables count toward the poll's table progress totals and are recorded in the sealed index and audit log like any other table.
@@ -41,6 +43,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.0
