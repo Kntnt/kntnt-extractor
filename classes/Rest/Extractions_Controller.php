@@ -245,8 +245,10 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming poll request, carrying the id.
-	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state }`, a 404 for an
-	 *                                   unknown job, or a 403 for a non-owner.
+	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state, download_url }` plus
+	 *                                   `progress` while running or ready and `error`
+	 *                                   once failed; a 404 for an unknown job, or a 403
+	 *                                   for a non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -262,13 +264,94 @@ final class Extractions_Controller {
 		// fetched through; a job not yet ready reports it as null.
 		$this->dispatcher->maybe_nudge( $job );
 
-		return new WP_REST_Response(
-			[
-				'id' => $job->id,
-				'state' => $job->state->value,
-				'download_url' => $this->store->download_url( $job ),
+		// Report the state-scoped optional fields of the v1 poll contract: progress while
+		// the build is advancing (and complete once ready), and a reason once it failed.
+		// Both are omitted where the contract marks them absent, so `progress?`/`error?`
+		// optionality is a missing key, never a null.
+		$response = [
+			'id' => $job->id,
+			'state' => $job->state->value,
+			'download_url' => $this->store->download_url( $job ),
+		];
+		$progress = $this->progress_of( $job );
+		if ( $progress !== null ) {
+			$response['progress'] = $progress;
+		}
+		$error = $this->error_of( $job );
+		if ( $error !== null ) {
+			$response['error'] = $error;
+		}
+
+		return new WP_REST_Response( $response );
+
+	}
+
+	/**
+	 * Summarises a job's build advancement as the poll contract's `progress?`, or null.
+	 *
+	 * Reported while running and, reading as complete, once ready — omitted for every
+	 * other state, matching the field's optionality (a queued job has started nothing).
+	 * The shape is deliberately a stable, caller-facing summary derived from the job:
+	 * how many of the selected tables and files are done out of their totals. It never
+	 * surfaces the internal {@see Build_Progress} mechanics — segment names, byte
+	 * offsets, the sealed-index detail — which are resume bookkeeping coupled to the
+	 * on-disk container format (ADR-0007/0009), not a caller concern (AC5). No derived
+	 * percentage is offered: a file's total byte size is not known up front, so a
+	 * percentage would mislead, whereas discrete counters are honest advancement.
+	 *
+	 * A running job that has not yet sealed its first segment carries no persisted
+	 * progress, which reads as nothing-done-yet (zero counters) rather than a missing
+	 * field, so a poll during the very first chunk still reports the totals.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The polled job.
+	 * @return array{tables_done: int, tables_total: int, files_done: int, files_total: int}|null
+	 */
+	private function progress_of( Extraction_Job $job ): ?array {
+
+		$tables_total = count( $job->tables );
+		$files_total = count( $job->files );
+
+		// A ready job is complete by definition, so report every table and file done
+		// rather than the penultimate chunk's persisted progress. A running job reports
+		// the sealed counts its persisted progress carries, or zero before the first chunk.
+		return match ( $job->state ) {
+			Job_State::Ready => [
+				'tables_done' => $tables_total,
+				'tables_total' => $tables_total,
+				'files_done' => $files_total,
+				'files_total' => $files_total,
 			],
-		);
+			Job_State::Running => [
+				'tables_done' => $job->progress->tables_done ?? 0,
+				'tables_total' => $tables_total,
+				'files_done' => $job->progress->file_index ?? 0,
+				'files_total' => $files_total,
+			],
+			default => null,
+		};
+
+	}
+
+	/**
+	 * Reports the poll contract's `error?` for a failed job, or null for any other state.
+	 *
+	 * A failed job carries a generic, translatable message and nothing more: the tick's
+	 * failure catch is deliberately opaque (ADR-0007) so a build failure never surfaces
+	 * filesystem paths, SQL, or other internals to a caller, and the raw failure reason
+	 * is never captured for exactly that reason. Every non-failed state omits the field.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The polled job.
+	 * @return array{message: string}|null The failure message, or null when the job has not failed.
+	 */
+	private function error_of( Extraction_Job $job ): ?array {
+
+		return $job->state === Job_State::Failed
+			? [ 'message' => __( 'The extraction failed.', 'kntnt-extractor' ) ]
+			: null;
 
 	}
 
