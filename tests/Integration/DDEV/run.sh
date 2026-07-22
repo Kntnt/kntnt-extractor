@@ -74,12 +74,20 @@ ddev wp plugin activate kntnt-extractor >/dev/null
 ddev wp post generate --count=25 >/dev/null
 ddev wp db query "ANALYZE TABLE wp_options, wp_posts, wp_users;" >/dev/null
 
-# Run the assertions through a booted WordPress and propagate their pass/fail.
-cp "${script_dir}/tables-size-test.php" "${project_dir}/tables-size-test.php"
-set +e
-ddev wp eval-file tables-size-test.php
-status=$?
-set -e
+# Run every MySQL-backed check through a booted WordPress and propagate their
+# pass/fail: each *-test.php in this directory is copied in and run through
+# `wp eval-file`, and the first non-zero exit fails the whole run.
+status=0
+for test_file in "${script_dir}"/*-test.php; do
+	cp "${test_file}" "${project_dir}/$( basename "${test_file}" )"
+	set +e
+	ddev wp eval-file "$( basename "${test_file}" )"
+	rc=$?
+	set -e
+	if [[ "${rc}" -ne 0 ]]; then
+		status="${rc}"
+	fi
+done
 
 # Report the outcome and propagate it to the caller.
 if [[ "${status}" -eq 0 ]]; then

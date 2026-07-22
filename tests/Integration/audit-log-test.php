@@ -155,7 +155,7 @@ kntnt_extractor_assert( is_string( $ts ) && preg_match( '/^\d{4}-\d{2}-\d{2}T\d{
 kntnt_extractor_assert( is_string( $ts ) && strtotime( (string) $ts ) >= $before, 'The ts is a recent instant (AC1)' );
 kntnt_extractor_assert( ( $entry['user_id'] ?? null ) === $owner->ID, 'The entry records the owning user_id (AC1)' );
 kntnt_extractor_assert( ( $entry['user_login'] ?? null ) === $owner->user_login, 'The entry records the user_login (AC1)' );
-kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 1, 'The entry records the api_version (AC1)' );
+kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 2, 'The entry records the api_version (AC1)' );
 kntnt_extractor_assert( ( $entry['job_id'] ?? null ) === $job_id, 'The entry records the job_id (AC1)' );
 kntnt_extractor_assert( ( $entry['tables'] ?? null ) === [ $wpdb->options, $wpdb->users ], 'The entry records the full tables list (AC1)' );
 
