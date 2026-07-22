@@ -277,6 +277,25 @@ $driven = $watchdog->patrol();
 $driven_ids = array_map( static fn( Extraction_Job $j ): string => $j->id, $driven );
 kntnt_extractor_assert( ! in_array( $fresh_id, $driven_ids, true ), 'The watchdog leaves a freshly-ticked running job to its live driver (AC2)' );
 
+// --- #18/AC2: a generous budget lets one patrol complete a stalled multi-chunk job ---
+
+// A tiny chunk size makes the selection span many chunks; a generous local tick
+// budget then lets the single in-process advance the patrol drives package the
+// whole job to ready in one cron cycle instead of one chunk per cycle. The
+// suite-wide budget-0 pin is overridden locally at a higher priority and restored.
+$force_chunk = static fn(): int => 16;
+add_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );
+$force_budget = static fn(): int => 30;
+add_filter( 'kntnt_extractor_config_tick_budget', $force_budget, 20 );
+$budget_created = $post_extractions( $selection )->get_data();
+$budget_id = is_array( $budget_created ) ? (string) ( $budget_created['id'] ?? '' ) : '';
+$store->save( $store->find( $budget_id )->with_state( Job_State::Running ) );
+$stall( $store->find( $budget_id ) );
+$watchdog->patrol();
+kntnt_extractor_assert( ( $store->find( $budget_id )->state ?? null ) === Job_State::Ready, 'A single watchdog patrol carries a stalled multi-chunk job to ready under a generous budget (#18/AC2)' );
+remove_filter( 'kntnt_extractor_config_tick_budget', $force_budget, 20 );
+remove_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );
+
 // --- AC4: on a dead-loopback host, progress comes purely from the watchdog ---
 
 $loopback_mode = 'fail';

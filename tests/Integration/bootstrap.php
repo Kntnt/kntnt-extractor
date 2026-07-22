@@ -33,6 +33,12 @@ wp_set_current_user( 0 );
 // dispatches a request.
 activate_plugin( 'kntnt-extractor/kntnt-extractor.php' );
 
+// Pin every tick to exactly one chunk for the whole suite, so each existing
+// chunk-by-chunk assertion keeps meaning what it says (a tick advances the job
+// one bounded segment). Budget-specific tests override this locally with a
+// higher-priority filter and restore the pin afterwards.
+add_filter( 'kntnt_extractor_config_tick_budget', static fn (): int => 0 );
+
 // Shared TAP state. The report path is the mounted host directory when present,
 // so a passing run leaves visible evidence on the host even though Playground
 // swallows a successful step's stdout.
