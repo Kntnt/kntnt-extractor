@@ -109,17 +109,24 @@ final class Dispatcher {
 
 		// Serialise ticks on this job; a racer that cannot take the lock no-ops rather
 		// than racing the shared container.
-		$lock = $this->lock( $job );
+		$lock = $this->store->lock( $job );
 		if ( $lock === null ) {
 			return $job;
 		}
 
 		try {
 
-			// Re-read under the lock and re-check the guard against the committed state, so
-			// a tick that lost the race to finish this job cannot rebuild it or clobber the
-			// state the winner already saved.
-			$current = $this->store->find( $job->id ) ?? $job;
+			// Re-read under the lock so the decision runs on the committed state, not the
+			// snapshot the caller was handed. A job that no longer reads back — purged by
+			// the TTL sweep, or left half-written by a crashed tick — is gone: no-op on the
+			// caller's stale snapshot rather than rebuilding a record that no longer exists.
+			$current = $this->store->find( $job->id );
+			if ( $current === null ) {
+				return $job;
+			}
+
+			// Re-check the guard against that committed state, so a tick that lost the race
+			// to finish this job cannot rebuild it or clobber the state the winner saved.
 			if ( $current->state !== Job_State::Queued && $current->state !== Job_State::Running ) {
 				return $current;
 			}
@@ -127,7 +134,7 @@ final class Dispatcher {
 			return $this->advance_one_chunk( $current );
 
 		} finally {
-			$this->unlock( $lock );
+			$this->store->unlock( $lock );
 		}
 
 	}
@@ -184,51 +191,6 @@ final class Dispatcher {
 		$this->nudge( $advanced );
 
 		return $advanced;
-
-	}
-
-	/**
-	 * Takes the per-job tick lock, returning the held handle or null under contention.
-	 *
-	 * An exclusive non-blocking advisory lock on the job's lock file
-	 * ({@see Job_Store::container_lock_path()}) is what serialises overlapping ticks.
-	 * A null return means another tick holds it (or the lock file cannot be opened), and
-	 * the caller no-ops — the live tick, or the cron watchdog, carries the job forward.
-	 *
-	 * @since 0.1.0
-	 *
-	 * @param Extraction_Job $job The job to lock.
-	 * @return resource|null The held lock handle to pass to {@see unlock()}, or null under contention.
-	 */
-	private function lock( Extraction_Job $job ) {
-
-		// Open the job's lock file, creating it if absent, and try to take it without
-		// blocking; hand the still-open handle back so the lock is held until unlock().
-		$handle = fopen( $this->store->container_lock_path( $job ), 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- opening the plugin's own per-job advisory lock file, not a filesystem write.
-		if ( $handle === false ) {
-			return null;
-		}
-		if ( ! flock( $handle, LOCK_EX | LOCK_NB ) ) {
-			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the lock handle when the lock is already held elsewhere.
-			return null;
-		}
-
-		return $handle;
-
-	}
-
-	/**
-	 * Releases the per-job tick lock held on the given handle.
-	 *
-	 * @since 0.1.0
-	 *
-	 * @param resource $handle The lock handle returned by {@see lock()}.
-	 * @return void
-	 */
-	private function unlock( $handle ): void {
-
-		flock( $handle, LOCK_UN );
-		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the per-job advisory lock handle after the tick.
 
 	}
 

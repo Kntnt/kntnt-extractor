@@ -384,6 +384,62 @@ final class Job_Store {
 	}
 
 	/**
+	 * Takes the job's exclusive tick lock, returning the held handle or null.
+	 *
+	 * The single owner of the per-job advisory lock ({@see container_lock_path()}),
+	 * so every actor that must not touch a job another is actively building through
+	 * takes it the same way: the tick driver serialising overlapping ticks, and the
+	 * TTL sweep refusing to purge a job a live tick holds. A null return means the
+	 * lock could not be taken — another actor holds it, or the lock file cannot even
+	 * be opened — and the caller treats that uniformly as "someone else owns this
+	 * right now, leave it alone" and no-ops. The non-blocking attempt never waits.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param Extraction_Job $job The job to lock.
+	 * @return resource|null The held lock handle to pass to {@see unlock()}, or null when it could not be taken.
+	 */
+	public function lock( Extraction_Job $job ) {
+
+		// Open the job's lock file, creating it if absent, and try to take it without
+		// blocking; hand the still-open handle back so the lock is held until unlock().
+		// A path that cannot be opened at all is treated as "not acquirable", so the
+		// caller no-ops rather than acting on a job whose lock state is unknown.
+		$handle = fopen( $this->container_lock_path( $job ), 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- opening the plugin's own per-job advisory lock file, not a filesystem write.
+		if ( $handle === false ) {
+			return null;
+		}
+		if ( ! flock( $handle, LOCK_EX | LOCK_NB ) ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the lock handle when the lock is already held elsewhere.
+			return null;
+		}
+
+		return $handle;
+
+	}
+
+	/**
+	 * Releases the tick lock held on the given handle by closing it.
+	 *
+	 * Closing the descriptor is what releases the advisory lock — an explicit
+	 * `flock( …, LOCK_UN )` first is redundant, and is deliberately avoided: the TTL
+	 * sweep takes this lock on a job it is about to purge, so by the time it releases,
+	 * the underlying lock file has already been deleted, and `LOCK_UN` on a handle to a
+	 * removed file aborts under the WASM runtime the integration suite runs on. A plain
+	 * close releases the lock on every platform and survives the deleted-file case.
+	 *
+	 * @since 0.1.0
+	 *
+	 * @param resource $handle The lock handle returned by {@see lock()}.
+	 * @return void
+	 */
+	public function unlock( $handle ): void {
+
+		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the per-job advisory lock handle, which releases the lock.
+
+	}
+
+	/**
 	 * Returns the URL a ready job's artifact is downloaded from, or null.
 	 *
 	 * The artifact is a static file the web server serves directly (ADR-0004): safe

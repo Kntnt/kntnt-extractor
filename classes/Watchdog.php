@@ -10,6 +10,8 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Throwable;
+
 /**
  * Restarts every stalled job the self-dispatching loopback loop has stopped driving.
  *
@@ -89,6 +91,13 @@ final class Watchdog {
 	 * Returns the jobs it drove, each in the state it reached, so a caller — the cron
 	 * event, or a test — can see exactly which queues were restarted.
 	 *
+	 * Each job is advanced under its own guard: a tick that throws — a save that hits a
+	 * full disk or an unwritable directory, a corrupt record — is confined to that one
+	 * job, so a single poisoned queue can never abort the patrol and starve every other
+	 * stalled job behind it in the walk. The failing job is simply left for the next
+	 * cycle (or the TTL sweep's absolute ceiling) rather than allowed to take the whole
+	 * backstop down with it.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @return array<int, Extraction_Job> The jobs this patrol advanced.
@@ -96,10 +105,15 @@ final class Watchdog {
 	public function patrol(): array {
 
 		// Restart each stalled queue, collecting only the jobs actually advanced; a
-		// tended job returns null from the driver and is skipped.
+		// tended job returns null from the driver and is skipped. A job whose tick throws
+		// is isolated so it never aborts the patrol for the jobs behind it.
 		$driven = [];
 		foreach ( $this->store->all() as $job ) {
-			$advanced = $this->dispatcher->advance_stalled( $job );
+			try {
+				$advanced = $this->dispatcher->advance_stalled( $job );
+			} catch ( Throwable ) {
+				continue;
+			}
 			if ( $advanced !== null ) {
 				$driven[] = $advanced;
 			}

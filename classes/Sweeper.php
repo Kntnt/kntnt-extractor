@@ -31,10 +31,22 @@ namespace Kntnt\Extractor;
  * kill the tick's `catch` can never intercept — would keep a fresh heartbeat forever
  * and never fall past this heartbeat window, leaving its partial dump on disk and
  * re-running its failing chunk without bound. So the sweep applies a SECOND,
- * absolute ceiling measured from the job's creation, independent of any heartbeat
- * refresh: an unfinished job that has outlived that ceiling is reclaimed regardless
- * of how recently the watchdog touched it, which is what bounds the retry loop and
- * purges the partial container the watchdog would otherwise retain indefinitely.
+ * absolute ceiling. It is measured from the job's LAST PROGRESS — the timestamp the
+ * build stamps only when a chunk actually advances ({@see Extraction_Job::with_progress()}),
+ * falling back to the creation time for a job that has never progressed — not from raw
+ * age, and it is immune to the heartbeat the watchdog refreshes on every restart. That
+ * distinction is what lets it tell apart the two jobs a heartbeat cannot: a legitimately
+ * large extraction advancing one chunk per cron cycle keeps its last-progress stamp
+ * fresh and is spared however long it has existed, while a job whose chunk fails
+ * uncatchably every attempt never advances, so its stamp freezes and the ceiling
+ * reclaims it — bounding the retry loop and purging the partial container without ever
+ * reaping a slow-but-progressing build.
+ *
+ * A live tick building a job through is the one actor that must never have its container
+ * swept out from under it. The sweep therefore takes the same per-job tick lock a tick
+ * holds ({@see Job_Store::lock()}) before purging, and defers a job whose lock it cannot
+ * take to a later cycle — so the lock-free queue (ADR-0007) and the sweep never race the
+ * same in-progress container.
  *
  * Both thresholds are Config knobs (ADR-0004): the TTL heartbeat window through the
  * constant `KNTNT_EXTRACTOR_TTL` or the `kntnt_extractor_config_ttl` filter, and the
@@ -74,9 +86,10 @@ final class Sweeper {
 	 *
 	 * The default absolute lifetime ({@see max_lifetime()}) is this multiple of the
 	 * resolved TTL, so it always sits safely above the heartbeat window and scales with
-	 * a site that tunes the TTL. Six TTLs is a wide margin for a legitimate large
-	 * extraction that advances one chunk per cron cycle, yet still bounds a job the
-	 * watchdog keeps restarting forever.
+	 * a site that tunes the TTL. Because the ceiling is measured from the last progress,
+	 * not raw age, six TTLs is the window a build may go without advancing a single chunk
+	 * before it counts as wedged — ample for a legitimate large extraction (which resets
+	 * it on every chunk), yet still bounding a job whose chunk fails uncatchably forever.
 	 *
 	 * @since 0.1.0
 	 */
@@ -101,10 +114,12 @@ final class Sweeper {
 	 * Returns the jobs it expired, each already moved into the expired state, so the
 	 * caller — the cron event, or a test — can see exactly what was reclaimed. A
 	 * non-terminal job is reclaimed when its heartbeat has been silent longer than the
-	 * TTL, OR when it has outlived the absolute lifetime ceiling measured from creation;
-	 * the second test is what catches a job the watchdog keeps restarting with a forever-
-	 * fresh heartbeat. A job within both windows, and every already-terminal job, is
-	 * left untouched.
+	 * TTL, OR when its build has not advanced a chunk within the absolute lifetime
+	 * ceiling; the second test catches a job whose chunk fails uncatchably every attempt
+	 * while sparing one that is still progressing, however old. A job a live tick holds
+	 * the lock on is deferred rather than purged, so an in-flight build is never deleted
+	 * out from under itself. A job within both windows, and every already-terminal job,
+	 * is left untouched.
 	 *
 	 * @since 0.1.0
 	 *
@@ -113,9 +128,11 @@ final class Sweeper {
 	public function sweep(): array {
 
 		// Reclaim every non-terminal job that has either gone silent longer than the TTL
-		// or outlived the absolute lifetime ceiling from creation: delete its artifact and
-		// working directory, and record it as expired. The ceiling ignores heartbeat
-		// refreshes, so an unfinished job the watchdog restarts forever is still bounded.
+		// or not progressed a chunk within the absolute ceiling: delete its artifact and
+		// working directory, and record it as expired. The ceiling is measured from the
+		// last progress (falling back to creation for a job that never progressed) and
+		// ignores heartbeat refreshes, so a job the watchdog restarts forever without it
+		// ever advancing is bounded, while a slow-but-advancing large build is spared.
 		$ttl = $this->ttl();
 		$max_lifetime = $this->max_lifetime( $ttl );
 		$now = time();
@@ -125,10 +142,24 @@ final class Sweeper {
 				continue;
 			}
 			$silent = ( $now - $job->updated_at ) > $ttl;
-			$outlived = ( $now - $job->created_at ) > $max_lifetime;
-			if ( $silent || $outlived ) {
+			$outlived = ( $now - ( $job->progressed_at ?? $job->created_at ) ) > $max_lifetime;
+			if ( ! ( $silent || $outlived ) ) {
+				continue;
+			}
+
+			// Honour the tick lock: a job a live tick is building through must not have
+			// its container deleted underneath it. Take the same per-job lock a tick holds
+			// and defer any job whose lock is already held — a later sweep reclaims it once
+			// the tick has released it, so the deferral is never permanent.
+			$lock = $this->store->lock( $job );
+			if ( $lock === null ) {
+				continue;
+			}
+			try {
 				$this->store->purge( $job );
 				$expired[] = $job->with_state( Job_State::Expired );
+			} finally {
+				$this->store->unlock( $lock );
 			}
 		}
 
