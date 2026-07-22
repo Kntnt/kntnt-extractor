@@ -264,15 +264,18 @@ final class Extractions_Controller {
 		// fetched through; a job not yet ready reports it as null.
 		$this->dispatcher->maybe_nudge( $job );
 
-		// Report the state-scoped optional fields of the v1 poll contract: progress while
-		// the build is advancing (and complete once ready), and a reason once it failed.
-		// Both are omitted where the contract marks them absent, so `progress?`/`error?`
-		// optionality is a missing key, never a null.
+		// Start from the fields every poll carries: the id, the current state, and the
+		// download link — null until the sealed artifact is published at ready.
 		$response = [
 			'id' => $job->id,
 			'state' => $job->state->value,
 			'download_url' => $this->store->download_url( $job ),
 		];
+
+		// Append the state-scoped optional fields of the v1 poll contract: progress while
+		// the build is advancing (and complete once ready), and a reason once it failed.
+		// Both use missing-key optionality — a field the contract marks absent is omitted,
+		// never sent as null — so `progress?`/`error?` read exactly as the spec defines.
 		$progress = $this->progress_of( $job );
 		if ( $progress !== null ) {
 			$response['progress'] = $progress;
@@ -324,9 +327,9 @@ final class Extractions_Controller {
 				'files_total' => $files_total,
 			],
 			Job_State::Running => [
-				'tables_done' => $job->progress->tables_done ?? 0,
+				'tables_done' => $job->progress?->tables_done ?? 0,
 				'tables_total' => $tables_total,
-				'files_done' => $job->progress->file_index ?? 0,
+				'files_done' => $job->progress?->file_index ?? 0,
 				'files_total' => $files_total,
 			],
 			default => null,

@@ -74,7 +74,7 @@ $get_extraction = static function ( string $id ): array {
 
 // Dispatches POST /extractions/{id}/tick carrying the per-job secret; each call
 // advances the build exactly one bounded chunk.
-$tick = static function ( string $id, string $secret ) use ( &$captured ): WP_REST_Response {
+$tick = static function ( string $id, string $secret ): WP_REST_Response {
 	$request = new WP_REST_Request( 'POST', '/kntnt-extractor/v1/extractions/' . $id . '/tick' );
 	$request->set_header( Dispatcher::TICK_SECRET_HEADER, $secret );
 	return rest_get_server()->dispatch( $request );
