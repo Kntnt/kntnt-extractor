@@ -318,6 +318,7 @@ $expected_routes = [
 	'/' . $namespace,
 	'/' . $namespace . '/status',
 	'/' . $namespace . '/tables',
+	'/' . $namespace . '/environment',
 	'/' . $namespace . '/files',
 	'/' . $namespace . '/audit-log',
 	'/' . $namespace . '/extractions',

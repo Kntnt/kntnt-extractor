@@ -11,6 +11,7 @@ declare( strict_types = 1 );
 namespace Kntnt\Extractor;
 
 use Kntnt\Extractor\Rest\Audit_Log_Controller;
+use Kntnt\Extractor\Rest\Environment_Controller;
 use Kntnt\Extractor\Rest\Extractions_Controller;
 use Kntnt\Extractor\Rest\Files_Controller;
 use Kntnt\Extractor\Rest\Status_Controller;
@@ -117,11 +118,13 @@ final class Plugin {
 		$audit_log = new Audit_Log();
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
+		$environment_controller = new Environment_Controller( $authorizer, $config );
 		$files_controller = new Files_Controller( $authorizer, $config );
 		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $dispatcher );
 		$audit_log_controller = new Audit_Log_Controller( $audit_log );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
+		add_action( 'rest_api_init', $environment_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $files_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $audit_log_controller->register_routes( ... ) );

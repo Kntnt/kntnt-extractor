@@ -45,7 +45,7 @@ final class Status_Controller {
 	 *
 	 * @since 0.1.0
 	 */
-	public const int API_VERSION = 1;
+	public const int API_VERSION = 2;
 
 	/**
 	 * Registers the status route. Hooked on `rest_api_init`.
