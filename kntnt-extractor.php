@@ -3,7 +3,7 @@
  * Plugin Name:       Kntnt Extractor
  * Plugin URI:        https://github.com/Kntnt/kntnt-extractor
  * Description:       Capability-gated REST API for extracting a selection of database tables and files from a site.
- * Version:           0.2.0
+ * Version:           0.2.1
  * Requires at least: 6.0
  * Requires PHP:      8.4
  * Author:            Thomas Barregren

@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.1] – 2026-07-23
+
 ### Fixed
 
 - Heavy extractions no longer crawl at the cron watchdog's cadence on hosts where the self-loopback continuation never completes (#18): a tick is now time-budgeted, packaging as many bounded chunks as fit in a configurable wall-clock budget (`tick_budget`, default 15 s; zero preserves the previous one-chunk-per-tick behaviour) within a single PHP invocation, so one tick or one watchdog patrol can carry a multi-chunk job all the way to ready instead of one chunk per cron cycle. The continuation nudge now fires once per tick, after the per-job lock is released and only while work remains, and its delivery is hardened (`ignore_user_abort`, a bounded cURL connect phase) so a dead loopback can neither stall the nudging process nor kill the tick it spawned mid-chunk.
@@ -48,7 +50,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.0
