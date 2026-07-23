@@ -88,6 +88,26 @@ final class Job_Store {
 	private const string ID_PATTERN = '/^[a-f0-9]{32}$/';
 
 	/**
+	 * How many extra times {@see find()} re-reads a present-but-unparseable state file.
+	 *
+	 * Defence in depth behind the atomic write in {@see write_file()}: a 404 must mean a
+	 * job that is genuinely absent on disk, never one whose record a reader happened to
+	 * sample mid-write (issue #20). With atomic publishing the state file is never partial,
+	 * so this bounded re-read effectively never fires; it exists so any residual transient
+	 * partial read is retried rather than reported as no such job.
+	 *
+	 * @since 0.2.2
+	 */
+	private const int FIND_RETRY_LIMIT = 3;
+
+	/**
+	 * Microseconds {@see find()} pauses between re-reads of an unparseable state file.
+	 *
+	 * @since 0.2.2
+	 */
+	private const int FIND_RETRY_DELAY_US = 2000;
+
+	/**
 	 * Binds the store to the configuration seam it resolves its location through.
 	 *
 	 * @since 0.1.0
@@ -145,8 +165,12 @@ final class Job_Store {
 	 *
 	 * The id is validated against the id pattern before it is ever joined to a
 	 * path, so a malformed or hostile id can never escape the working directory —
-	 * it simply resolves to "no such job". A missing, unreadable, or unparseable
-	 * state file is likewise reported as null rather than raised.
+	 * it simply resolves to "no such job". Null means a *verified* absence: a state
+	 * file that is genuinely missing on disk. A file that is present but does not
+	 * parse is re-read a bounded few times before it is ever reported as null, so a
+	 * reader that samples the record mid-write never mistakes a live job for a
+	 * vanished one (issue #20) — the atomic write in {@see write_file()} keeps the
+	 * file whole and this retry is the defence in depth behind it.
 	 *
 	 * @since 0.1.0
 	 *
@@ -161,17 +185,38 @@ final class Job_Store {
 			return null;
 		}
 
-		// Read and decode the state file; every failure along the way — absent file,
-		// unreadable bytes, non-JSON, or a record that does not reconstruct — is a
-		// plain "no readable job here" at this deserialization boundary.
+		// Load the state file, retrying a bounded few times when it is present but does
+		// not parse, so only a genuinely missing file ever reads as no such job (see the
+		// method and FIND_RETRY_LIMIT docblocks for why).
 		$path = $this->base_path() . '/' . $id . '/' . self::STATE_FILE;
-		if ( ! is_file( $path ) ) {
-			return null;
-		}
-		$raw = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- reading the plugin's own local state file, not a remote resource.
-		$data = $raw === false ? null : json_decode( $raw, true );
+		for ( $attempt = 0; $attempt <= self::FIND_RETRY_LIMIT; ++$attempt ) {
 
-		return is_array( $data ) ? Extraction_Job::from_array( $data ) : null;
+			// A file that is not there is a verified absence — stop at once rather than
+			// retry a job that genuinely does not exist.
+			if ( ! is_file( $path ) ) {
+				return null;
+			}
+
+			// Read and decode the record; a whole file reconstructs to the job and is
+			// returned immediately. Anything that does not parse is retried until the
+			// budget is spent, after which it reads as no readable job here.
+			$raw = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- reading the plugin's own local state file, not a remote resource.
+			$data = $raw === false ? null : json_decode( $raw, true );
+			$job = is_array( $data ) ? Extraction_Job::from_array( $data ) : null;
+			if ( $job !== null ) {
+				return $job;
+			}
+
+			// Pause briefly before re-reading, giving an in-flight rename time to land;
+			// the last attempt falls straight through to the null below without waiting.
+			if ( $attempt < self::FIND_RETRY_LIMIT ) {
+				usleep( self::FIND_RETRY_DELAY_US );
+				clearstatcache( true, $path );
+			}
+
+		}
+
+		return null;
 
 	}
 
@@ -718,13 +763,22 @@ final class Job_Store {
 	}
 
 	/**
-	 * Writes a file whole or fails loudly.
+	 * Publishes a file atomically — whole or not at all — or fails loudly.
 	 *
-	 * A short or failed write leaves a truncated state file that a later request
-	 * would misread as a corrupt job, so anything short of the full buffer is
-	 * escalated rather than silently persisted — the same posture the crypto seam
-	 * takes toward a partial container write. Direct filesystem I/O is used
-	 * deliberately: the working directory is the plugin's own scratch area and must
+	 * The buffer is written to a uniquely-named sibling in the same directory and then
+	 * renamed over the target in one step. On a single filesystem POSIX rename is atomic,
+	 * so a concurrent reader of the target sees either the whole previous file or the
+	 * whole new one — never the zero-length or partial state a bare in-place
+	 * file_put_contents leaves on every save (it opens with O_TRUNC). That in-place
+	 * rewrite of the live job.json is exactly what raced Job_Store::find() into spurious
+	 * "no such job" 404s on a live, progressing job (issue #20), and the ADR-0010
+	 * time-budgeted tick's write burst (issue #18) made the window easy to hit. This is
+	 * the same discipline the artifact container already publishes with (Artifact_Builder).
+	 *
+	 * A short or failed write, or a rename that does not take, leaves only the temp
+	 * sibling — never a truncated target — so the residue is removed and the failure
+	 * escalated rather than a partial record silently persisted. Direct filesystem I/O is
+	 * used deliberately: the working directory is the plugin's own scratch area and must
 	 * work on hosts where WP_Filesystem would demand FTP credentials.
 	 *
 	 * @since 0.1.0
@@ -733,14 +787,45 @@ final class Job_Store {
 	 * @param string $bytes Buffer that must be written in full.
 	 * @return void
 	 *
-	 * @throws RuntimeException When the file cannot be written in full.
+	 * @throws RuntimeException When the file cannot be written and published in full.
 	 */
 	private function write_file( string $path, string $bytes ): void {
 
-		// Treat a false return or a short count as a fatal write error.
-		$written = file_put_contents( $path, $bytes ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- the plugin's own local scratch area; WP_Filesystem would demand FTP credentials on some hosts.
+		// Write the whole buffer to a uniquely-named sibling; a false return or a short
+		// count is a fatal write error, so drop the residue and fail before publishing.
+		$tmp = $path . '.' . bin2hex( random_bytes( 8 ) ) . '.tmp';
+		$written = file_put_contents( $tmp, $bytes ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- the plugin's own local scratch area; WP_Filesystem would demand FTP credentials on some hosts.
 		if ( $written === false || $written < strlen( $bytes ) ) {
+			$this->discard( $tmp );
 			throw new RuntimeException( 'Unable to write the Extraction job file in full.' );
+		}
+
+		// Swap the fully-written sibling over the target in one atomic step; a failed
+		// rename leaves the previous target intact, so drop the residue and fail loudly.
+		if ( ! rename( $tmp, $path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- atomic same-directory publish of the plugin's own state file; WP_Filesystem::move offers no atomicity guarantee.
+			$this->discard( $tmp );
+			throw new RuntimeException( 'Unable to publish the Extraction job file into place.' );
+		}
+
+	}
+
+	/**
+	 * Removes a leftover temp file from a failed atomic write, best-effort.
+	 *
+	 * A failed write or rename in {@see write_file()} leaves only this temp sibling; it
+	 * is removed so a failed save never litters the job directory. Whether the unlink
+	 * itself succeeds is immaterial — the caller is already throwing on the failure that
+	 * produced the residue — so the outcome is deliberately not checked.
+	 *
+	 * @since 0.2.2
+	 *
+	 * @param string $tmp Absolute path of the temp file to remove.
+	 * @return void
+	 */
+	private function discard( string $tmp ): void {
+
+		if ( is_file( $tmp ) ) {
+			unlink( $tmp ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own leftover temp file after a failed atomic write.
 		}
 
 	}

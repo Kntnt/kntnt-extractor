@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- `GET /extractions/{id}` no longer returns a spurious `404 kntnt_extractor_no_such_job` for a live, progressing job (#20). The per-job `job.json` was rewritten in place with a bare `file_put_contents()`, so it was momentarily zero-length or partial on every save; a poll that read it inside that window saw an unparseable file and reported the job as vanished — which the client poll discipline treats as terminal, aborting a healthy clone. The write burst from the time-budgeted tick (#18) made the window easy to hit. The state file is now published atomically, written to a sibling temp file and `rename()`d over `job.json` (the same discipline the sealed artifact already uses), so a concurrent reader sees either the whole previous record or the whole new one — never a torn one. As defence in depth, `find()` now re-reads a present-but-unparseable file a bounded few times before it concludes the job is absent, so a 404 means a confirmed on-disk absence, never a transient partial read. Tick, sweep, and consume behaviour is unchanged.
+
 ## [0.2.1] – 2026-07-23
 
 ### Fixed
