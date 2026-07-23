@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] – 2026-07-23
+
 ### Added
 
 - `POST /extractions` rejects a selection naming a credential-bearing restricted path — `wp-config.php` and its backup/editor-droppings siblings (`wp-config-sample.php` excepted), `.env` and its siblings anywhere in the tree, and root-level database dumps and key material (#21, ADR-0011). The rejection is a `422 kntnt_extractor_restricted_path` naming every offending path, decided before the existence check and the capability gate, so a misconfigured client learns its selection is wrong rather than silently receiving — or missing — the site's secrets. `GET /files` is unchanged: a restricted path stays listed, unannotated. Bumped the REST API version to `3` for this caller-visible contract change.
@@ -58,7 +60,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.0
 [0.1.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.1.1
