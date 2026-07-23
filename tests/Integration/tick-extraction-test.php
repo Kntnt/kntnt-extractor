@@ -208,6 +208,16 @@ $selection = [
 	'public_key' => base64_encode( $public_key ),
 ];
 
+// Snapshot the shutdown hook before any REST activity, so it holds only WordPress
+// core's own handlers and none of the continuation closures this file's creates and
+// polls register. The AC7 blocks below empty the hook with remove_all_actions(
+// 'shutdown' ) to isolate their continuations, which also strips core's handlers, and
+// an anonymous continuation closure cannot be deregistered individually; cloning the
+// pristine hook by value here and reinstating it verbatim in the cleanup restores
+// core's handlers and lets no continuation this file scheduled outlive it.
+global $wp_filter;
+$shutdown_snapshot = isset( $wp_filter['shutdown'] ) ? clone $wp_filter['shutdown'] : null;
+
 // --- Create the job (owner), queued, with a per-job tick secret on disk ---
 
 wp_set_current_user( $owner->ID );
@@ -399,15 +409,6 @@ $n_response = $post_extractions( $selection );
 $n_id = is_array( $n_response->get_data() ) ? (string) ( $n_response->get_data()['id'] ?? '' ) : '';
 $n_state = json_decode( (string) file_get_contents( $work . '/' . $n_id . '/job.json' ), true );
 $n_secret = is_array( $n_state ) ? (string) ( $n_state['tick_secret'] ?? '' ) : '';
-
-// Snapshot the shutdown hook before the AC7 blocks empty it to isolate their
-// continuations. remove_all_actions( 'shutdown' ) strips WordPress core's own shutdown
-// handlers too, and an anonymous continuation closure cannot be deregistered
-// individually, so the hook is cloned by value here and reinstated verbatim in the
-// cleanup — core's handlers survive the run and no continuation this file scheduled
-// outlives it.
-global $wp_filter;
-$shutdown_snapshot = isset( $wp_filter['shutdown'] ) ? clone $wp_filter['shutdown'] : null;
 
 remove_all_actions( 'shutdown' );
 $captured = [];
