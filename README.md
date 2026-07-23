@@ -48,6 +48,14 @@ Download the latest release from [the releases page](https://github.com/Kntnt/kn
 
 Authenticate with an [application password](https://make.wordpress.org/core/2020/11/05/application-passwords-integration-guide/) for a user holding both `kntnt_extractor_operate` and `manage_options` (an administrator has both), then call the plugin's REST namespace (`kntnt-extractor/v1`) to list the available tables and files, request an extraction, and fetch the result once it is ready. Both capabilities are required: `kntnt_extractor_operate` is the plugin's on switch, and `manage_options` authorises the data — a user with Operate but without `manage_options` can reach the API yet neither list nor extract anything.
 
+### Restricted paths
+
+`GET /files` lists every file in the installation, including credential-bearing ones, but `POST /extractions` refuses to extract a selection that names one — a `422 kntnt_extractor_restricted_path` naming every offending path, decided before the request is even checked for whether the files exist. The deny-list, matched case-insensitively against the installation-root-relative path, is the normative list a caller mirrors when assembling its own exclusion set:
+
+- `wp-config.php` and its backup/editor-droppings siblings — `wp-config.php.*`, `wp-config.php~`, `wp-config-*.php` — anywhere in the tree. `wp-config-sample.php` is explicitly excepted; it holds no secrets.
+- `.env` and `.env.*`, anywhere in the tree.
+- Directly in the installation root only: `*.sql`, `*.sql.gz`, `*.sql.zip`, `*.pem`, `*.key`, `id_rsa*`.
+
 ## Questions, bugs, and feature requests
 
 Have a usage question or something to discuss? Please use [Discussions](https://github.com/Kntnt/kntnt-extractor/discussions).

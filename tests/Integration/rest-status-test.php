@@ -21,7 +21,7 @@ $response = $server->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/
 kntnt_extractor_assert( $response->get_status() === 200, 'GET /status responds 200 without authentication' );
 
 // The body is exactly the API-version contract and nothing more.
-kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 2 ], 'GET /status returns { api_version: 2 }' );
+kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 3 ], 'GET /status returns { api_version: 3 }' );
 
 // The namespace is advertised in WordPress's REST index.
 $index = $server->dispatch( new WP_REST_Request( 'GET', '/' ) )->get_data();

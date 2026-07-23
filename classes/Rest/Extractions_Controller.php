@@ -16,6 +16,7 @@ use Kntnt\Extractor\Dispatcher;
 use Kntnt\Extractor\Extraction_Job;
 use Kntnt\Extractor\Job_State;
 use Kntnt\Extractor\Job_Store;
+use Kntnt\Extractor\Restricted_Path;
 use WP_Error;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -55,13 +56,17 @@ use WP_REST_Server;
  *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
- * key a 400, and an unknown table or a file resolving outside the installation
- * root a 404 — and that 404 is decided BEFORE the capability gate, so the plugin
- * rejects a request for something that does not exist without first disclosing
- * whether the caller could have been authorized. Only once existence holds does
- * the shared both-capabilities Authorizer get to refuse an unauthorized caller
- * with 403. The out-of-root check is a `realpath` boundary, never a sanitiser:
- * a traversal path is rejected outright, not rewritten into a safe one.
+ * key a 400, a selection naming a credential-bearing restricted path (ADR-0011)
+ * a 422 naming every offending path, and an unknown table or a file resolving
+ * outside the installation root a 404 — and that 404 is decided BEFORE the
+ * capability gate, so the plugin rejects a request for something that does not
+ * exist without first disclosing whether the caller could have been authorized.
+ * The restricted-path check runs before the existence check for the same
+ * reason: whether a denied path exists is not disclosed either. Only once
+ * existence holds does the shared both-capabilities Authorizer get to refuse an
+ * unauthorized caller with 403. The out-of-root check is a `realpath` boundary,
+ * never a sanitiser: a traversal path is rejected outright, not rewritten into
+ * a safe one.
  *
  * @since 0.1.0
  */
@@ -636,11 +641,13 @@ final class Extractions_Controller {
 	 * The checks run in the contract's fixed precedence: a body that is not a JSON
 	 * object, or a selection that is not a list of non-empty strings, or one that
 	 * selects nothing, or one that lists a table as both full-data and structure-only,
-	 * is a 422; an absent or malformed public key is a 400; an unknown table (full-data
-	 * or structure-only) or a file resolving outside the installation root is a 404.
-	 * Existence is deliberately the last of the three so a well-formed request is
-	 * never told a resource is missing before it is told its own shape is wrong,
-	 * yet still ahead of the capability gate its caller runs afterwards.
+	 * is a 422; an absent or malformed public key is a 400; a file matching the
+	 * credential-bearing deny-list (ADR-0011) is a 422 naming every offending path;
+	 * an unknown table (full-data or structure-only) or a file resolving outside the
+	 * installation root is a 404. Existence is deliberately the last of these so a
+	 * well-formed request is never told a resource is missing before it is told its
+	 * own shape is wrong or that it selects a restricted path, yet still ahead of the
+	 * capability gate its caller runs afterwards.
 	 *
 	 * The structure-only selection (issue #16) is additive and independently
 	 * omittable: an absent or null `tables_structure_only` behaves as `[]`, so a
@@ -680,6 +687,26 @@ final class Extractions_Controller {
 		$public_key = $this->canonical_public_key( $data['public_key'] ?? null );
 		if ( $public_key === null ) {
 			return $this->error( 400, 'kntnt_extractor_invalid_public_key', __( 'A valid base64-encoded 32-byte X25519 public key is required.', 'kntnt-extractor' ) );
+		}
+
+		// Restricted-path rejection runs before the existence check: a selection
+		// naming a credential-bearing file (ADR-0011) is refused outright, naming
+		// every offending path, and its mere existence is never disclosed by
+		// letting it fall through to the existence check's outcome.
+		$restricted = Restricted_Path::matches( $files );
+		if ( $restricted !== [] ) {
+			return new WP_Error(
+				'kntnt_extractor_restricted_path',
+				sprintf(
+					/* translators: %s: a comma-separated list of the restricted file paths the caller selected. */
+					__( 'The selection includes restricted path(s) that cannot be extracted: %s', 'kntnt-extractor' ),
+					implode( ', ', $restricted ),
+				),
+				[
+					'status' => 422,
+					'paths' => $restricted,
+				],
+			);
 		}
 
 		// Existence-first: an unknown table — full-data or structure-only — or an

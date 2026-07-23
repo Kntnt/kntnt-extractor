@@ -283,7 +283,7 @@ kntnt_extractor_assert( ! in_array( $ready_id, $listed_ids( $get_extractions() )
 // --- AC7: the REST API version reports 2 (the coordinated cutover bump) ---
 
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 2, 'GET /status reports api_version 2 (AC7)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 3, 'GET /status reports api_version 3 (AC7)' );
 
 // Leave the suite state clean for later files, including the served downloads sibling.
 remove_filter( 'pre_http_request', $intercept, 10 );

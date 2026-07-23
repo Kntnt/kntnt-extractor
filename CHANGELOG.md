@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `POST /extractions` rejects a selection naming a credential-bearing restricted path — `wp-config.php` and its backup/editor-droppings siblings (`wp-config-sample.php` excepted), `.env` and its siblings anywhere in the tree, and root-level database dumps and key material (#21, ADR-0011). The rejection is a `422 kntnt_extractor_restricted_path` naming every offending path, decided before the existence check and the capability gate, so a misconfigured client learns its selection is wrong rather than silently receiving — or missing — the site's secrets. `GET /files` is unchanged: a restricted path stays listed, unannotated. Bumped the REST API version to `3` for this caller-visible contract change.
+
 ### Fixed
 
 - `GET /extractions/{id}` no longer returns a spurious `404 kntnt_extractor_no_such_job` for a live, progressing job (#20). The per-job `job.json` was rewritten in place with a bare `file_put_contents()`, so it was momentarily zero-length or partial on every save; a poll that read it inside that window saw an unparseable file and reported the job as vanished — which the client poll discipline treats as terminal, aborting a healthy clone. The write burst from the time-budgeted tick (#18) made the window easy to hit. The state file is now published atomically, written to a sibling temp file and `rename()`d over `job.json` (the same discipline the sealed artifact already uses), so a concurrent reader sees either the whole previous record or the whole new one — never a torn one. As defence in depth, `find()` now re-reads a present-but-unparseable file a bounded few times before it concludes the job is absent, so a 404 means a confirmed on-disk absence, never a transient partial read. Tick, sweep, and consume behaviour is unchanged.

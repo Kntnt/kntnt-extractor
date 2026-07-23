@@ -48,9 +48,14 @@ final class Status_Controller {
 	 * are a caller-visible change to the extraction contract (ADR-0005). The sibling
 	 * tickets ship under this one coordinated bump rather than one bump each.
 	 *
+	 * Raised to 3 for the restricted-path deny-list (issue #21, ADR-0011):
+	 * `POST /extractions` now rejects a selection naming a credential-bearing path
+	 * with a new `kntnt_extractor_restricted_path` 422, a caller-visible behaviour
+	 * change even though no request field changed shape.
+	 *
 	 * @since 0.1.0
 	 */
-	public const int API_VERSION = 2;
+	public const int API_VERSION = 3;
 
 	/**
 	 * Registers the status route. Hooked on `rest_api_init`.
