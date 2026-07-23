@@ -33,7 +33,10 @@
 
 declare( strict_types = 1 );
 
+use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Dispatcher;
+use Kntnt\Extractor\Job_State;
+use Kntnt\Extractor\Job_Store;
 
 global $wpdb;
 
@@ -118,6 +121,15 @@ $public_key = base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keyp
 
 wp_set_current_user( $owner->ID );
 
+// Snapshot the shutdown hook before this file empties it to isolate continuation
+// blocks. remove_all_actions( 'shutdown' ) strips WordPress core's own shutdown
+// handlers too, and WordPress cannot deregister an anonymous continuation closure
+// individually, so the hook is cloned by value here and reinstated verbatim in the
+// cleanup — core's handlers survive the run and no continuation this file scheduled
+// outlives it.
+global $wp_filter;
+$shutdown_snapshot = isset( $wp_filter['shutdown'] ) ? clone $wp_filter['shutdown'] : null;
+
 // --- AC1/AC3: a poll does no HTTP before its response, one guarded nudge at shutdown ---
 
 // A queued job is the clean case: it always warrants a continuation, so the
@@ -186,8 +198,33 @@ kntnt_extractor_assert( is_string( $ready_poll->get_data()['download_url'] ?? nu
 do_action( 'shutdown' );
 kntnt_extractor_assert( $http_count === 0, 'A ready (finished) job gets no continuation at shutdown (AC3)' );
 
-// Leave the suite state clean for later files.
+// --- AC3: a terminal (failed) job gets no continuation either ---
+
+// A terminal job is finished, so — exactly like the ready one — its poll neither
+// nudges inline nor schedules a shutdown continuation. Create a fresh job and drop it
+// straight to a terminal state through the store, then pin both halves so the "ready
+// OR terminal" wording is covered by a terminal case too, not only by ready.
+$store = new Job_Store( new Config() );
+$fid = (string) ( $post_extractions( [ 'tables' => [ $wpdb->options ], 'public_key' => $public_key ] )->get_data()['id'] ?? '' );
+$store->save( $store->find( $fid )->with_state( Job_State::Failed ) );
+
 remove_all_actions( 'shutdown' );
+$http_count = 0;
+$failed_poll = $get_extraction( $fid );
+kntnt_extractor_assert( $http_count === 0, 'A poll of a failed (terminal) job performs no outbound HTTP before its response (AC1)' );
+kntnt_extractor_assert( ( $failed_poll->get_data()['state'] ?? null ) === 'failed', 'The terminal job polls as failed' );
+do_action( 'shutdown' );
+kntnt_extractor_assert( $http_count === 0, 'A failed (terminal) job gets no continuation at shutdown (AC3)' );
+
+// Leave the suite state clean for later files: reinstate the shutdown hook exactly as
+// it was rather than leaving it emptied, so WordPress core's own shutdown handlers
+// survive for later files and no continuation this file scheduled outlives it.
+remove_all_actions( 'shutdown' );
+if ( $shutdown_snapshot !== null ) {
+	$wp_filter['shutdown'] = $shutdown_snapshot;
+} else {
+	unset( $wp_filter['shutdown'] );
+}
 remove_filter( 'pre_http_request', $counter, 10 );
 remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );

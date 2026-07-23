@@ -400,6 +400,15 @@ $n_id = is_array( $n_response->get_data() ) ? (string) ( $n_response->get_data()
 $n_state = json_decode( (string) file_get_contents( $work . '/' . $n_id . '/job.json' ), true );
 $n_secret = is_array( $n_state ) ? (string) ( $n_state['tick_secret'] ?? '' ) : '';
 
+// Snapshot the shutdown hook before the AC7 blocks empty it to isolate their
+// continuations. remove_all_actions( 'shutdown' ) strips WordPress core's own shutdown
+// handlers too, and an anonymous continuation closure cannot be deregistered
+// individually, so the hook is cloned by value here and reinstated verbatim in the
+// cleanup — core's handlers survive the run and no continuation this file scheduled
+// outlives it.
+global $wp_filter;
+$shutdown_snapshot = isset( $wp_filter['shutdown'] ) ? clone $wp_filter['shutdown'] : null;
+
 remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $n_id );
@@ -436,6 +445,11 @@ $store->save( $stalled );
 remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $n_id );
+// The stalled-running poll is the reported bug's exact case: it must fire NO nudge
+// inline, before its response — the continuation is only scheduled, never run during
+// the poll (AC1). Asserted between the poll and the shutdown so a regression that
+// nudged inline cannot hide inside the capture that spans both phases.
+kntnt_extractor_assert( $captured === [], 'A poll of a stalled running job performs no nudge inline, before its response (AC1/AC7)' );
 do_action( 'shutdown' );
 $nudged_stalled = false;
 foreach ( $captured as $call ) {
@@ -458,8 +472,32 @@ foreach ( $captured as $call ) {
 }
 kntnt_extractor_assert( ! $nudged_ready, 'A poll of a ready job fires no nudge, even at shutdown (AC7)' );
 
-// Clear the last block's continuation so no leftover shutdown closure fires later.
+// A terminal (failed) job is finished too, so its poll schedules nothing — neither
+// inline nor at shutdown. Drop the AC7 job to failed and pin both halves, so the
+// no-continuation guarantee is covered by a terminal state and not only by ready.
+$store->save( $store->find( $n_id )->with_state( Job_State::Failed ) );
 remove_all_actions( 'shutdown' );
+$captured = [];
+$get_extraction( $n_id );
+kntnt_extractor_assert( $captured === [], 'A poll of a failed (terminal) job performs no nudge inline, before its response (AC1/AC7)' );
+do_action( 'shutdown' );
+$nudged_failed = false;
+foreach ( $captured as $call ) {
+	if ( str_contains( $call['url'], '/extractions/' . $n_id . '/tick' ) ) {
+		$nudged_failed = true;
+	}
+}
+kntnt_extractor_assert( ! $nudged_failed, 'A poll of a failed (terminal) job fires no nudge, even at shutdown (AC7)' );
+
+// Reinstate the shutdown hook exactly as it was rather than leaving it emptied, so
+// no leftover continuation closure outlives this file and WordPress core's own
+// shutdown handlers survive for later files.
+remove_all_actions( 'shutdown' );
+if ( $shutdown_snapshot !== null ) {
+	$wp_filter['shutdown'] = $shutdown_snapshot;
+} else {
+	unset( $wp_filter['shutdown'] );
+}
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

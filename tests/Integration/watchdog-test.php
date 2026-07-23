@@ -180,6 +180,16 @@ $selection = [
 	'public_key' => base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keypair() ) ),
 ];
 
+// Snapshot the shutdown hook before this file empties it to isolate continuation
+// blocks. remove_all_actions( 'shutdown' ) strips WordPress core's own shutdown
+// handlers too, and an anonymous continuation closure cannot be deregistered
+// individually, so the hook is cloned by value here and reinstated verbatim in the
+// cleanup — core's handlers survive the run and no continuation this file scheduled
+// (including the create and dead-loopback-poll closures the AC2/AC4 sections leave
+// behind) outlives it.
+global $wp_filter;
+$shutdown_snapshot = isset( $wp_filter['shutdown'] ) ? clone $wp_filter['shutdown'] : null;
+
 // --- AC1: creating a job schedules the first loopback tick, delivered at shutdown ---
 //
 // The create no longer nudges inline (#19/ADR-0010): it registers a `shutdown`
@@ -239,6 +249,11 @@ $stall( $store->find( $poll_id ) );
 remove_all_actions( 'shutdown' );
 $captured = [];
 $get_extraction( $poll_id );
+// The stalled-running poll is the reported bug's exact case (#19): it must fire NO
+// nudge inline, before its response — the continuation is only scheduled, never run
+// during the poll (AC1). Asserted between the poll and the shutdown so a regression
+// that nudged inline cannot hide inside the capture that spans both phases.
+kntnt_extractor_assert( $captured === [], 'A poll of a stalled running job performs no nudge inline, before its response (AC1/AC3)' );
 do_action( 'shutdown' );
 kntnt_extractor_assert( $nudged_tick( $captured, $poll_id, $poll_secret ), 'A poll of a stalled running job re-nudges its tick endpoint at shutdown (AC3)' );
 
@@ -401,6 +416,19 @@ $sweeper = new Sweeper( $store, new Config() );
 $swept = array_map( static fn( Extraction_Job $j ): string => $j->id, $sweeper->sweep() );
 kntnt_extractor_assert( in_array( $ceiling_id, $swept, true ) && ! is_dir( $ceiling_dir ), 'The sweep reclaims an unfinished job past the absolute lifetime ceiling despite its fresh heartbeat, purging its partial dump (backstop)' );
 kntnt_extractor_assert( ! in_array( $young_id, $swept, true ) && is_dir( $work . '/' . $young_id ), 'The sweep leaves a young unfinished job with a fresh heartbeat untouched (backstop control)' );
+
+// Reinstate the shutdown hook exactly as it was rather than leaving it emptied. The
+// AC2/AC4/backstop sections above created jobs and polled a dead-loopback job without
+// isolating their blocks, so each left a `continue_after_response` closure on the
+// shutdown hook; clearing and restoring here drops them all — before the loopback
+// intercept below is removed — so none fires a real loopback nudge at process end, and
+// WordPress core's own shutdown handlers survive for later files.
+remove_all_actions( 'shutdown' );
+if ( $shutdown_snapshot !== null ) {
+	$wp_filter['shutdown'] = $shutdown_snapshot;
+} else {
+	unset( $wp_filter['shutdown'] );
+}
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
