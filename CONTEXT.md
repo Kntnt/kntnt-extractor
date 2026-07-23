@@ -16,6 +16,10 @@ _Avoid_: API access, permission
 The unfiltered, recursive listing (path, size, mtime) of every file from the WordPress installation root downward. Carries no categorisation of what any file is for — that judgement belongs to the caller, not the plugin.
 _Avoid_: file list, scan
 
+**Restricted path**:
+A file path matching the fixed deny-list of credential-bearing patterns (`wp-config.php` and its variants, `.env` files, root-level database dumps and key material). Listed in the manifest like any other file but never extractable: a selection containing one is rejected at job creation, naming the offending paths.
+_Avoid_: blocked file, sensitive file
+
 **Table list**:
 The enumeration of tables that exist in the site's database, the file-side manifest's counterpart.
 
