@@ -27,7 +27,9 @@ use Throwable;
  * across one or more budgeted ticks and survives an interruption between them. Once the
  * lock is released the tick fires the continuation loopback once, and only when work
  * remains. A build that throws drops the job to failed rather than leaving it wedged in
- * running (ADR-0010).
+ * running (ADR-0010), and a build whose chunk keeps dying where no `catch` can see it —
+ * a memory or execution-time kill — is failed too, once its attempt counter shows it has
+ * begun the same chunk repeatedly without ever finishing it (ADR-0013).
  *
  * Two liveness signals share the job's own state and heartbeat rather than a lock.
  * A tick is the authenticated driver, so it advances any queued or still-running
@@ -83,6 +85,24 @@ final class Dispatcher {
 	 * @since 0.2.1
 	 */
 	private const int DEFAULT_TICK_BUDGET = 15;
+
+	/**
+	 * Chunk attempts allowed without a single advance before the job is failed.
+	 *
+	 * The bound on the retry loop a chunk that dies OUTSIDE PHP creates (ADR-0013): an
+	 * exhausted memory limit or execution time kills the worker where it stands, so the
+	 * tick's own `catch` never runs, the job stays running with a heartbeat the watchdog
+	 * keeps refreshing, and it is retried forever while a polling caller reads a state
+	 * that never changes. Three attempts is enough to ride out a transient — a lock
+	 * wait, a momentarily loaded host — and few enough that a genuinely impossible chunk
+	 * is reported within a couple of poll cycles rather than hours. Resolved through the
+	 * Config seam under the knob `max_stall_attempts`, so a site tunes it with the
+	 * `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` constant or its filter. This is only the
+	 * fallback when neither is set.
+	 *
+	 * @since 0.4.0
+	 */
+	private const int DEFAULT_MAX_STALL_ATTEMPTS = 3;
 
 	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
@@ -201,6 +221,14 @@ final class Dispatcher {
 	 * method's job — the budgeted loop in {@see tick()} owns that, once, after the lock
 	 * is released (ADR-0010).
 	 *
+	 * It is also where a build that cannot advance at all stops being retried. A chunk
+	 * that exhausts the host's memory limit or execution time is killed outside PHP, so
+	 * the `catch` below never runs and the job would otherwise stay running forever,
+	 * restarted by every watchdog cycle and reporting a frozen progress to its caller.
+	 * The attempt counter, incremented before the work and cleared by every real
+	 * advance, is what makes that visible after the fact, and the job is failed with a
+	 * reason naming the chunk once it has run out of attempts (ADR-0013).
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job, freshly read under the tick lock.
@@ -208,11 +236,22 @@ final class Dispatcher {
 	 */
 	private function advance_one_chunk( Extraction_Job $job ): Extraction_Job {
 
+		// Call the build stalled once this many attempts have begun on the same chunk
+		// without one of them ever finishing it: the attempts were counted before the
+		// work, so a chunk killed outside PHP still leaves its evidence, and retrying it
+		// a fourth time would only reproduce the kill (ADR-0013).
+		if ( $job->attempts >= $this->max_stall_attempts() ) {
+			$failed = $job->with_failure( $this->stall_reason( $job ) );
+			$this->store->save( $failed );
+			return $failed;
+		}
+
 		// Stamp the job running with a fresh heartbeat before any heavy work, so a
-		// concurrent poll sees it as actively progressing (ADR-0007), and announce the
-		// queued -> running transition once so observers can react to it.
+		// concurrent poll sees it as actively progressing (ADR-0007), count the attempt
+		// while a record of it can still be written, and announce the queued -> running
+		// transition once so observers can react to it.
 		$was_queued = $job->state === Job_State::Queued;
-		$running = $job->with_state( Job_State::Running );
+		$running = $job->with_state( Job_State::Running )->with_attempt();
 		$this->store->save( $running );
 		if ( $was_queued ) {
 			do_action( 'kntnt_extractor_job_running', $running );
@@ -448,6 +487,79 @@ final class Dispatcher {
 	}
 
 	/**
+	 * Composes the caller-visible reason a build that never advances is failed with.
+	 *
+	 * This is the message that has to explain the next occurrence without a server log,
+	 * because the host that produced this failure mode had `WP_DEBUG_LOG` off and left
+	 * nothing behind at all (ADR-0013). So it names all three things a reader needs: how
+	 * many attempts died, exactly which chunk they died on, and the two host limits that
+	 * are almost always the cause — neither of which the tick can observe itself being
+	 * killed by, but both of which it can report. Everything in it is either the
+	 * caller's own selection or a runtime setting `GET /environment` already discloses
+	 * to the same capability, so it leaks nothing the opacity rule (ADR-0007) protects.
+	 *
+	 * @since 0.4.0
+	 *
+	 * @param Extraction_Job $job The job whose build has run out of attempts.
+	 * @return string The failure reason, phrased for the polling owner to act on.
+	 */
+	private function stall_reason( Extraction_Job $job ): string {
+
+		return sprintf(
+			/* translators: 1: number of consecutive attempts, 2: a description of the chunk being packaged, 3: the host's memory_limit setting, 4: the host's max_execution_time setting in seconds. */
+			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host reports memory_limit %3$s and max_execution_time %4$s. Lower KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file) so each chunk is smaller, or raise those host limits, and request the extraction again.', 'kntnt-extractor' ),
+			$job->attempts,
+			$this->stalled_chunk( $job ),
+			(string) ini_get( 'memory_limit' ),
+			(string) ini_get( 'max_execution_time' ),
+		);
+
+	}
+
+	/**
+	 * Names the chunk a stalled build died on, in the caller's own vocabulary.
+	 *
+	 * Derived entirely from the persisted progress and the job's selection, so it needs
+	 * nothing recorded at attempt time: the progress a stalled build carries is by
+	 * definition the point it never got past, and the build order in
+	 * {@see Artifact_Builder::advance()} says which resource that is. The row and byte
+	 * offsets are included because they are what makes the chunk reproducible — the
+	 * reader can go and look at that row range or that part of that file.
+	 *
+	 * @since 0.4.0
+	 *
+	 * @param Extraction_Job $job The job whose build has run out of attempts.
+	 * @return string A translatable description of the chunk.
+	 */
+	private function stalled_chunk( Extraction_Job $job ): string {
+
+		// Follow the builder's own order — full-data tables, then structure-only tables,
+		// then files — and name whichever resource the progress stopped inside. A build
+		// past all three died writing the container's sealed index, which names nothing
+		// of the selection. A job killed before its first chunk ever persisted progress
+		// stalled at the start of the build, which a zeroed progress describes exactly.
+		$progress = $job->progress ?? new Build_Progress( 0, 0, 0, 0, 0, [] );
+		$table = $job->tables[ $progress->tables_done ] ?? null;
+		$structure = $job->structure_only[ $progress->structure_done ] ?? null;
+		$file = $job->files[ $progress->file_index ] ?? null;
+		if ( $table !== null ) {
+			/* translators: 1: database table name, 2: the row number the dump had reached. */
+			return sprintf( __( 'table `%1$s` from row %2$d onwards', 'kntnt-extractor' ), $table, $progress->table_offset );
+		}
+		if ( $structure !== null ) {
+			/* translators: %s: database table name. */
+			return sprintf( __( 'the structure of table `%s`', 'kntnt-extractor' ), $structure );
+		}
+		if ( $file !== null ) {
+			/* translators: 1: file path relative to the installation root, 2: the byte offset the packaging had reached. */
+			return sprintf( __( 'file `%1$s` from byte %2$d onwards', 'kntnt-extractor' ), $file, $progress->file_offset );
+		}
+
+		return __( 'the artifact\'s sealed index', 'kntnt-extractor' );
+
+	}
+
+	/**
 	 * Builds the absolute URL of a job's tick endpoint.
 	 *
 	 * @since 0.1.0
@@ -492,6 +604,25 @@ final class Dispatcher {
 		$configured = $this->config->get( 'tick_budget', self::DEFAULT_TICK_BUDGET );
 
 		return max( 0.0, is_numeric( $configured ) ? (float) $configured : (float) self::DEFAULT_TICK_BUDGET );
+
+	}
+
+	/**
+	 * Resolves the no-progress attempt ceiling through the Config seam, clamped to >= 1.
+	 *
+	 * The floor of one keeps the ceiling meaningful however the knob is misconfigured: a
+	 * zero or negative override cannot disable the bound and restore the endless retry
+	 * loop it exists to close.
+	 *
+	 * @since 0.4.0
+	 *
+	 * @return int Chunk attempts allowed without an advance before the job is failed.
+	 */
+	private function max_stall_attempts(): int {
+
+		$configured = $this->config->get( 'max_stall_attempts', self::DEFAULT_MAX_STALL_ATTEMPTS );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_STALL_ATTEMPTS );
 
 	}
 

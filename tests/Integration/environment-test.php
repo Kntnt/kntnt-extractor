@@ -4,8 +4,8 @@
  * gated by the shared Authorizer, with the secret define family redacted.
  *
  * This harness exercises the endpoint end to end against the live REST stack:
- * the both-capabilities gate (AC2 — 403 for anonymous and single-capability
- * callers), the response shape (AC1 — php/database/wordpress/active_plugins/
+ * the both-capabilities gate (AC2 — 401 for an anonymous caller and 403 for a
+ * single-capability one, per ADR-0012), the response shape (AC1 — php/database/wordpress/active_plugins/
  * dropins/defines), the secret-define redaction (AC3 — a seeded DB_PASSWORD and
  * salt/nonce family emitted by name with value null, never their value), and the
  * relative content/uploads paths (AC4 — no absolute server path). The real
@@ -40,9 +40,10 @@ if ( ! get_role( 'administrator' )->has_cap( $operate ) ) {
 
 // --- AC2: the both-capabilities Authorizer gates the endpoint ----------------
 
-// Neither an anonymous caller nor an Operate-only caller may read the facts.
+// Neither an anonymous caller nor an Operate-only caller may read the facts. The
+// anonymous one is 401 — a missing identity, not a missing capability (ADR-0012).
 wp_set_current_user( 0 );
-kntnt_extractor_assert( $get_environment()->get_status() === 403, 'AC2: an anonymous caller is refused GET /environment (403)' );
+kntnt_extractor_assert( $get_environment()->get_status() === 401, 'AC2: an anonymous caller is refused GET /environment (401)' );
 $operate_only = wp_insert_user( [ 'user_login' => 'kntnt_env_operate_only', 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ] );
 ( new WP_User( $operate_only ) )->add_cap( $operate );
 wp_set_current_user( $operate_only );

@@ -324,9 +324,10 @@ $unknown = str_repeat( '0', 32 );
 kntnt_extractor_assert( $consume( $unknown )->get_status() === 404, 'Consume on an unknown id is a 404, existence before ownership (AC5)' );
 kntnt_extractor_assert( $cancel( $unknown )->get_status() === 404, 'Cancel on an unknown id is a 404, existence before ownership (AC5)' );
 
-// The capability gate still refuses an anonymous caller outright.
+// The gate still refuses an anonymous caller outright — 401, since the request
+// resolved to no user at all (ADR-0012).
 wp_set_current_user( 0 );
-kntnt_extractor_assert( $consume( $o_id )->get_status() === 403, 'An anonymous consume is refused 403 by the capability gate (AC5)' );
+kntnt_extractor_assert( $consume( $o_id )->get_status() === 401, 'An anonymous consume is refused 401 by the authorization gate (AC5)' );
 
 // The owner still sees the intact, ready job after every rejected attempt.
 wp_set_current_user( $owner->ID );

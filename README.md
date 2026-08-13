@@ -56,6 +56,47 @@ Authenticate with an [application password](https://make.wordpress.org/core/2020
 - `.env` and `.env.*`, anywhere in the tree.
 - Directly in the installation root only: `*.sql`, `*.sql.gz`, `*.sql.zip`, `*.pem`, `*.key`, `id_rsa*`.
 
+### Large tables and files
+
+Nothing is packaged whole. A selected table is dumped in bounded slices of rows and a selected file is read in bounded parts, one chunk per background tick, so a table or a file far larger than a single PHP request could carry still completes — it simply takes more ticks. Each chunk is sealed on its own and recorded in the artifact's sealed index under the table's name or the file's installation-root-relative path, which means a resource larger than one chunk appears in the index several times.
+
+**To reassemble a table or a file, concatenate every segment carrying its name, in index order.** A reader that assumes one segment per name keeps only the last chunk of anything large.
+
+Two knobs bound the chunks, both settable as a `wp-config.php` constant or through the matching `kntnt_extractor_config_*` filter:
+
+- `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` — rows per table slice, default 1000. Lower it on a site whose rows are unusually large (long post content, serialised meta blobs).
+- `KNTNT_EXTRACTOR_CHUNK_SIZE` — bytes per file part, default 8 MiB.
+
+If a chunk is still too big for the host, the job does not hang: after `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` attempts (default 3) that begin the same chunk and never finish it, the job reports `failed` and its poll's `error.message` names the table and row (or file and byte) it stalled on, together with the host's `memory_limit` and `max_execution_time`. Lower the relevant knob and request the extraction again.
+
+### Checking who you are authenticated as
+
+`GET /status` is unauthenticated and returns the REST contract's API version. Send credentials with it anyway and it also tells you who they resolved to:
+
+```json
+{
+  "api_version": 5,
+  "authenticated_as": "your-wp-user-login",
+  "capabilities": { "kntnt_extractor_operate": true, "manage_options": true }
+}
+```
+
+`authenticated_as` is the WordPress `user_login` — often an email address, since that is what many sites' logins are. If those two members are missing from the response, your credentials did not reach WordPress or did not name an existing user, and no capability grant will fix that.
+
+### When a request is refused
+
+Each refusal names its own cause, so the remedy is never a guess:
+
+- `401 kntnt_extractor_not_authenticated` — the request resolved to no WordPress user. The `Authorization` header did not arrive, named a user that does not exist, or carried a wrong application password. Check `GET /status` with the same credentials.
+- `403 kntnt_extractor_missing_operate_capability` — you are authenticated, but your user lacks `kntnt_extractor_operate`. Grant it, or deactivate and reactivate the plugin to restore the default administrator grant.
+- `403 kntnt_extractor_missing_manage_capability` — you are authenticated and hold the plugin's on switch, but not `manage_options`.
+
+### Caching
+
+No response from the `kntnt-extractor/v1` namespace may be cached: every one of them depends on who asked, and the refusals most of all. The plugin sends `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` and `Vary: Authorization` on every response whatever its status code, and additionally marks the response uncacheable to LiteSpeed through that plugin's own control API.
+
+This matters because a cached refusal is indistinguishable from a real one. Before this was enforced, a single request with a wrong username on a site behind a page cache could have its 401 stored against the URL and replayed to every later caller — correct credentials included — until the cache was purged. If you ever suspect an intermediary you do not control is still doing this, add a unique query parameter to the request; if the identical request then succeeds, a cache was answering it.
+
 ## Questions, bugs, and feature requests
 
 Have a usage question or something to discuss? Please use [Discussions](https://github.com/Kntnt/kntnt-extractor/discussions).

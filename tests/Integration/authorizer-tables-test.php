@@ -16,7 +16,8 @@
  *         and the plugin creates no account of its own.
  *  - AC5  GET /tables returns the Table list — names with a row-count and a
  *         size estimate — to an authorized caller.
- *  - AC6  A missing capability yields 403.
+ *  - AC6  A missing capability yields 403 for an authenticated caller; ADR-0012
+ *         reversed this for the anonymous case, which now yields 401.
  *  - AC7  Deactivating and reactivating re-runs the grant (self-healing).
  *
  * @package Kntnt\Extractor
@@ -94,12 +95,14 @@ kntnt_extractor_assert( $get_tables_as( $manage_only )->get_status() === 403, 'A
 // Neither capability is refused.
 kntnt_extractor_assert( $get_tables_as( $neither )->get_status() === 403, 'AC6: a caller with neither capability is refused with 403' );
 
-// An anonymous (unauthenticated) caller is definitionally missing the Operate
-// capability, so it must be refused with 403 — not the 401 that WordPress
-// substitutes for an unauthenticated REST request. This is the no-credentials
-// case a real client hits first, and the one AC6 path a logged-in caller can
-// never exercise.
-kntnt_extractor_assert( $get_tables_as( 0 )->get_status() === 403, 'AC6: an anonymous caller is refused with 403, not 401' );
+// An anonymous (unauthenticated) caller is refused with 401, not 403. AC6's
+// original reading — anonymous is definitionally missing the Operate capability,
+// so 403 — was reversed by ADR-0012: the two failures have different remedies
+// (send credentials versus grant a capability), and a status code that cannot
+// tell them apart is what let a cached refusal masquerade as a missing
+// capability. This is the no-credentials case a real client hits first, and the
+// one path a logged-in caller can never exercise.
+kntnt_extractor_assert( $get_tables_as( 0 )->get_status() === 401, 'AC6/ADR-0012: an anonymous caller is refused with 401, not 403' );
 
 // --- AC3: the Operate-only caller reaches the surface but cannot list ---------
 

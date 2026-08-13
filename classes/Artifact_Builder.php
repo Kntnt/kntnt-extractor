@@ -17,19 +17,20 @@ use RuntimeException;
  * Seals a job's selection into a per-segment-encrypted container, chunk by chunk.
  *
  * This is the seam between a resolved job and the crypto container (ADR-0009). It
- * draws each table's dump and each bounded part of each file and hands them to
- * {@see Sealed_Writer} as ordered segments, so plaintext is only ever the single
- * part being sealed and never a whole plain archive on disk. Full-data tables come
- * first, each a single segment; then structure-only tables (issue #16), each a single
- * DDL-only segment; then files, each split into bounded parts sealed under its
- * installation-root-relative path, so the sealed index can reassemble the ordered
- * parts by that path (AC1).
+ * draws each bounded slice of each table's dump and each bounded part of each file and
+ * hands them to {@see Sealed_Writer} as ordered segments, so plaintext is only ever the
+ * single part being sealed and never a whole plain archive on disk. Full-data tables
+ * come first, each split into bounded slices of rows sealed under the table's name;
+ * then structure-only tables (issue #16), each a single DDL-only segment; then files,
+ * each split into bounded parts sealed under its installation-root-relative path. A
+ * table and a file are packaged by the same rule, so the sealed index reassembles both
+ * the same way: concatenate, in index order, every segment carrying the name (AC1).
  *
  * The build is resumable by construction (ADR-0007): {@see advance()} packages
- * exactly ONE bounded chunk — one table dump, or one file part up to the configured
- * chunk size — appends it to the in-progress container, and returns the progress the
- * next tick resumes from, or null once the last chunk has finalized and published
- * the container. Because each segment is sealed independently there is no
+ * exactly ONE bounded chunk — one slice of a table's rows, or one file part up to the
+ * configured chunk size — appends it to the in-progress container, and returns the
+ * progress the next tick resumes from, or null once the last chunk has finalized and
+ * published the container. Because each segment is sealed independently there is no
  * cross-segment authentication state to serialise: resuming reopens the container
  * and appends, never re-encrypting a completed segment.
  *
@@ -52,6 +53,23 @@ final class Artifact_Builder {
 	private const int DEFAULT_CHUNK_SIZE = 8388608;
 
 	/**
+	 * Rows of a table packaged per bounded slice when the knob does not override it.
+	 *
+	 * A table with more rows than this is split into several independently-sealed
+	 * slices, exactly as an oversized file is split into parts, so no single tick has
+	 * to hold — or finish — a whole table (ADR-0013). Rows rather than bytes, because
+	 * rows are what the query itself is bounded by; a site whose rows are unusually
+	 * fat lowers this rather than discovering the ceiling by being killed. Resolved
+	 * through the Config seam under the knob `table_chunk_rows`, so a site tunes it
+	 * with the `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` constant or its filter, and tests
+	 * force multi-slice behaviour on small fixtures. This is only the fallback when
+	 * neither is set.
+	 *
+	 * @since 0.4.0
+	 */
+	private const int DEFAULT_TABLE_CHUNK_ROWS = 1000;
+
+	/**
 	 * Binds the builder to the table dumper and the Config seam it reads.
 	 *
 	 * @since 0.1.0
@@ -67,12 +85,13 @@ final class Artifact_Builder {
 	/**
 	 * Packages one bounded chunk of the job, or finalizes and publishes the container.
 	 *
-	 * A single call seals exactly one segment — the next table dump, or the next
-	 * bounded part of the file currently being packaged — into the in-progress
-	 * container at `$build_path`, appending to whatever earlier ticks left. When that
-	 * segment is the last of the selection the container's sealed index is written and
-	 * the finished container is published to `$download_path` with a single atomic
-	 * rename, so a ready poll never observes a partial container (ADR-0004/0008).
+	 * A single call seals exactly one segment — the next slice of the table currently
+	 * being dumped, or the next bounded part of the file currently being packaged —
+	 * into the in-progress container at `$build_path`, appending to whatever earlier
+	 * ticks left. When that segment is the last of the selection the container's sealed
+	 * index is written and the finished container is published to `$download_path` with
+	 * a single atomic rename, so a ready poll never observes a partial container
+	 * (ADR-0004/0008).
 	 *
 	 * The job's own persisted {@see Build_Progress} (null before the first chunk) says
 	 * where to resume; the return value is the progress the next tick resumes from, or
@@ -112,6 +131,8 @@ final class Artifact_Builder {
 			$file_offset = 0;
 			$file_size = null;
 			$file_mtime = null;
+			$table_offset = 0;
+			$table_cursor = null;
 			$names = [];
 			$writer->open( $public_key );
 		} else {
@@ -129,20 +150,30 @@ final class Artifact_Builder {
 			$file_offset = $progress->file_offset;
 			$file_size = $progress->file_size;
 			$file_mtime = $progress->file_mtime;
+			$table_offset = $progress->table_offset;
+			$table_cursor = $progress->table_cursor;
 			$names = $progress->segment_names;
 			$writer->resume( $public_key, $names, $progress->container_bytes );
 		}
 
-		// Seal the next bounded chunk in a fixed order: every full-data table as one
-		// segment first, then every structure-only table as one DDL-only segment (issue
-		// #16), then each file as bounded parts under its relative path. When all three
-		// selections are exhausted there is no data segment left and only the trailer
-		// remains to be written.
+		// Seal the next bounded chunk in a fixed order: every full-data table as bounded
+		// slices of rows under the table's name first, then every structure-only table as
+		// one DDL-only segment (issue #16), then each file as bounded parts under its
+		// relative path. When all three selections are exhausted there is no data segment
+		// left and only the trailer remains to be written.
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
-			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump( $table ) ) );
+			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows() );
+			$writer->add_segment( $table, $this->stream_of( $slice ) );
 			$names[] = $table;
-			++$tables_done;
+			if ( $table_complete ) {
+				++$tables_done;
+				$table_offset = 0;
+				$table_cursor = null;
+			} else {
+				$table_offset = $next_rows;
+				$table_cursor = $next_cursor;
+			}
 		} elseif ( $structure_done < count( $job->structure_only ) ) {
 			$table = $job->structure_only[ $structure_done ];
 			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump_structure( $table ) ) );
@@ -178,7 +209,7 @@ final class Artifact_Builder {
 		}
 		$container_bytes = $writer->suspend();
 
-		return new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime );
+		return new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor );
 
 	}
 
@@ -355,6 +386,21 @@ final class Artifact_Builder {
 		$configured = $this->config->get( 'chunk_size', self::DEFAULT_CHUNK_SIZE );
 
 		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_CHUNK_SIZE );
+
+	}
+
+	/**
+	 * Resolves the table-slice row budget through the Config seam, clamped to at least one.
+	 *
+	 * @since 0.4.0
+	 *
+	 * @return int The maximum rows packaged into one table slice.
+	 */
+	private function table_chunk_rows(): int {
+
+		$configured = $this->config->get( 'table_chunk_rows', self::DEFAULT_TABLE_CHUNK_ROWS );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_TABLE_CHUNK_ROWS );
 
 	}
 

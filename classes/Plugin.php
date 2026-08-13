@@ -14,6 +14,7 @@ use Kntnt\Extractor\Rest\Audit_Log_Controller;
 use Kntnt\Extractor\Rest\Environment_Controller;
 use Kntnt\Extractor\Rest\Extractions_Controller;
 use Kntnt\Extractor\Rest\Files_Controller;
+use Kntnt\Extractor\Rest\No_Cache;
 use Kntnt\Extractor\Rest\Status_Controller;
 use Kntnt\Extractor\Rest\Tables_Controller;
 
@@ -129,6 +130,16 @@ final class Plugin {
 		add_action( 'rest_api_init', $extractions_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $audit_log_controller->register_routes( ... ) );
 		add_action( Sweeper::SWEEP_HOOK, $sweeper->run( ... ) );
+
+		// Forbid any cache from retaining an Extractor response (ADR-0012). Every
+		// response in the namespace depends on the caller's identity — the refusals
+		// most of all, since WordPress sends no no-cache headers of its own for a
+		// request that resolved to no user, and a page cache that stores such a
+		// refusal replays it to every later caller regardless of credentials. The
+		// filter sits on rest_post_dispatch, the one seam every response in the
+		// namespace passes through, so no endpoint can be added without it.
+		$no_cache = new No_Cache();
+		add_filter( 'rest_post_dispatch', $no_cache->forbid_caching( ... ), 10, 3 );
 
 		// Drive the job unattended (ADR-0007). The self-dispatching loopback on create
 		// and after each chunk is the primary driver, wired in the Dispatcher and the

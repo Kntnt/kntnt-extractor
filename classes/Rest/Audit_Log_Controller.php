@@ -11,6 +11,7 @@ declare( strict_types = 1 );
 namespace Kntnt\Extractor\Rest;
 
 use Kntnt\Extractor\Audit_Log;
+use Kntnt\Extractor\Authorizer;
 use WP_Error;
 use WP_REST_Request;
 use WP_REST_Response;
@@ -105,8 +106,10 @@ final class Audit_Log_Controller {
 	 * Authorises the reader: an administrator, and nothing less.
 	 *
 	 * Gated on `manage_options` alone (ADR-0006), so the endpoint answers 401 to an
-	 * anonymous caller and 403 to a signed-in non-administrator, through the standard
-	 * REST authorization code.
+	 * anonymous caller and 403 to a signed-in non-administrator. Each refusal names
+	 * its own cause with the same codes the shared {@see Authorizer} uses, so a
+	 * caller comparing this endpoint's answer against a data endpoint's compares
+	 * like with like (ADR-0012).
 	 *
 	 * @since 0.1.0
 	 *
@@ -114,14 +117,24 @@ final class Audit_Log_Controller {
 	 */
 	public function authorize(): bool|WP_Error {
 
-		if ( current_user_can( 'manage_options' ) ) {
+		if ( current_user_can( Authorizer::MANAGE_CAPABILITY ) ) {
 			return true;
 		}
 
+		// Separate a caller who never authenticated from an authenticated
+		// non-administrator, rather than reporting both as one opaque refusal.
+		if ( ! is_user_logged_in() ) {
+			return new WP_Error(
+				'kntnt_extractor_not_authenticated',
+				__( 'No WordPress user is authenticated for this request. Send an application password for a user holding the manage_options capability.', 'kntnt-extractor' ),
+				[ 'status' => 401 ],
+			);
+		}
+
 		return new WP_Error(
-			'kntnt_extractor_forbidden',
-			__( 'You are not allowed to read the extraction audit log.', 'kntnt-extractor' ),
-			[ 'status' => rest_authorization_required_code() ],
+			'kntnt_extractor_missing_manage_capability',
+			__( 'Your WordPress user does not hold the manage_options capability that the extraction audit log requires.', 'kntnt-extractor' ),
+			[ 'status' => 403 ],
 		);
 
 	}

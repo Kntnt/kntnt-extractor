@@ -18,7 +18,8 @@
  *    advanced (a queued job omits progress; a running one carries it).
  *  - AC2: a terminal job persisted on disk (here failed) is omitted.
  *  - AC3: a capable job owner never sees another user's job, and vice versa.
- *  - AC4: an anonymous or single-capability caller is refused 403.
+ *  - AC4: a single-capability caller is refused 403, an anonymous one 401
+ *    (ADR-0012).
  *  - AC5: the listing is { jobs: [] } when the caller has no live jobs.
  *  - AC6: after the caller cancels a listed job it drops from the listing, and
  *    after the caller consumes a listed (ready) job it drops too — both terminal
@@ -172,7 +173,7 @@ $selection = static fn(): array => [
 // --- AC4: neither an anonymous nor a single-capability caller may list ---
 
 wp_set_current_user( 0 );
-kntnt_extractor_assert( $get_extractions()->get_status() === 403, 'An anonymous caller is refused the listing (403) (AC4)' );
+kntnt_extractor_assert( $get_extractions()->get_status() === 401, 'An anonymous caller is refused the listing (401, ADR-0012) (AC4)' );
 
 // The gate is composite, so Operate alone (without manage_options) never admits.
 $single = wp_insert_user( [ 'user_login' => 'kntnt_list_single_cap', 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ] );
@@ -283,7 +284,7 @@ kntnt_extractor_assert( ! in_array( $ready_id, $listed_ids( $get_extractions() )
 // --- AC7: the REST API version reports 2 (the coordinated cutover bump) ---
 
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 3, 'GET /status reports api_version 3 (AC7)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 5, 'GET /status reports api_version 5 (AC7)' );
 
 // Leave the suite state clean for later files, including the served downloads sibling.
 remove_filter( 'pre_http_request', $intercept, 10 );

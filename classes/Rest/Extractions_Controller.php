@@ -425,10 +425,13 @@ final class Extractions_Controller {
 	/**
 	 * Reports the poll contract's `error?` for a failed job, or null for any other state.
 	 *
-	 * A failed job carries a generic, translatable message and nothing more: the tick's
-	 * failure catch is deliberately opaque (ADR-0007) so a build failure never surfaces
-	 * filesystem paths, SQL, or other internals to a caller, and the raw failure reason
-	 * is never captured for exactly that reason. Every non-failed state omits the field.
+	 * The field's shape is unchanged — a `message` and nothing more — but the message is
+	 * the reason the job recorded when the plugin diagnosed the failure itself, falling
+	 * back to a generic one otherwise. Only a failure this code can describe safely gets
+	 * a reason: the stalled build (ADR-0013) composes one from the caller's own selection
+	 * and two runtime settings, whereas an unexpected throw is still caught opaquely
+	 * (ADR-0007) and its message is never captured, because it could carry a filesystem
+	 * path or a fragment of SQL. Every non-failed state omits the field.
 	 *
 	 * @since 0.1.0
 	 *
@@ -438,7 +441,7 @@ final class Extractions_Controller {
 	private function error_of( Extraction_Job $job ): ?array {
 
 		return $job->state === Job_State::Failed
-			? [ 'message' => __( 'The extraction failed.', 'kntnt-extractor' ) ]
+			? [ 'message' => $job->error ?? __( 'The extraction failed.', 'kntnt-extractor' ) ]
 			: null;
 
 	}

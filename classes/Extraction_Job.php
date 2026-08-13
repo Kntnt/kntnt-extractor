@@ -39,12 +39,14 @@ final readonly class Extraction_Job {
 	 * per-job tick secret and the sealed artifact's filename, to 3 when the
 	 * chunked, resumable build added durable build-progress (ADR-0007), to 4
 	 * when the last-progress timestamp made the sweep's absolute lifetime ceiling
-	 * measure stalled progress rather than raw age, and to 5 when the structure-only
-	 * table selection (issue #16) joined the tables/files sets.
+	 * measure stalled progress rather than raw age, to 5 when the structure-only
+	 * table selection (issue #16) joined the tables/files sets, and to 6 when chunked
+	 * table dumping (ADR-0013) added the mid-table row position to the build progress
+	 * and the no-progress attempt counter and recorded failure reason to the job.
 	 *
 	 * @since 0.1.0
 	 */
-	public const int SCHEMA_VERSION = 5;
+	public const int SCHEMA_VERSION = 6;
 
 	/**
 	 * Builds a job record from its fully-resolved fields.
@@ -74,6 +76,8 @@ final readonly class Extraction_Job {
 	 * @param string              $artifact    Unguessable filename of the sealed artifact in the job directory.
 	 * @param Build_Progress|null $progress   How far the chunked build has got, or null before it begins.
 	 * @param int|null            $progressed_at Unix timestamp the build last advanced a chunk, or null before it has (treated as the creation time). Distinct from $updated_at, which every state save refreshes: this moves only on real progress, so the sweep's absolute ceiling can tell a slow-but-advancing large job from one whose chunk fails uncatchably every attempt.
+	 * @param int                 $attempts    Chunk attempts begun since the build last advanced, reset to zero by every real advance. The counter the tick driver bounds a chunk that dies uncatchably with (ADR-0013), so a job whose tick is killed from outside PHP fails rather than retrying forever.
+	 * @param string|null         $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Surfaced verbatim to the polling owner, so it carries no filesystem path, SQL, or other internal detail.
 	 */
 	public function __construct(
 		public string $id,
@@ -89,6 +93,8 @@ final readonly class Extraction_Job {
 		public string $artifact,
 		public ?Build_Progress $progress = null,
 		public ?int $progressed_at = null,
+		public int $attempts = 0,
+		public ?string $error = null,
 	) {}
 
 	/**
@@ -105,7 +111,48 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error );
+
+	}
+
+	/**
+	 * Returns a copy that has begun one more chunk attempt, stamped as just updated.
+	 *
+	 * Counted BEFORE the chunk runs and persisted immediately, which is the whole point
+	 * (ADR-0013): a chunk that exhausts the host's memory limit or execution time is
+	 * killed outside PHP, so nothing after it runs and no `catch` can record anything.
+	 * A count taken beforehand survives that kill, and the next tick reads it as
+	 * evidence that the previous one died where it stood. {@see with_progress()} clears
+	 * it again on every real advance, so the count is always consecutive attempts since
+	 * the last progress, never a lifetime total.
+	 *
+	 * @since 0.4.0
+	 *
+	 * @return self A new record identical to this one but counting one more attempt.
+	 */
+	public function with_attempt(): self {
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error );
+
+	}
+
+	/**
+	 * Returns a copy failed with a caller-visible reason, stamped as just updated.
+	 *
+	 * Reserved for a failure the plugin diagnosed itself and can describe safely — the
+	 * stalled build (ADR-0013) is the case that exists. An unexpected throw stays
+	 * opaque and drops the job to failed through {@see with_state()} instead, leaving
+	 * the reason null, because its message could carry a filesystem path or a fragment
+	 * of SQL that must not reach a caller (ADR-0007).
+	 *
+	 * @since 0.4.0
+	 *
+	 * @param string $error Why the job failed, phrased for the polling owner to act on.
+	 * @return self A new record identical to this one but failed and carrying the reason.
+	 */
+	public function with_failure( string $error ): self {
+
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error );
 
 	}
 
@@ -121,6 +168,9 @@ final readonly class Extraction_Job {
 	 * this fresh and is spared, while one whose chunk dies uncatchably every attempt
 	 * never reaches this point and is eventually reclaimed.
 	 *
+	 * Reaching here is also what clears the attempt counter: a chunk that completed is
+	 * proof the previous attempts, however many, were not a permanent stall (ADR-0013).
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Build_Progress $progress The progress the latest chunk reached.
@@ -128,7 +178,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time() );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error );
 
 	}
 
@@ -140,7 +190,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null}|null, progressed_at: int|null}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null}
 	 */
 	public function to_array(): array {
 
@@ -159,6 +209,8 @@ final readonly class Extraction_Job {
 			'artifact' => $this->artifact,
 			'progress' => $this->progress?->to_array(),
 			'progressed_at' => $this->progressed_at,
+			'attempts' => $this->attempts,
+			'error' => $this->error,
 		];
 
 	}
@@ -212,6 +264,15 @@ final readonly class Extraction_Job {
 		// unreadable — the ceiling simply falls back to the creation time for it.
 		$progressed_at = ( isset( $data['progressed_at'] ) && is_int( $data['progressed_at'] ) && $data['progressed_at'] >= 0 ) ? $data['progressed_at'] : null;
 
+		// The attempt counter and the failure reason are schema-6 additions (ADR-0013);
+		// an older record carries neither, so an absent counter reads as no attempts yet
+		// and an absent reason as none recorded. Both are read leniently, like the
+		// timestamp above: a hand-edited value falls back to its default rather than
+		// making a live job unreadable, since neither can corrupt an artifact — the
+		// counter merely costs one more attempt before the stall is called.
+		$attempts = ( isset( $data['attempts'] ) && is_int( $data['attempts'] ) && $data['attempts'] >= 0 ) ? $data['attempts'] : 0;
+		$error = is_string( $data['error'] ?? null ) ? $data['error'] : null;
+
 		// Reject the record unless every field is present and correctly typed; a
 		// pre-execution record without the tick secret or artifact name is a schema
 		// this release cannot drive, so it reads as no readable job here.
@@ -229,7 +290,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error );
 
 	}
 

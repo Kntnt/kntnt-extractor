@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] – 2026-08-13
+
+### Added
+
+- `GET /status` answers the identity question directly (ADR-0012). When a request's credentials resolve to a WordPress user, the response carries `authenticated_as` (that user's `user_login`) and `capabilities` (a map of `kntnt_extractor_operate` and `manage_options` to whether the user holds it) alongside the API version. An anonymous request receives byte-for-byte the handshake it always did, so the version check stays reachable without credentials.
+
+### Changed
+
+- A selected table is now packaged in bounded slices of rows across as many ticks as it takes, exactly as an oversized file is packaged in bounded parts (ADR-0013). Each slice is its own sealed segment recorded in the sealed index under the table's own name, so **a reader must concatenate every segment carrying a name, in index order, to reassemble a table** — the rule file parts have always required. A reader that expected exactly one segment per table, or that kept only the last segment it saw for a given name, will silently lose all but a table's final slice. **Breaking for such a reader.** The rows of a slice are read by keyset pagination on the table's primary key, using the whole key so a composite one (WordPress ships one on `wp_term_relationships`) is paged like any other; a table with no primary key at all falls back to an offset walk. Rows of a keyed table are therefore emitted in primary-key order rather than in whatever order the engine chose, so a dump reloads identically but is not byte-for-byte comparable with one from an earlier release. The slice size is the new `table_chunk_rows` knob (`KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` or its filter, default 1000 rows).
+- Bumped the REST API version to `5` for the artifact's new segment shape above.
+- The shared authorization gate names each refusal instead of returning one opaque code (ADR-0012). A request that resolved to no WordPress user is now `401 kntnt_extractor_not_authenticated`; an authenticated caller missing a capability is `403 kntnt_extractor_missing_operate_capability` or `403 kntnt_extractor_missing_manage_capability`. This reverses the earlier choice to answer an anonymous caller 403 on the grounds that it is definitionally missing the Operate capability: the two failures have different remedies — send credentials versus grant a capability — and a code that cannot separate them is what made a stripped `Authorization` header, an unknown username, a revoked capability, and a cached error response indistinguishable. `GET /audit-log` uses the same two codes for its own `manage_options` gate. **Breaking for a client that tested for 403 to mean "not permitted".**
+- Bumped the REST API version to `4` for the coordinated pair above: the status endpoint's new members and the gate's new refusal codes are one caller-visible contract change.
+
+### Fixed
+
+- A table larger than what one PHP request can carry no longer makes an extraction impossible, and no longer hangs forever pretending to run (ADR-0013). A table used to be packaged whole, in a single tick, from one unbounded `SELECT *` that materialised every row in memory; on a host whose `memory_limit` or `max_execution_time` that exceeded, the tick was killed outright — neither limit raises anything PHP can catch — so the failure path never ran, the stall watchdog restarted the job, and the cycle repeated without bound while the caller polled `state: "running"` with a frozen table counter and no error, indefinitely. Measured on a production site (Extractor 0.3.0, PHP 8.4, MariaDB 11.4), a 12 MB / 2,909-row `wp_posts` completed while a 56 MB / 119,674-row `wp_relevanssi` made no progress in five minutes and a 493 MB / 100,893-row `wp_postmeta` none in forty — which made the site unclonable, since `wp_postmeta` is content and cannot be dropped from a clone. Tables are now dumped in bounded slices resumed across ticks, so the per-tick working set is one slice rather than a whole table.
+- A build whose chunk cannot complete now reports `failed` with a usable reason instead of being retried forever (ADR-0013). A counter incremented before each chunk and cleared by every real advance is what survives a kill that leaves nothing else behind; once a chunk has been begun `max_stall_attempts` times (default 3, `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` or its filter) without ever finishing, the job fails and its poll's `error.message` names how many attempts died, which table and row — or file and byte — they died on, and the host's `memory_limit` and `max_execution_time`, so the cause is diagnosable on a site with no debug log. A job that is merely slow is untouched: every completed chunk resets the counter.
+- A page cache can no longer strand the API on a single failed authentication (ADR-0012). Every response under `kntnt-extractor/v1` — payloads, refusals, and unmatched routes alike, whatever the authentication state — now carries `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` and `Vary: Authorization`, and fires `litespeed_control_set_nocache` because LiteSpeed's page cache decides through its own control API rather than the response headers. WordPress sends its own no-cache headers only for a request it considers authenticated, and an attempt that fails to resolve a user is not: `wp_authenticate_application_password()` short-circuits silently on an unknown login, so the resulting refusal went out looking like a cacheable anonymous error. On a LiteSpeed production site that refusal was cached against the URL and replayed to every later caller, including ones presenting entirely correct credentials — one mistyped username locked the endpoint out until the cache was purged, and only a unique query parameter on the URL made the identical request succeed. The guarantee is applied at `rest_post_dispatch`, the one seam every response in the namespace passes through, so no endpoint can be added outside it.
+
 ## [0.3.0] – 2026-07-23
 
 ### Added
@@ -60,7 +79,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.0

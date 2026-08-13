@@ -43,9 +43,10 @@ if ( ! get_role( 'administrator' )->has_cap( $operate ) ) {
 }
 
 // The endpoint reuses the both-capabilities Authorizer (AC5): neither an
-// anonymous caller nor an Operate-only caller may list.
+// anonymous caller nor an Operate-only caller may list. The anonymous caller
+// earns 401 — a missing identity, not a missing capability (ADR-0012).
 wp_set_current_user( 0 );
-kntnt_extractor_assert( $get_files()->get_status() === 403, 'An anonymous caller is refused GET /files (403)' );
+kntnt_extractor_assert( $get_files()->get_status() === 401, 'An anonymous caller is refused GET /files (401)' );
 $operate_only = wp_insert_user( [ 'user_login' => 'kntnt_files_operate_only', 'user_pass' => wp_generate_password(), 'role' => 'subscriber' ] );
 ( new WP_User( $operate_only ) )->add_cap( $operate );
 wp_set_current_user( $operate_only );

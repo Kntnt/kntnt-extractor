@@ -6,8 +6,8 @@
  * positive and a negative case for every pattern class the deny-list defines
  * (AC1), and `POST /extractions` is proven to reject a selection naming a
  * restricted path with a 422 that names every offending path, decided before
- * both the existence check and the capability gate — so an unauthorized caller
- * still sees the 422, never a 403 or a 404 (AC2/AC3). `wp-config-sample.php` is
+ * both the existence check and the authorization gate — so an unauthorized caller
+ * still sees the 422, never a 401 or a 404 (AC2/AC3). `wp-config-sample.php` is
  * proven to pass the check, and `GET /files` is proven unaffected: a restricted
  * path stays listed, unannotated (AC4).
  *
@@ -90,8 +90,8 @@ add_filter( 'kntnt_extractor_config_work_dir', $force_work );
 $valid_key = base64_encode( random_bytes( 32 ) );
 
 // Run every ladder check as an unauthorized (anonymous) caller: a 422 here proves
-// the restricted-path rejection precedes the capability gate that would otherwise
-// answer 403.
+// the restricted-path rejection precedes the authorization gate that would
+// otherwise answer 401.
 wp_set_current_user( 0 );
 
 $single = $post_extractions( [ 'files' => [ 'wp-config.php.bak-test' ], 'public_key' => $valid_key ] );
@@ -114,10 +114,11 @@ $combined_data = $combined->get_data();
 kntnt_extractor_assert( $combined->get_status() === 422 && is_array( $combined_data ) && ( $combined_data['code'] ?? null ) === 'kntnt_extractor_restricted_path', 'The restricted-path 422 precedes the unknown-table 404 (AC3)' );
 
 // wp-config-sample.php is explicitly not restricted: the request survives the
-// deny-list and reaches the capability gate, which an anonymous caller fails —
-// proving the negative case through the real request path, not only the direct unit check.
+// deny-list and reaches the authorization gate, which an anonymous caller fails
+// with 401 (ADR-0012) — proving the negative case through the real request path,
+// not only the direct unit check.
 $sample = $post_extractions( [ 'files' => [ 'wp-config-sample.php' ], 'public_key' => $valid_key ] );
-kntnt_extractor_assert( $sample->get_status() === 403, 'wp-config-sample.php clears the deny-list and reaches the capability gate (403 for this anonymous caller)' );
+kntnt_extractor_assert( $sample->get_status() === 401, 'wp-config-sample.php clears the deny-list and reaches the authorization gate (401 for this anonymous caller)' );
 
 // No job may have been created by any of the rejected attempts above.
 kntnt_extractor_assert( ! is_dir( $work ) || count( array_diff( scandir( $work ) ?: [], [ '.', '..', 'index.html', '.htaccess', 'web.config' ] ) ) === 0, 'A rejected create persists no job' );
