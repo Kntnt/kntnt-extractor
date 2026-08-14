@@ -417,7 +417,7 @@ final class Extractions_Controller {
 		// "N of M tables" that spans both selections, full then structure-only.
 		$tables_total = count( $job->tables ) + count( $job->structure_only );
 		$files_total = count( $job->files );
-		$chunks_done = $job->progress === null ? 0 : count( $job->progress->segment_names );
+		$chunks_done = $job->progress === null ? 0 : $job->progress->segment_count;
 
 		// A ready job is complete by definition, so report every table and file done
 		// rather than the penultimate chunk's persisted progress. A running job reports

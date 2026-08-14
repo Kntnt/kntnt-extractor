@@ -27,10 +27,11 @@ namespace Kntnt\Extractor;
  * the step did, and {@see $complete} carries the "no successor" signal on its own.
  *
  * On a completing step the progress is a closing balance, not a resume anchor. Its
- * counters and its segment-name list are exact and are what a poll reports; its
- * `container_bytes` is the last committed offset, carried through unchanged because a
- * finished container is never resumed and the writer is already closed by the time the
- * step is known to be the last one. Nothing reads it after completion.
+ * counters and its segment count are exact and are what a poll reports; its
+ * `container_bytes` and `index_bytes` are the last committed offsets, carried through
+ * unchanged because a finished container is never resumed and the writer is already
+ * closed by the time the step is known to be the last one. Nothing reads them after
+ * completion.
  *
  * @since 0.5.1
  */

@@ -120,14 +120,14 @@ $drive_to_ready = static function ( array $selection ) use ( $post_extractions, 
 	if ( $id === '' ) {
 		return '';
 	}
-	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 	$secret = is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
 
 	// The build is chunked (one bounded segment per tick, ADR-0007), so drive it
 	// across ticks until it reaches ready, exactly as the loopback loop would.
 	$driven = 0;
 	while ( $driven < 200 ) {
-		$current = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+		$current = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 		if ( is_array( $current ) && ( $current['state'] ?? null ) === 'ready' ) {
 			break;
 		}
@@ -193,15 +193,15 @@ $before_count = is_array( $before_failure['entries'] ?? null ) ? count( $before_
 
 $fail_response = $post_extractions( [ 'tables' => [ $wpdb->options ], 'files' => [], 'public_key' => $public_key ] );
 $fail_id = is_array( $fail_response->get_data() ) ? (string) ( $fail_response->get_data()['id'] ?? '' ) : '';
-$fail_state = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/job.json' ), true );
+$fail_state = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/state.json' ), true );
 $fail_secret = is_array( $fail_state ) && is_string( $fail_state['tick_secret'] ?? null ) ? $fail_state['tick_secret'] : '';
 
 // Plant the attempt count a chunk killed outside PHP leaves behind, which is exactly
 // how the production job died, then tick once so the driver fails it.
 $fail_state['attempts'] = 3;
-file_put_contents( $work . '/' . $fail_id . '/job.json', (string) wp_json_encode( $fail_state ) );
+file_put_contents( $work . '/' . $fail_id . '/state.json', (string) wp_json_encode( $fail_state ) );
 $tick( $fail_id, $fail_secret );
-$failed_job = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/job.json' ), true );
+$failed_job = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/state.json' ), true );
 kntnt_extractor_assert( is_array( $failed_job ) && ( $failed_job['state'] ?? null ) === 'failed', 'A job whose chunk never advances reaches failed (AC7)' );
 
 $after_failure = $get_audit()->get_data();

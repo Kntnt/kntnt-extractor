@@ -50,7 +50,31 @@ use RuntimeException;
  * ordered names, and walks the self-framed segment records in between. Every
  * variable-length field carries its own length, so the format depends on no
  * `sodium` size constant. Segment sizes and count are visible framing; the names
- * and every plaintext are not.
+ * and every plaintext are not. Inside the index each name is likewise prefixed with
+ * its own 64-bit little-endian length, so the list round-trips any byte sequence a
+ * file path may hold, independent of character encoding, with no delimiter it could
+ * collide with.
+ *
+ * ## The index sidecar
+ *
+ * The index payload is accumulated on disk beside the in-progress container rather
+ * than in memory or in the job record. A build spans thousands of ticks, and the
+ * name list grows by one entry per segment, so carrying it through the job record
+ * made every per-chunk save re-encode and rewrite a document that grew without
+ * bound — the single largest cost in a large extraction, and one that bought
+ * nothing, since only {@see finalize()} ever reads the list. Appending each name to
+ * a sidecar as it is sealed costs one write of its own length and keeps the job's
+ * persisted state O(1) in the selection.
+ *
+ * The sidecar holds exactly the bytes {@see finalize()} seals — the same
+ * length-prefixed framing the index has always used — so it is the index payload
+ * under construction, not a second encoding of it. It is anchored the same way the
+ * container is: {@see suspend()} reports its committed length, {@see resume()}
+ * truncates back to that length, and the two roll back together, so a tick killed
+ * between appending a segment and persisting its progress leaves neither file
+ * ahead of the other. It lives in the job's own deny-hardened state directory, is
+ * never published, and is removed at finalize once the names are sealed into the
+ * container for good.
  *
  * @since 0.1.0
  */
@@ -96,13 +120,23 @@ final class Sealed_Writer {
 	private ?string $public_key = null;
 
 	/**
-	 * Names of the segments added so far, in write order, for the sealed index.
+	 * Suffix appended to the container's path to name its index sidecar.
 	 *
-	 * @since 0.1.0
-	 *
-	 * @var list<string>
+	 * @since 0.6.0
 	 */
-	private array $segment_names = [];
+	private const string INDEX_SUFFIX = '.names';
+
+	/**
+	 * Handle to the index sidecar while the container is open, `null` otherwise.
+	 *
+	 * Opened and closed in lockstep with {@see $handle}, so the two files are only
+	 * ever written by the same live writer and are suspended together.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @var resource|null
+	 */
+	private $index_handle = null;
 
 	/**
 	 * Binds the writer to the path its container will be written to.
@@ -158,10 +192,66 @@ final class Sealed_Writer {
 			throw new RuntimeException( 'Unable to open the sealed container for writing.' );
 		}
 
+		// Start the index sidecar empty, discarding any residue an abandoned build at
+		// this path left behind, so the accumulated names describe this container alone.
+		$index_handle = fopen( $this->index_path(), 'wb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- the container's own index sidecar, appended one name per segment; see the class docblock.
+		if ( $index_handle === false ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar could not be opened; see the fopen above.
+			throw new RuntimeException( 'Unable to open the sealed container index for writing.' );
+		}
+
 		// Lay down the versioned format header and record the open container.
 		$this->write( $handle, self::MAGIC . chr( self::FORMAT_VERSION ) );
 		$this->handle = $handle;
+		$this->index_handle = $index_handle;
 		$this->public_key = $public_key;
+
+	}
+
+	/**
+	 * Writes the index sidecar from an already-committed name list, returning its length.
+	 *
+	 * The migration path for a job whose build began under record schema 6, where the
+	 * committed names lived in the job record and no sidecar existed. Those names ARE
+	 * the committed index payload, so writing them out reconstructs exactly the sidecar
+	 * this build would have had, and the returned length is the anchor
+	 * {@see resume()} then truncates back to. Called at most once per job, on the first
+	 * tick after the upgrade; every later tick resumes from the sidecar like any other.
+	 *
+	 * Without it an in-flight build could not be resumed at all — {@see resume()} fails
+	 * closed on a missing sidecar rather than silently sealing an index that names only
+	 * the segments written after the upgrade — and an extraction hours into its run
+	 * would be abandoned by installing a release. Schema 6 is the last shape that
+	 * carried the names, so this can be dropped once no such record can still be live.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param array<int, string> $committed_names Names of the segments already written, in order.
+	 * @return int Byte length of the reconstructed sidecar.
+	 *
+	 * @throws LogicException   When a container is already open on this writer.
+	 * @throws RuntimeException When the sidecar cannot be written in full.
+	 */
+	public function seed_index( array $committed_names ): int {
+
+		// Refuse to rewrite the sidecar under a live writer: it is append-only from
+		// open()/resume() onwards, and rewriting it whole would drop names already sealed.
+		if ( $this->handle !== null ) {
+			throw new LogicException( 'Sealed_Writer::seed_index() cannot rewrite the index of an open container; call finalize() or suspend() first.' );
+		}
+
+		// Encode the names in the index's own framing and publish the sidecar whole; a
+		// short write would understate the anchor and silently drop names on resume.
+		$payload = '';
+		foreach ( $committed_names as $name ) {
+			$payload .= pack( 'P', strlen( $name ) ) . $name;
+		}
+		$written = file_put_contents( $this->index_path(), $payload ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- reconstructing the container's own index sidecar in the plugin's scratch area; WP_Filesystem would demand FTP credentials on some hosts.
+		if ( $written === false || $written < strlen( $payload ) ) {
+			throw new RuntimeException( 'Unable to reconstruct the sealed container index.' );
+		}
+
+		return strlen( $payload );
 
 	}
 
@@ -171,38 +261,43 @@ final class Sealed_Writer {
 	 * The chunked, resumable build (ADR-0007) writes one bounded segment per tick and
 	 * finalizes only once, so between ticks the container is a header plus the
 	 * segments sealed so far, with no trailer yet. Resuming restores exactly the
-	 * state {@see add_segment()} and {@see finalize()} need — the caller's key and the
-	 * ordered names already written — and reopens the file for appending. Because
-	 * each segment is sealed independently there is no cross-segment authentication
-	 * state to restore; only this bookkeeping.
+	 * state {@see add_segment()} and {@see finalize()} need — the caller's key, and the
+	 * two files positioned to append — and nothing else. Because each segment is sealed
+	 * independently there is no cross-segment authentication state to restore, and the
+	 * ordered names are already on disk in the sidecar rather than in any caller's hand.
 	 *
-	 * The container is first truncated back to the committed byte length. That length
-	 * is the resume anchor persisted after the last clean tick, so a partial record a
-	 * crashed tick left past it is discarded here rather than sealed into the result —
-	 * the write path's counterpart to {@see write()}'s short-write guard.
+	 * The container and its index sidecar are first truncated back to their committed
+	 * byte lengths. Those lengths are the resume anchors persisted after the last clean
+	 * tick, so a partial record a crashed tick left past either one is discarded here
+	 * rather than sealed into the result — the write path's counterpart to
+	 * {@see write()}'s short-write guard. Both are rolled back in the same call because
+	 * a crash can land between the two appends: truncating only the container would
+	 * leave the index naming a segment that no longer exists.
 	 *
-	 * The anchor is trusted only after it is proven consistent with the file on disk.
-	 * A container shorter than the anchor — a torn progress/container write (they live
+	 * An anchor is trusted only after it is proven consistent with the file on disk.
+	 * A file shorter than its anchor — a torn progress/container write (they live
 	 * in separate files with no ordering guarantee), a truncated file, or tampering —
 	 * would otherwise have `ftruncate` EXTEND it with NUL bytes, sealing a run of zeros
 	 * into the record stream and publishing a well-framed but unopenable artifact.
-	 * Every neighbouring path in this seam fails closed; so does this one.
+	 * Every neighbouring path in this seam fails closed; so does this one. A missing
+	 * sidecar fails closed for the same reason: it means the committed names are gone,
+	 * and continuing would publish an index that omits every segment sealed so far.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string             $public_key      The caller's ephemeral X25519 public key, exactly
-	 *                                             `SODIUM_CRYPTO_BOX_PUBLICKEYBYTES` bytes.
-	 * @param array<int, string> $committed_names Names of the segments already written, in order.
-	 * @param int                $committed_bytes Byte length the container is truncated back to.
+	 * @param string $public_key            The caller's ephemeral X25519 public key, exactly
+	 *                                      `SODIUM_CRYPTO_BOX_PUBLICKEYBYTES` bytes.
+	 * @param int    $committed_bytes       Byte length the container is truncated back to.
+	 * @param int    $committed_index_bytes Byte length the index sidecar is truncated back to.
 	 * @return void
 	 *
 	 * @throws LogicException     When a container is already open on this writer.
 	 * @throws Invalid_Public_Key When the key is absent or the wrong length.
-	 * @throws RuntimeException    When the anchor is inconsistent with the container on
-	 *                             disk, or the container cannot be reopened, truncated,
-	 *                             or positioned for appending.
+	 * @throws RuntimeException    When either anchor is inconsistent with the file on
+	 *                             disk, or the container or its sidecar cannot be
+	 *                             reopened, truncated, or positioned for appending.
 	 */
-	public function resume( string $public_key, array $committed_names, int $committed_bytes ): void {
+	public function resume( string $public_key, int $committed_bytes, int $committed_index_bytes ): void {
 
 		// Refuse to reopen a live writer, and reject a malformed key, exactly as open()
 		// does — the same lifecycle and key contract applies to a resumed container.
@@ -224,6 +319,15 @@ final class Sealed_Writer {
 			throw new RuntimeException( 'The in-progress sealed container is shorter than its committed offset.' );
 		}
 
+		// Hold the sidecar to the same standard: a missing one means the committed names
+		// are gone, and a short one means it disagrees with the anchor. Either way the
+		// index this build would publish is not the one it has sealed, so refuse rather
+		// than continue and name only the segments still to come.
+		$index_size = is_file( $this->index_path() ) ? filesize( $this->index_path() ) : false;
+		if ( $committed_index_bytes < 0 || $index_size === false || $index_size < $committed_index_bytes ) {
+			throw new RuntimeException( 'The in-progress sealed container index is missing or shorter than its committed offset.' );
+		}
+
 		// Reopen the existing container for in-place update and verify it still begins
 		// with this format's header before trusting the anchor, then drop anything past
 		// the committed offset a crashed tick may have left and position at the end so
@@ -242,10 +346,21 @@ final class Sealed_Writer {
 			throw new RuntimeException( 'Unable to position the in-progress sealed container for appending.' );
 		}
 
+		// Roll the sidecar back to its own anchor in the same way, so a name a crashed
+		// tick appended for a segment the truncation above just discarded goes with it.
+		$index_handle = fopen( $this->index_path(), 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming the container's own index sidecar; see the class docblock.
+		if ( $index_handle === false || ftruncate( $index_handle, $committed_index_bytes ) === false || fseek( $index_handle, $committed_index_bytes ) === -1 ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar could not be positioned; see open().
+			if ( $index_handle !== false ) {
+				fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the sidecar handle after a failed truncate or seek.
+			}
+			throw new RuntimeException( 'Unable to position the in-progress sealed container index for appending.' );
+		}
+
 		// Restore the writer's state so add_segment() and finalize() continue the build.
 		$this->handle = $handle;
+		$this->index_handle = $index_handle;
 		$this->public_key = $public_key;
-		$this->segment_names = array_values( $committed_names );
 
 	}
 
@@ -254,41 +369,51 @@ final class Sealed_Writer {
 	 *
 	 * This ends a non-final chunk: the container keeps its header and the segments
 	 * sealed so far, but no trailer, so the next tick can {@see resume()} it. The
-	 * returned length is the committed byte offset the resume truncates back to. Like
-	 * {@see finalize()}, this drops every reference, but unlike it the container is
-	 * left mid-build rather than sealed shut.
+	 * returned lengths are the committed byte offsets the resume truncates each file
+	 * back to. Like {@see finalize()}, this drops every reference, but unlike it the
+	 * container is left mid-build rather than sealed shut.
+	 *
+	 * Both files are suspended in one call, and a failure in either escalates, because
+	 * the pair of offsets is only usable as a pair: persisting one that reached disk
+	 * beside one that did not would let the next resume roll the two files back to
+	 * points that disagree.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return int The committed byte length of the in-progress container.
+	 * @return array{0: int, 1: int} The committed byte lengths of the in-progress
+	 *         container and of its index sidecar.
 	 *
 	 * @throws LogicException   When called before {@see open()} or {@see resume()}.
-	 * @throws RuntimeException When the container cannot be flushed, measured, or closed.
+	 * @throws RuntimeException When either file cannot be flushed, measured, or closed.
 	 */
-	public function suspend(): int {
+	public function suspend(): array {
 
-		// Require an open container: guards the ordering contract and narrows the handle
+		// Require an open container: guards the ordering contract and narrows the handles
 		// away from null.
 		$handle = $this->handle;
-		if ( $handle === null ) {
+		$index_handle = $this->index_handle;
+		if ( $handle === null || $index_handle === null ) {
 			throw new LogicException( 'Sealed_Writer::open() or resume() must be called before suspend().' );
 		}
 
-		// Flush buffered bytes and measure the committed length before closing, so the
-		// next tick's resume truncates to exactly what reached disk. A failed flush or
-		// unreadable position means the offset would be untrustworthy, so it is escalated
-		// rather than persisted.
+		// Flush buffered bytes and measure both committed lengths before closing, so the
+		// next tick's resume truncates each file to exactly what reached disk. A failed
+		// flush or unreadable position means an offset would be untrustworthy, so it is
+		// escalated rather than persisted.
 		$flushed = fflush( $handle );
+		$index_flushed = fflush( $index_handle );
 		$bytes = ftell( $handle );
+		$index_bytes = ftell( $index_handle );
 		$closed = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- suspending a streaming encrypt-as-you-go write; see open().
+		$index_closed = fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- suspending the container's own index sidecar; see open().
 		$this->handle = null;
+		$this->index_handle = null;
 		$this->public_key = null;
-		$this->segment_names = [];
-		if ( $flushed === false || $bytes === false || $closed === false ) {
+		if ( $flushed === false || $index_flushed === false || $bytes === false || $index_bytes === false || $closed === false || $index_closed === false ) {
 			throw new RuntimeException( 'Unable to suspend the in-progress sealed container.' );
 		}
 
-		return $bytes;
+		return [ $bytes, $index_bytes ];
 
 	}
 
@@ -314,10 +439,11 @@ final class Sealed_Writer {
 	public function add_segment( string $name, $stream ): void {
 
 		// Require an open container: this guards the open→add→finalize order and
-		// narrows the handle and key away from null for the operations below.
+		// narrows the handles and key away from null for the operations below.
 		$handle = $this->handle;
+		$index_handle = $this->index_handle;
 		$public_key = $this->public_key;
-		if ( $handle === null || $public_key === null ) {
+		if ( $handle === null || $index_handle === null || $public_key === null ) {
 			throw new LogicException( 'Sealed_Writer::open() must be called before add_segment().' );
 		}
 
@@ -339,11 +465,12 @@ final class Sealed_Writer {
 		$this->wipe( $key );
 		$this->wipe( $plaintext );
 
-		// Append the self-framed segment record and remember its name. Both the
+		// Append the self-framed segment record and its name's index entry. Both the
 		// sealed key and the ciphertext carry their own length so the reader needs
-		// no box_seal size constant.
+		// no box_seal size constant, and the name is framed the same way so the
+		// sidecar is the index payload as it accumulates.
 		$this->write( $handle, pack( 'P', strlen( $sealed_key ) ) . $sealed_key . $nonce . pack( 'P', strlen( $ciphertext ) ) . $ciphertext );
-		$this->segment_names[] = $name;
+		$this->write( $index_handle, pack( 'P', strlen( $name ) ) . $name );
 
 	}
 
@@ -351,43 +478,92 @@ final class Sealed_Writer {
 	 * Seals the index, writes the trailer, and closes the container.
 	 *
 	 * After this call the writer holds no value able to open the artifact: the
-	 * handle is closed, the public key and the name list are dropped, and every
-	 * segment's symmetric key was already zeroed in {@see add_segment()}.
+	 * handles are closed, the public key is dropped, the index sidecar is removed,
+	 * and every segment's symmetric key was already zeroed in {@see add_segment()}.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @return void
 	 *
 	 * @throws LogicException   When called before {@see open()}.
-	 * @throws RuntimeException When the trailer cannot be written or the
-	 *                          container cannot be closed cleanly.
+	 * @throws RuntimeException When the index cannot be read, the trailer cannot be
+	 *                          written, or the container cannot be closed cleanly.
 	 */
 	public function finalize(): void {
 
 		// Require an open container: guards the ordering contract and narrows the
-		// handle and key away from null.
+		// handles and key away from null.
 		$handle = $this->handle;
+		$index_handle = $this->index_handle;
 		$public_key = $this->public_key;
-		if ( $handle === null || $public_key === null ) {
+		if ( $handle === null || $index_handle === null || $public_key === null ) {
 			throw new LogicException( 'Sealed_Writer::open() must be called before finalize().' );
+		}
+
+		// Close the sidecar and read back the payload it accumulated — the names of
+		// every segment this container holds, already in the index's own framing. A
+		// short flush here would silently drop the tail of the index, so an unreadable
+		// payload fails the build rather than sealing an incomplete one.
+		$index_closed = fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the index sidecar before reading the payload it accumulated; see open().
+		$this->index_handle = null;
+		$index = $index_closed === false ? false : file_get_contents( $this->index_path() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- reading the container's own index sidecar from the plugin's scratch area, not a remote resource.
+		if ( $index === false ) {
+			throw new RuntimeException( 'Unable to read the sealed container index before finalizing.' );
 		}
 
 		// Seal the index of names so a holder of only the artifact cannot tell
 		// which tables or files it contains, then frame its length as the trailer
 		// the reader locates it by.
-		$sealed_index = sodium_crypto_box_seal( $this->encode_index(), $public_key );
+		$sealed_index = sodium_crypto_box_seal( $index, $public_key );
 		$this->write( $handle, $sealed_index . pack( 'P', strlen( $sealed_index ) ) );
 
-		// Close the container and drop every reference, so no value able to open
-		// the artifact survives this call. A failed close can mean buffered
-		// trailer bytes never reached disk — a truncated artifact — so it is
-		// escalated, but only once the references are already gone.
+		// Close the container, drop every reference, and remove the sidecar now that
+		// the names it held are sealed into the container for good, so no value able to
+		// open the artifact and no plaintext name list survives this call. A failed
+		// close can mean buffered trailer bytes never reached disk — a truncated
+		// artifact — so it is escalated, but only once the references are already gone.
 		$closed = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- streaming encrypt-as-you-go write; see open().
 		$this->handle = null;
 		$this->public_key = null;
-		$this->segment_names = [];
+		$this->discard_index();
 		if ( $closed === false ) {
 			throw new RuntimeException( 'Unable to close the sealed container after writing its trailer.' );
+		}
+
+	}
+
+	/**
+	 * Returns the path of the container's index sidecar.
+	 *
+	 * Derived from the container's own path so the two are always siblings and a
+	 * relocated working directory moves both together.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return string Absolute path to the index sidecar.
+	 */
+	private function index_path(): string {
+
+		return $this->destination_path . self::INDEX_SUFFIX;
+
+	}
+
+	/**
+	 * Removes the index sidecar once its names are sealed into the container.
+	 *
+	 * Best-effort: by the time this runs the trailer is written and the sidecar is
+	 * pure residue, so a failure to unlink it cannot affect the artifact and must not
+	 * mask the close error {@see finalize()} may be about to raise. The job directory
+	 * is removed whole on consume, cancel, or sweep in any case.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return void
+	 */
+	private function discard_index(): void {
+
+		if ( is_file( $this->index_path() ) ) {
+			unlink( $this->index_path() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own index sidecar once its names are sealed into the container.
 		}
 
 	}
@@ -453,28 +629,6 @@ final class Sealed_Writer {
 			return;
 		}
 		$secret = str_repeat( "\x00", strlen( $secret ) );
-
-	}
-
-	/**
-	 * Serialises the segment names into a length-prefixed byte string.
-	 *
-	 * Each name is prefixed with its 64-bit little-endian length so the index
-	 * round-trips any byte sequence a file path may hold, independent of
-	 * character encoding, without a delimiter it could collide with.
-	 *
-	 * @since 0.1.0
-	 *
-	 * @return string The unsealed index payload.
-	 */
-	private function encode_index(): string {
-
-		$index = '';
-		foreach ( $this->segment_names as $name ) {
-			$index .= pack( 'P', strlen( $name ) ) . $name;
-		}
-
-		return $index;
 
 	}
 

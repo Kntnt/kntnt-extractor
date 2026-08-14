@@ -230,7 +230,7 @@ kntnt_extractor_assert( $id !== '' && preg_match( '/^[a-f0-9]{32}$/', $id ) === 
 
 // The per-job secret and the artifact filename live in the job's on-disk state;
 // the server's own loopback reads them from there, and so does this test.
-$state_path = $work . '/' . $id . '/job.json';
+$state_path = $work . '/' . $id . '/state.json';
 $state = is_file( $state_path ) ? json_decode( (string) file_get_contents( $state_path ), true ) : null;
 $tick_secret = is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
 kntnt_extractor_assert( $tick_secret !== '', 'The job persists a non-empty per-job tick secret' );
@@ -338,10 +338,10 @@ $governing_deny = static function ( string $path, string $stop_at ): bool {
 kntnt_extractor_assert( ! $governing_deny( $artifact_path, $basedir ), 'No deny-all rule governs the artifact path, so a web server serves it directly (AC4)' );
 kntnt_extractor_assert( $governing_deny( $state_path, $basedir ), 'The job state directory IS deny-governed (AC4 positive control: the servability check detects a deny)' );
 
-// The served directory holds sealed artifacts only: job.json never sits beside the
+// The served directory holds sealed artifacts only: no job record ever sits beside the
 // public link, so no sibling fetch derived from the download_url reaches the tick
 // secret or the plaintext selection, on any web server (ADR-0008/0009).
-kntnt_extractor_assert( ! is_file( dirname( $artifact_path ) . '/job.json' ), 'The served artifact directory contains no job.json (AC4)' );
+kntnt_extractor_assert( ! is_file( dirname( $artifact_path ) . '/job.json' ) && ! is_file( dirname( $artifact_path ) . '/state.json' ), 'The served artifact directory contains neither half of a job record (AC4)' );
 
 // --- AC2/AC5: the container holds one sealed segment per selected resource ---
 
@@ -407,7 +407,7 @@ kntnt_extractor_assert( str_contains( $state_raw, base64_encode( $public_key ) )
 wp_set_current_user( $owner->ID );
 $n_response = $post_extractions( $selection );
 $n_id = is_array( $n_response->get_data() ) ? (string) ( $n_response->get_data()['id'] ?? '' ) : '';
-$n_state = json_decode( (string) file_get_contents( $work . '/' . $n_id . '/job.json' ), true );
+$n_state = json_decode( (string) file_get_contents( $work . '/' . $n_id . '/state.json' ), true );
 $n_secret = is_array( $n_state ) ? (string) ( $n_state['tick_secret'] ?? '' ) : '';
 
 remove_all_actions( 'shutdown' );

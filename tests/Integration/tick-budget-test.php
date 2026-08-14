@@ -136,7 +136,7 @@ add_filter( 'pre_http_request', $intercept, 10, 3 );
 
 // Reads a job's persisted per-job secret straight from its on-disk state.
 $secret_of = static function ( string $id ) use ( $work ): string {
-	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 	return is_array( $state ) ? (string) ( $state['tick_secret'] ?? '' ) : '';
 };
 
@@ -144,9 +144,9 @@ $secret_of = static function ( string $id ) use ( $work ): string {
 // Artifact_Builder seals exactly one segment per bounded chunk, so this count is a
 // direct, seam-free measure of how many chunks a tick has packaged.
 $segments_of = static function ( string $id ) use ( $work ): int {
-	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
-	$names = is_array( $state ) ? ( $state['progress']['segment_names'] ?? null ) : null;
-	return is_array( $names ) ? count( $names ) : 0;
+	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
+	$count = is_array( $state ) ? ( $state['progress']['segment_count'] ?? null ) : null;
+	return is_int( $count ) ? $count : 0;
 };
 
 // Counts captured nudges to a given job's own tick endpoint.

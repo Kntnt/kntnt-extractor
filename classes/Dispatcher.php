@@ -541,7 +541,7 @@ final class Dispatcher {
 		// past all three died writing the container's sealed index, which names nothing
 		// of the selection. A job killed before its first chunk ever persisted progress
 		// stalled at the start of the build, which a zeroed progress describes exactly.
-		$progress = $job->progress ?? new Build_Progress( 0, 0, 0, 0, 0, [] );
+		$progress = $job->progress ?? new Build_Progress( 0, 0, 0, 0, 0, 0, 0 );
 		$table = $job->tables[ $progress->tables_done ] ?? null;
 		$structure = $job->structure_only[ $progress->structure_done ] ?? null;
 		$file = $job->files[ $progress->file_index ] ?? null;

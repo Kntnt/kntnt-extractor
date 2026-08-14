@@ -105,14 +105,14 @@ $create = static function () use ( $store, $owner, $selection ): string {
 // fields — timestamps, the artifact token — into a fixture the constructor's own
 // stamping would never produce.
 $read_json = static function ( string $id ) use ( $work ): array {
-	$data = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+	$data = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 	return is_array( $data ) ? $data : [];
 };
 
 // Writes a decoded record back over a job's state file verbatim, the escape hatch
 // that lets these tests age a job or plant a hostile field directly.
 $write_json = static function ( string $id, array $data ) use ( $work ): void {
-	file_put_contents( $work . '/' . $id . '/job.json', (string) wp_json_encode( $data ) );
+	file_put_contents( $work . '/' . $id . '/state.json', (string) wp_json_encode( $data ) );
 };
 
 $hour = 3600;
@@ -183,7 +183,7 @@ kntnt_extractor_assert( in_array( $locked, $swept, true ) && ! is_dir( $work . '
 // throw nor rebuild the record from the stale snapshot it was handed.
 $gone = $create();
 $snapshot = $store->find( $gone );
-file_put_contents( $work . '/' . $gone . '/job.json', 'not a valid job record' );
+file_put_contents( $work . '/' . $gone . '/state.json', 'not a valid job record' );
 
 $threw = false;
 $result = null;

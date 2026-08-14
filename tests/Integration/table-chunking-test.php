@@ -154,7 +154,7 @@ $open_index = static function ( string $sealed_index, string $keypair ): ?array 
 
 // Reads a job's persisted state file into a decoded array, or null when absent.
 $read_state = static function ( string $work, string $id ): ?array {
-	$path = $work . '/' . $id . '/job.json';
+	$path = $work . '/' . $id . '/state.json';
 	$decoded = is_file( $path ) ? json_decode( (string) file_get_contents( $path ), true ) : null;
 	return is_array( $decoded ) ? $decoded : null;
 };
@@ -162,7 +162,7 @@ $read_state = static function ( string $work, string $id ): ?array {
 // Writes a decoded record back over a job's state file verbatim — the escape hatch
 // that lets a test plant an attempt count no successful run would ever produce.
 $write_state = static function ( string $work, string $id, array $data ): void {
-	file_put_contents( $work . '/' . $id . '/job.json', (string) wp_json_encode( $data ) );
+	file_put_contents( $work . '/' . $id . '/state.json', (string) wp_json_encode( $data ) );
 };
 
 // Make the Operate grant a precondition regardless of file order.

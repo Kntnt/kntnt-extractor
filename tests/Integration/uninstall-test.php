@@ -88,7 +88,7 @@ $id_of = static function ( WP_REST_Response $response ): string {
 
 // Reads a field out of a job's on-disk state file, or '' when it is unreadable.
 $state_field = static function ( string $work, string $id, string $field ): string {
-	$path = $work . '/' . $id . '/job.json';
+	$path = $work . '/' . $id . '/state.json';
 	$state = is_file( $path ) ? json_decode( (string) file_get_contents( $path ), true ) : null;
 	return is_array( $state ) && is_string( $state[ $field ] ?? null ) ? $state[ $field ] : '';
 };

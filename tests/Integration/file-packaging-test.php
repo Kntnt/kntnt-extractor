@@ -140,7 +140,7 @@ $open_index = static function ( string $sealed_index, string $keypair ): ?array 
 
 // Reads a job's persisted state file into a decoded array, or null when absent.
 $read_state = static function ( string $work, string $id ): ?array {
-	$path = $work . '/' . $id . '/job.json';
+	$path = $work . '/' . $id . '/state.json';
 	$decoded = is_file( $path ) ? json_decode( (string) file_get_contents( $path ), true ) : null;
 	return is_array( $decoded ) ? $decoded : null;
 };
@@ -313,8 +313,7 @@ $partial = $read_state( $work, $r_id );
 $progress = is_array( $partial ) && is_array( $partial['progress'] ?? null ) ? $partial['progress'] : null;
 kntnt_extractor_assert( is_array( $partial ) && ( $partial['state'] ?? null ) === 'running', 'A partially-driven job is still running between ticks (AC3)' );
 kntnt_extractor_assert( $progress !== null, 'Build progress is persisted in the job record (AC3)' );
-$segment_names = is_array( $progress ) && is_array( $progress['segment_names'] ?? null ) ? $progress['segment_names'] : [];
-kntnt_extractor_assert( count( $segment_names ) === 2, 'Progress records exactly the two completed segments so far (AC3)' );
+kntnt_extractor_assert( ( $progress['segment_count'] ?? null ) === 2, 'Progress records exactly the two completed segments so far (AC3)' );
 kntnt_extractor_assert( is_int( $progress['container_bytes'] ?? null ) && $progress['container_bytes'] > 0, 'Progress records the byte offset within the in-progress container (AC3)' );
 
 // Simulate a crashed partial write: garbage appended past the committed offset

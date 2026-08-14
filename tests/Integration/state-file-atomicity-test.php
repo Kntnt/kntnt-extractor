@@ -4,7 +4,7 @@
  *
  * `GET /extractions/{id}` returned a spurious `404 kntnt_extractor_no_such_job`
  * twice while the job was demonstrably alive and progressing. The cause was a
- * non-atomic in-place rewrite of `job.json`: `Job_Store::write_file()` truncated
+ * non-atomic in-place rewrite of the live state file: `Job_Store::write_file()` truncated
  * and rewrote the live state file on every save, so a poll that read it inside that
  * window saw a zero-length or partial file and `find()` folded that into "no such
  * job". The write pressure from the ADR-0010 time-budgeted tick (issue #18) made
@@ -12,14 +12,14 @@
  * poll discipline treats a vanished job as terminal and aborts a healthy clone.
  *
  * This file pins the fix's observable contract:
- *  - AC (atomic write): a save replaces `job.json` by writing a sibling temp file
+ *  - AC (atomic write): a save replaces `state.json` by writing a sibling temp file
  *    and renaming it over the target — never an in-place O_TRUNC rewrite. A reader
  *    that opened the file before the save keeps reading the whole pre-save record
  *    through its handle (the rename swaps the file out from under it, leaving the
  *    previous bytes intact on the now-unlinked inode); an in-place rewrite would
  *    instead expose the new — and momentarily partial — bytes through that same
  *    handle. This is the property that guarantees a concurrent poll never observes a
- *    torn or truncated `job.json`.
+ *    torn or truncated `state.json`.
  *  - AC (write leaves the file whole): after a save the state file parses to the
  *    saved record, and no `.tmp` residue is left behind in the job's directory.
  *  - AC (verified absence): `find()` returns null only for a job that is genuinely
@@ -27,7 +27,7 @@
  *    bounded re-read) rather than raised or looped on — genuine corruption still
  *    reads as no such job, but the write path above never produces it.
  *  - AC (a partial sibling never masquerades as the job): a truncated temp sibling
- *    beside a complete `job.json` never makes `find()`/`all()` miss the live job.
+ *    beside a complete `state.json` never makes `find()`/`all()` miss the live job.
  *
  * The true race is a multi-process condition (two PHP requests interleaving a write
  * and a read) that a single-threaded harness cannot reproduce; per the coding
@@ -79,14 +79,14 @@ $sfa_store = new Job_Store( new Config() );
 // The caller submits only the public half of an ephemeral X25519 keypair.
 $sfa_public_key = base64_encode( sodium_crypto_box_publickey( sodium_crypto_box_keypair() ) );
 
-// --- AC: a save replaces job.json atomically, never rewriting it in place --------
+// --- AC: a save replaces state.json atomically, never rewriting it in place ------
 
 // Create a job and confirm its freshly-written state file is whole and parseable.
 $sfa_job = $sfa_store->create( 1, $sfa_public_key, [], [], [ 'wp-load.php' ] );
-$sfa_state = $sfa_work . '/' . $sfa_job->id . '/job.json';
+$sfa_state = $sfa_work . '/' . $sfa_job->id . '/state.json';
 kntnt_extractor_assert(
 	is_array( json_decode( (string) file_get_contents( $sfa_state ), true ) ),
-	'A freshly created job writes a whole, parseable job.json',
+	'A freshly created job writes a whole, parseable state.json',
 );
 
 // Open a read handle on the state file, then save a transition over it. An atomic
@@ -108,17 +108,17 @@ kntnt_extractor_assert(
 $sfa_after = json_decode( (string) file_get_contents( $sfa_state ), true );
 kntnt_extractor_assert(
 	is_array( $sfa_after ) && ( $sfa_after['state'] ?? null ) === 'running',
-	'The atomically published job.json is whole and holds the saved state',
+	'The atomically published state.json is whole and holds the saved state',
 );
 
 // --- AC: the write leaves no temp residue in the job's directory ----------------
 
-// Only the job's own state file and hardening index.html remain — the temp sibling
-// the atomic write used was renamed away, never left behind.
+// Only the job's own two record files and hardening index.html remain — the temp
+// sibling the atomic write used was renamed away, never left behind.
 $sfa_entries = array_values( array_diff( scandir( $sfa_work . '/' . $sfa_job->id ) ?: [], [ '.', '..' ] ) );
 sort( $sfa_entries );
 kntnt_extractor_assert(
-	$sfa_entries === [ 'index.html', 'job.json' ],
+	$sfa_entries === [ 'index.html', 'job.json', 'state.json' ],
 	'An atomic save leaves no .tmp residue in the job directory',
 );
 
@@ -133,7 +133,7 @@ kntnt_extractor_assert(
 // A present-but-empty state file is reported as null after the bounded re-read —
 // genuine corruption still reads as no such job, without raising or looping.
 $sfa_job2 = $sfa_store->create( 1, $sfa_public_key, [], [], [ 'wp-load.php' ] );
-$sfa_state2 = $sfa_work . '/' . $sfa_job2->id . '/job.json';
+$sfa_state2 = $sfa_work . '/' . $sfa_job2->id . '/state.json';
 file_put_contents( $sfa_state2, '' );
 clearstatcache();
 kntnt_extractor_assert(
@@ -143,16 +143,16 @@ kntnt_extractor_assert(
 
 // --- AC: a truncated temp sibling never masquerades as the live job -------------
 
-// A live job with a complete job.json and a half-written temp sibling beside it —
+// A live job with a complete state.json and a half-written temp sibling beside it —
 // exactly the on-disk shape mid-atomic-write — still resolves to the live job, and
 // the temp sibling is never mistaken for a second job by the directory walk.
 $sfa_job3 = $sfa_store->create( 1, $sfa_public_key, [], [], [ 'wp-load.php' ] );
-file_put_contents( $sfa_work . '/' . $sfa_job3->id . '/job.json.deadbeef.tmp', '{"partial":' );
+file_put_contents( $sfa_work . '/' . $sfa_job3->id . '/state.json.deadbeef.tmp', '{"partial":' );
 clearstatcache();
 $sfa_found = $sfa_store->find( $sfa_job3->id );
 kntnt_extractor_assert(
 	$sfa_found instanceof Extraction_Job && $sfa_found->id === $sfa_job3->id,
-	'A truncated temp sibling beside a complete job.json never makes find() miss the live job',
+	'A truncated temp sibling beside a complete state.json never makes find() miss the live job',
 );
 $sfa_ids = array_map( static fn( Extraction_Job $j ): string => $j->id, $sfa_store->all() );
 kntnt_extractor_assert(

@@ -40,13 +40,31 @@ final readonly class Extraction_Job {
 	 * chunked, resumable build added durable build-progress (ADR-0007), to 4
 	 * when the last-progress timestamp made the sweep's absolute lifetime ceiling
 	 * measure stalled progress rather than raw age, to 5 when the structure-only
-	 * table selection (issue #16) joined the tables/files sets, and to 6 when chunked
+	 * table selection (issue #16) joined the tables/files sets, to 6 when chunked
 	 * table dumping (ADR-0013) added the mid-table row position to the build progress
-	 * and the no-progress attempt counter and recorded failure reason to the job.
+	 * and the no-progress attempt counter and recorded failure reason to the job, and
+	 * to 7 when the record was split across two files and the build progress traded
+	 * its segment-name list for a count and an index offset (ADR-0014).
 	 *
 	 * @since 0.1.0
 	 */
-	public const int SCHEMA_VERSION = 6;
+	public const int SCHEMA_VERSION = 7;
+
+	/**
+	 * The record's keys that are persisted apart from the rest, in the selection file.
+	 *
+	 * These three are the only fields whose size is unbounded — a selection runs to
+	 * tens of thousands of paths — and the only ones no lifecycle transition ever
+	 * changes. Splitting exactly them out is what lets a save rewrite a few hundred
+	 * bytes instead of megabytes, without any field changing its name or meaning
+	 * (ADR-0014). The split is a persistence concern, so {@see Job_Store} performs it;
+	 * the line is drawn here because which fields are unbounded is schema knowledge.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @var list<string>
+	 */
+	public const array SELECTION_KEYS = [ 'tables', 'structure_only', 'files' ];
 
 	/**
 	 * Builds a job record from its fully-resolved fields.
@@ -186,11 +204,14 @@ final readonly class Extraction_Job {
 	 * Serialises the job into the associative array persisted as JSON.
 	 *
 	 * The state crosses the boundary as its backed string value, and the schema
-	 * version is stamped in so a reader can tell which shape it is looking at.
+	 * version is stamped in so a reader can tell which shape it is looking at. This is
+	 * the whole record; {@see Job_Store} splits it across two files on the
+	 * {@see SELECTION_KEYS} line and merges them back before {@see from_array()} sees
+	 * it, so the schema has one definition however many files hold it.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, segment_names: array<int, string>, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null}
 	 */
 	public function to_array(): array {
 

@@ -163,8 +163,9 @@ final class Artifact_Builder {
 			$file_mtime = null;
 			$table_offset = 0;
 			$table_cursor = null;
-			$names = [];
+			$segment_count = 0;
 			$container_bytes = 0;
+			$index_bytes = 0;
 			$writer->open( $public_key );
 		} else {
 
@@ -183,9 +184,14 @@ final class Artifact_Builder {
 			$file_mtime = $progress->file_mtime;
 			$table_offset = $progress->table_offset;
 			$table_cursor = $progress->table_cursor;
-			$names = $progress->segment_names;
+			$segment_count = $progress->segment_count;
 			$container_bytes = $progress->container_bytes;
-			$writer->resume( $public_key, $names, $container_bytes );
+
+			// A build begun under record schema 6 kept its segment names in the job record
+			// and left no sidecar, so rebuild one from them before resuming; every record
+			// written since carries the sidecar's own committed length instead (ADR-0014).
+			$index_bytes = $progress->legacy_names === null ? $progress->index_bytes : $writer->seed_index( $progress->legacy_names );
+			$writer->resume( $public_key, $container_bytes, $index_bytes );
 		}
 
 		// Seal the next bounded chunk in a fixed order: every full-data table as bounded
@@ -197,7 +203,7 @@ final class Artifact_Builder {
 			$table = $job->tables[ $tables_done ];
 			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows(), $this->table_chunk_bytes() );
 			$writer->add_segment( $table, $this->stream_of( $slice ) );
-			$names[] = $table;
+			++$segment_count;
 			if ( $table_complete ) {
 				++$tables_done;
 				$table_offset = 0;
@@ -209,13 +215,13 @@ final class Artifact_Builder {
 		} elseif ( $structure_done < count( $job->structure_only ) ) {
 			$table = $job->structure_only[ $structure_done ];
 			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump_structure( $table ) ) );
-			$names[] = $table;
+			++$segment_count;
 			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
 			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime );
 			$writer->add_segment( $file, $this->stream_of( $part ) );
-			$names[] = $file;
+			++$segment_count;
 			if ( $file_done ) {
 				++$file_index;
 				$file_offset = 0;
@@ -227,24 +233,24 @@ final class Artifact_Builder {
 		} else {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
-			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
 
 		// The build is complete once the last table and the last file part are sealed:
 		// finalize the sealed index and publish the container in one atomic rename.
-		// Otherwise suspend the container and hand back the offset the next tick resumes
+		// Otherwise suspend the container and hand back the offsets the next tick resumes
 		// from, so a completed segment is never redone or re-encrypted. A completing step
-		// reports the offset it came in with, since finalize() has closed the writer and
-		// a published container is never resumed; its segment list, which the poll does
+		// reports the offsets it came in with, since finalize() has closed the writer and
+		// a published container is never resumed; its segment count, which the poll does
 		// read, is exact either way.
 		if ( $tables_done >= count( $job->tables ) && $structure_done >= count( $job->structure_only ) && $file_index >= count( $job->files ) ) {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
-			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
-		$container_bytes = $writer->suspend();
+		[ $container_bytes, $index_bytes ] = $writer->suspend();
 
-		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), false );
+		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), false );
 
 	}
 

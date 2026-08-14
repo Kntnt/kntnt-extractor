@@ -32,10 +32,17 @@ use RuntimeException;
  * control (ADR-0008). The location is resolved through Config on every call so a
  * runtime override takes effect without reconstructing the store.
  *
+ * A job's record is persisted as two files rather than one (ADR-0014). `job.json`
+ * holds the selection — the requested tables and files, the only unbounded part of a
+ * record — and is written once, at create. `state.json` holds everything else and is
+ * what every save rewrites, so its cost is a few hundred bytes whatever the selection
+ * runs to. The two are read back together and merged into the single record shape
+ * {@see Extraction_Job} defines, so nothing above this class knows there are two.
+ *
  * The state directory and the served artifact are deliberately kept apart. A job's
- * on-disk state (job.json — the tick secret and the plaintext table/file selection)
- * stays in that deny-hardened, unguessably-named per-job directory, which no public
- * URL ever discloses. The finished artifact, by contrast, must be fetched directly
+ * on-disk state (the tick secret, the plaintext table/file selection, the build's
+ * position) stays in that deny-hardened, unguessably-named per-job directory, which no
+ * public URL ever discloses. The finished artifact, by contrast, must be fetched directly
  * by the caller (ADR-0004) and so lives in a separate sibling *downloads* directory
  * that carries no deny and holds sealed artifacts only. That separation is a
  * security property, not a convenience: the two requirements — serve the artifact
@@ -70,11 +77,28 @@ final class Job_Store {
 	private const string DOWNLOADS_SUFFIX = '-downloads';
 
 	/**
-	 * Basename of the per-job state file inside each job's directory.
+	 * Basename of the per-job selection file inside each job's directory.
+	 *
+	 * Holds the unbounded, never-changing half of the record — the requested tables
+	 * and files — and is written exactly once, by {@see create()}. Keeping it out of
+	 * the file every save rewrites is what makes a save's cost independent of the
+	 * selection's size (ADR-0014).
 	 *
 	 * @since 0.1.0
 	 */
-	private const string STATE_FILE = 'job.json';
+	private const string SELECTION_FILE = 'job.json';
+
+	/**
+	 * Basename of the per-job state file inside each job's directory.
+	 *
+	 * The half a save rewrites: the lifecycle state, the timestamps, the build's
+	 * position, and the identity and key the record is driven by. Every field in it is
+	 * a scalar, so the file stays a few hundred bytes for the life of any job however
+	 * large its selection.
+	 *
+	 * @since 0.6.0
+	 */
+	private const string STATE_FILE = 'state.json';
 
 	/**
 	 * The shape a job id — and therefore a job directory name — must match.
@@ -150,11 +174,16 @@ final class Job_Store {
 		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
 
 		// Give the job its own directory, drop an index.html into it as defence in
-		// depth, and persist the state file that lets a later request resume it.
+		// depth, and persist the two files that let a later request resume it. The
+		// selection is written first and the state second, so the state file's presence
+		// always implies a selection beside it and a create cut short mid-write reads as
+		// a job that never existed rather than one with no selection.
 		$dir = $base . '/' . $id;
 		wp_mkdir_p( $dir );
 		$this->write_file( $dir . '/index.html', $this->silence() );
-		$this->persist( $job, $dir . '/' . self::STATE_FILE );
+		[ $selection, $state ] = $this->split( $job );
+		$this->publish_json( $selection, $dir . '/' . self::SELECTION_FILE );
+		$this->publish_json( $state, $dir . '/' . self::STATE_FILE );
 
 		return $job;
 
@@ -172,6 +201,13 @@ final class Job_Store {
 	 * vanished one (issue #20) — the atomic write in {@see write_file()} keeps the
 	 * file whole and this retry is the defence in depth behind it.
 	 *
+	 * The record lives in two files (ADR-0014) and both are read here, then merged
+	 * back into the single decoded shape {@see Extraction_Job::from_array()} validates,
+	 * so the split costs the schema no second definition. Only the state file's absence
+	 * counts as the job's: it is written last at create and never removed on its own, so
+	 * its presence implies a selection beside it, and a selection file left without one
+	 * is the residue of a create that never finished rather than a job.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param string $id The job identifier, typically straight from the URL.
@@ -185,24 +221,26 @@ final class Job_Store {
 			return null;
 		}
 
-		// Load the state file, retrying a bounded few times when it is present but does
-		// not parse, so only a genuinely missing file ever reads as no such job (see the
-		// method and FIND_RETRY_LIMIT docblocks for why).
-		$path = $this->base_path() . '/' . $id . '/' . self::STATE_FILE;
+		// Load both halves of the record, retrying a bounded few times when either is
+		// present but does not parse, so only a genuinely missing state file ever reads
+		// as no such job (see the method and FIND_RETRY_LIMIT docblocks for why).
+		$dir = $this->base_path() . '/' . $id;
+		$state_path = $dir . '/' . self::STATE_FILE;
+		$selection_path = $dir . '/' . self::SELECTION_FILE;
 		for ( $attempt = 0; $attempt <= self::FIND_RETRY_LIMIT; ++$attempt ) {
 
-			// A file that is not there is a verified absence — stop at once rather than
-			// retry a job that genuinely does not exist.
-			if ( ! is_file( $path ) ) {
+			// A state file that is not there is a verified absence — stop at once rather
+			// than retry a job that genuinely does not exist.
+			if ( ! is_file( $state_path ) ) {
 				return null;
 			}
 
-			// Read and decode the record; a whole file reconstructs to the job and is
-			// returned immediately. Anything that does not parse is retried until the
-			// budget is spent, after which it reads as no readable job here.
-			$raw = file_get_contents( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- reading the plugin's own local state file, not a remote resource.
-			$data = $raw === false ? null : json_decode( $raw, true );
-			$job = is_array( $data ) ? Extraction_Job::from_array( $data ) : null;
+			// Read and decode both halves and reconstruct the job from their union; a
+			// whole pair returns immediately. Anything that does not parse is retried
+			// until the budget is spent, after which it reads as no readable job here.
+			$state = $this->read_json( $state_path );
+			$selection = $this->read_json( $selection_path );
+			$job = $state === null || $selection === null ? null : Extraction_Job::from_array( $state + $selection );
 			if ( $job !== null ) {
 				return $job;
 			}
@@ -211,7 +249,8 @@ final class Job_Store {
 			// the last attempt falls straight through to the null below without waiting.
 			if ( $attempt < self::FIND_RETRY_LIMIT ) {
 				usleep( self::FIND_RETRY_DELAY_US );
-				clearstatcache( true, $path );
+				clearstatcache( true, $state_path );
+				clearstatcache( true, $selection_path );
 			}
 
 		}
@@ -282,6 +321,11 @@ final class Job_Store {
 	 * this rewrites only the state file, which is how every lifecycle transition
 	 * (queued -> running -> ready and the terminal states) reaches disk.
 	 *
+	 * The selection file is deliberately not rewritten: nothing that reaches here can
+	 * have changed it, and rewriting it is exactly the cost this split exists to remove
+	 * (ADR-0014). A build advancing a chunk saves twice, so this call is on the hottest
+	 * path in the plugin and must stay proportional to nothing.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job whose current state to persist.
@@ -291,7 +335,8 @@ final class Job_Store {
 	 */
 	public function save( Extraction_Job $job ): void {
 
-		$this->persist( $job, $this->base_path() . '/' . $job->id . '/' . self::STATE_FILE );
+		[ , $state ] = $this->split( $job );
+		$this->publish_json( $state, $this->base_path() . '/' . $job->id . '/' . self::STATE_FILE );
 
 	}
 
@@ -770,7 +815,7 @@ final class Job_Store {
 	 * so a concurrent reader of the target sees either the whole previous file or the
 	 * whole new one — never the zero-length or partial state a bare in-place
 	 * file_put_contents leaves on every save (it opens with O_TRUNC). That in-place
-	 * rewrite of the live job.json is exactly what raced Job_Store::find() into spurious
+	 * rewrite of the live state file is exactly what raced Job_Store::find() into spurious
 	 * "no such job" 404s on a live, progressing job (issue #20), and the ADR-0010
 	 * time-budgeted tick's write burst (issue #18) made the window easy to hit. This is
 	 * the same discipline the artifact container already publishes with (Artifact_Builder).
@@ -831,26 +876,77 @@ final class Job_Store {
 	}
 
 	/**
-	 * Encodes a job to JSON and writes it to its state file whole.
+	 * Splits a job's record into the selection half and the state half.
+	 *
+	 * The line is {@see Extraction_Job::SELECTION_KEYS} — the unbounded fields — and
+	 * the identity and schema version are copied into both, so either file names the
+	 * job and the shape it was written in without the other beside it.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $job The job to split.
+	 * @return array{0: array<string, mixed>, 1: array<string, mixed>} The selection
+	 *         document and the state document, in that write order.
+	 */
+	private function split( Extraction_Job $job ): array {
+
+		// Partition the record on the unbounded keys, then stamp the identity into both
+		// halves so each is self-describing.
+		$record = $job->to_array();
+		$selection_keys = array_flip( Extraction_Job::SELECTION_KEYS );
+		$identity = [
+			'version' => $record['version'],
+			'id' => $record['id'],
+		];
+
+		return [ array_intersect_key( $record, $selection_keys ) + $identity, array_diff_key( $record, $selection_keys ) ];
+
+	}
+
+	/**
+	 * Encodes one half of a record to JSON and publishes it to the given path whole.
+	 *
+	 * The output is compact: the file is only ever machine-read, and pretty-printing it
+	 * added about a seventh to the bytes of every write for no reader's benefit.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param Extraction_Job $job  The job to persist.
-	 * @param string         $path Absolute path to the job's state file.
+	 * @param array<string, mixed> $document The document to persist.
+	 * @param string               $path     Absolute path to write it to.
 	 * @return void
 	 *
-	 * @throws RuntimeException When the record cannot be encoded or written whole.
+	 * @throws RuntimeException When the document cannot be encoded or written whole.
 	 */
-	private function persist( Extraction_Job $job, string $path ): void {
+	private function publish_json( array $document, string $path ): void {
 
-		// Encode the record; a failure here means a caller-supplied file path carried
+		// Encode the document; a failure here means a caller-supplied file path carried
 		// bytes that are not valid UTF-8, which cannot be stored as JSON — surface it
 		// rather than persist a job file that is empty or half-written.
-		$json = wp_json_encode( $job->to_array(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT );
+		$json = wp_json_encode( $document, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE );
 		if ( $json === false ) {
 			throw new RuntimeException( 'Unable to encode the Extraction job state.' );
 		}
 		$this->write_file( $path, $json );
+
+	}
+
+	/**
+	 * Reads and decodes one half of a record, or null when it is not readable.
+	 *
+	 * A missing, unreadable, or non-object file all read as null, which the caller
+	 * treats uniformly as "this record does not reconstruct right now" and retries.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param string $path Absolute path to the document.
+	 * @return array<array-key, mixed>|null The decoded document, or null.
+	 */
+	private function read_json( string $path ): ?array {
+
+		$raw = is_file( $path ) ? file_get_contents( $path ) : false; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- reading the plugin's own local state file, not a remote resource.
+		$data = $raw === false ? null : json_decode( $raw, true );
+
+		return is_array( $data ) ? $data : null;
 
 	}
 

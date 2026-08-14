@@ -77,7 +77,7 @@ $tick = static function ( string $id, string $secret ): WP_REST_Response {
 
 // Reads a job's persisted per-job tick secret from its on-disk state.
 $secret_of = static function ( string $work, string $id ): string {
-	$state = is_file( $work . '/' . $id . '/job.json' ) ? json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true ) : null;
+	$state = is_file( $work . '/' . $id . '/state.json' ) ? json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true ) : null;
 	return is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
 };
 
@@ -195,12 +195,14 @@ kntnt_extractor_assert( $response->get_status() === 201, 'A mixed full + structu
 $id = is_array( $response->get_data() ) && is_string( $response->get_data()['id'] ?? null ) ? $response->get_data()['id'] : '';
 kntnt_extractor_assert( $id !== '', 'The created structure-only job has an id' );
 
-$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 $tick_secret = is_array( $state ) ? (string) ( $state['tick_secret'] ?? '' ) : '';
 
-// The persisted state carries the structure-only selection as its own field, kept
-// apart from the full-data tables.
-kntnt_extractor_assert( is_array( $state ) && ( $state['structure_only'] ?? null ) === [ $wpdb->users ], 'The persisted job records the structure-only selection distinctly (AC5)' );
+// The persisted selection carries the structure-only tables as their own field, kept
+// apart from the full-data tables. It lives in the selection file, which is the half
+// of the record a save never rewrites (ADR-0014).
+$selection_record = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+kntnt_extractor_assert( is_array( $selection_record ) && ( $selection_record['structure_only'] ?? null ) === [ $wpdb->users ], 'The persisted job records the structure-only selection distinctly (AC5)' );
 
 // Drive across ticks until ready, exactly as the loopback loop would.
 wp_set_current_user( 0 );

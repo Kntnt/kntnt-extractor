@@ -162,7 +162,7 @@ $watchdog = new Watchdog( $store, $dispatcher );
 
 // Reads a job's persisted per-job secret straight from its on-disk state.
 $secret_of = static function ( string $id ) use ( $work ): string {
-	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true );
+	$state = json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true );
 	return is_array( $state ) ? (string) ( $state['tick_secret'] ?? '' ) : '';
 };
 

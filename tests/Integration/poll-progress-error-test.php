@@ -82,7 +82,7 @@ $tick = static function ( string $id, string $secret ): WP_REST_Response {
 
 // Reads a job's persisted per-job tick secret from its on-disk state.
 $secret_of = static function ( string $work, string $id ): string {
-	$state = is_file( $work . '/' . $id . '/job.json' ) ? json_decode( (string) file_get_contents( $work . '/' . $id . '/job.json' ), true ) : null;
+	$state = is_file( $work . '/' . $id . '/state.json' ) ? json_decode( (string) file_get_contents( $work . '/' . $id . '/state.json' ), true ) : null;
 	return is_array( $state ) && is_string( $state['tick_secret'] ?? null ) ? $state['tick_secret'] : '';
 };
 
