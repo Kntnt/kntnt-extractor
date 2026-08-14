@@ -23,6 +23,8 @@
  *    filter (filter wins).
  *  - AC6: when rotation empties the log the file (and its directory, if then empty)
  *    is deleted, and the next event creates a fresh randomly-named file.
+ *  - AC7: a job that reaches failed rather than ready appends nothing — the log
+ *    records what became downloadable, not what was attempted (ADR-0006).
  *
  * @package Kntnt\Extractor
  * @since   0.1.0
@@ -156,7 +158,7 @@ kntnt_extractor_assert( is_string( $ts ) && preg_match( '/^\d{4}-\d{2}-\d{2}T\d{
 kntnt_extractor_assert( is_string( $ts ) && strtotime( (string) $ts ) >= $before, 'The ts is a recent instant (AC1)' );
 kntnt_extractor_assert( ( $entry['user_id'] ?? null ) === $owner->ID, 'The entry records the owning user_id (AC1)' );
 kntnt_extractor_assert( ( $entry['user_login'] ?? null ) === $owner->user_login, 'The entry records the user_login (AC1)' );
-kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 5, 'The entry records the api_version (AC1)' );
+kntnt_extractor_assert( ( $entry['api_version'] ?? null ) === 6, 'The entry records the api_version (AC1)' );
 kntnt_extractor_assert( ( $entry['job_id'] ?? null ) === $job_id, 'The entry records the job_id (AC1)' );
 kntnt_extractor_assert( ( $entry['tables'] ?? null ) === [ $wpdb->options, $wpdb->users ], 'The entry records the full tables list (AC1)' );
 kntnt_extractor_assert( ( $entry['tables_structure_only'] ?? null ) === [ $wpdb->posts ], 'The entry records the structure-only tables list distinctly (issue #16)' );
@@ -175,6 +177,36 @@ $consume( $job_id );
 $after_consume = $get_audit()->get_data();
 $after_entries = is_array( $after_consume['entries'] ?? null ) ? $after_consume['entries'] : [];
 kntnt_extractor_assert( count( $after_entries ) === 1, 'Consuming a job leaves the ready-time record untouched and adds no second entry (AC2)' );
+
+// --- AC7: a job that never reaches ready leaves no record ---
+
+// The counterpart to AC2, and the question a reader of a real log actually asked: a
+// production run whose main extraction stalled and failed left entries for the two
+// small jobs around it and none for itself, which reads as a log that dropped its
+// largest operation. It is not — the record is written at ready because that is the
+// instant an artifact becomes downloadable (ADR-0006), and a failed job produced
+// nothing to download. Pinning it here means the next reader gets the answer from the
+// suite rather than from a session spent re-deriving it.
+wp_set_current_user( $owner->ID );
+$before_failure = $get_audit()->get_data();
+$before_count = is_array( $before_failure['entries'] ?? null ) ? count( $before_failure['entries'] ) : 0;
+
+$fail_response = $post_extractions( [ 'tables' => [ $wpdb->options ], 'files' => [], 'public_key' => $public_key ] );
+$fail_id = is_array( $fail_response->get_data() ) ? (string) ( $fail_response->get_data()['id'] ?? '' ) : '';
+$fail_state = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/job.json' ), true );
+$fail_secret = is_array( $fail_state ) && is_string( $fail_state['tick_secret'] ?? null ) ? $fail_state['tick_secret'] : '';
+
+// Plant the attempt count a chunk killed outside PHP leaves behind, which is exactly
+// how the production job died, then tick once so the driver fails it.
+$fail_state['attempts'] = 3;
+file_put_contents( $work . '/' . $fail_id . '/job.json', (string) wp_json_encode( $fail_state ) );
+$tick( $fail_id, $fail_secret );
+$failed_job = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/job.json' ), true );
+kntnt_extractor_assert( is_array( $failed_job ) && ( $failed_job['state'] ?? null ) === 'failed', 'A job whose chunk never advances reaches failed (AC7)' );
+
+$after_failure = $get_audit()->get_data();
+$after_count = is_array( $after_failure['entries'] ?? null ) ? count( $after_failure['entries'] ) : 0;
+kntnt_extractor_assert( $after_count === $before_count, 'A failed extraction appends no audit entry — the log records what became downloadable, not what was attempted (AC7)' );
 
 // --- AC3: the log is a randomly-named file under the uploads directory ---
 

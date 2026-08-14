@@ -24,9 +24,13 @@ use RuntimeException;
  * No call ever holds a whole table. {@see dump_chunk()} renders one bounded slice of
  * rows and hands back the cursor the next slice resumes after, so a table far larger
  * than one PHP invocation's memory or time budget is carried across ticks the same way
- * a large file is (ADR-0013). Slices are cut on extended-`INSERT` boundaries, so the
- * SQL is byte-identical however the slice size is tuned — a table dumped in one slice
- * and the same table resumed across twenty ticks emit the same statements.
+ * a large file is (ADR-0013). A slice is bounded by a row count AND a byte count and
+ * ends at whichever is reached first, because rows are not what a host kills a request
+ * over — a table of few very fat rows fits any row budget and still exceeds every byte
+ * and time budget there is. While the row budget is what bounds a slice, cuts land on
+ * extended-`INSERT` boundaries and the SQL is byte-identical however that budget is
+ * tuned; a byte-bounded cut lands instead on the row that fills the budget, which is
+ * the price of the slice being bounded in the unit the host actually enforces.
  *
  * The dumped SQL is a caller-visible part of the artifact and so is bound to the
  * API version. Every value is emitted as an escaped string literal (or `NULL`),
@@ -92,9 +96,25 @@ final class Table_Dumper {
 	 * slice — the one at row offset zero — carries the structure block and the data
 	 * header ahead of its rows, every later slice carries `INSERT` statements alone, so
 	 * the slices concatenate into exactly the block a `mysqldump` reload expects. The
-	 * slice is rounded up to a whole number of extended-`INSERT` batches, which is what
-	 * makes that concatenation byte-identical however `$max_rows` is tuned: a slice
-	 * boundary is always a statement boundary.
+	 * row budget is rounded up to a whole number of extended-`INSERT` batches, so while
+	 * it is what bounds the slice a boundary is always a statement boundary and the
+	 * concatenation is byte-identical however `$max_rows` is tuned.
+	 *
+	 * `$max_bytes` is the second bound, and the one a host actually enforces. A table of
+	 * few very fat rows sits far under any row budget and still exceeds the request's
+	 * memory and execution-time ceilings; production met exactly that — a 726-row table
+	 * of ~23 KB rows never finished a single slice under a 1,000-row budget. So the page
+	 * is fetched as the row budget allows but only as many of its rows are RENDERED as
+	 * the byte budget has room for, with at least one row always rendered so a slice
+	 * cannot come back empty and stall the build.
+	 *
+	 * Which is why completeness is decided on two facts rather than one. A short page
+	 * alone no longer means the end of the table, because a page cut short by the byte
+	 * budget is short for an entirely different reason; reading it as the end would
+	 * publish a silently truncated table that imports without a single error — far worse
+	 * than the loud stall it replaced. The table is finished only when every fetched row
+	 * was rendered AND the page came back shorter than asked for, and the cursor handed
+	 * back is the last row RENDERED, never the last one fetched.
 	 *
 	 * Rows are read by keyset pagination on the table's primary key
 	 * ({@see ordering_key()}), never `LIMIT`/`OFFSET`, because an offset walk re-scans
@@ -109,6 +129,7 @@ final class Table_Dumper {
 	 * @param array<int, string>|null $cursor    Key tuple the previous slice ended on, or null for the first slice.
 	 * @param int                     $rows_done Rows of this table already rendered by earlier slices.
 	 * @param int                     $max_rows  Upper bound on rows in this slice, rounded up to whole `INSERT` batches.
+	 * @param int                     $max_bytes Upper bound on the rendered rows' bytes in this slice; at least one row is always rendered.
 	 * @return array{0: string, 1: array<int, string>|null, 2: int, 3: bool} The slice's SQL, the
 	 *         cursor the next slice resumes after, the running row count, and whether the table
 	 *         is now fully rendered.
@@ -116,7 +137,7 @@ final class Table_Dumper {
 	 * @throws RuntimeException When the table is not in the live catalog, its definition
 	 *                          cannot be read, or its primary key changed mid-dump.
 	 */
-	public function dump_chunk( string $table, ?array $cursor, int $rows_done, int $max_rows ): array {
+	public function dump_chunk( string $table, ?array $cursor, int $rows_done, int $max_rows, int $max_bytes ): array {
 
 		// Refuse anything not in the live catalog before the name reaches a query.
 		$this->require_known_table( $table );
@@ -131,15 +152,23 @@ final class Table_Dumper {
 			throw new RuntimeException( 'A table primary key changed while the table was being dumped.' );
 		}
 
-		// Read the next page in the key's own order and render it, prefixing the structure
-		// block and data header on the first slice only.
+		// Read the next page in the key's own order, render as much of it as the byte
+		// budget holds, and prefix the structure block and data header on the first
+		// slice only.
 		$limit = max( 1, (int) ceil( $max_rows / self::ROWS_PER_INSERT ) ) * self::ROWS_PER_INSERT;
 		$rows = $this->fetch_rows( $table, $key, $cursor, $rows_done, $limit );
-		$sql = ( $rows_done === 0 ? $this->structure_sql( $table ) . $this->data_header( $table ) : '' ) . $this->insert_statements( $table, $rows );
+		[ $data, $rendered ] = $this->insert_statements( $table, $rows, $max_bytes );
+		$sql = ( $rows_done === 0 ? $this->structure_sql( $table ) . $this->data_header( $table ) : '' ) . $data;
 
-		// A short page is the end of the table. Deciding it this way costs nothing,
-		// whereas a row count would be a second full scan of the table per slice.
-		return [ $sql, $this->cursor_of( $rows, $key ), $rows_done + count( $rows ), count( $rows ) < $limit ];
+		// The table is finished only when the page was rendered whole AND came back
+		// short. A short page alone is ambiguous now that the byte budget can cut one
+		// off early, and resolving that ambiguity the cheap way would end a table
+		// mid-row-set and publish a truncated dump that reloads without complaint. The
+		// cursor is the last row RENDERED, so the next slice resumes at the first row
+		// this one had no room for rather than skipping it.
+		$fetched = count( $rows );
+
+		return [ $sql, $this->cursor_of( array_slice( $rows, 0, $rendered ), $key ), $rows_done + $rendered, $rendered === $fetched && $fetched < $limit ];
 
 	}
 
@@ -410,25 +439,50 @@ final class Table_Dumper {
 	}
 
 	/**
-	 * Renders a page of rows as extended `INSERT` statements.
+	 * Renders as much of a page as the byte budget holds, as extended `INSERT`s.
+	 *
+	 * Rows are rendered one at a time and the budget is checked after each, so the
+	 * cut lands on a row rather than on a whole statement batch: batch granularity
+	 * would keep the emitted SQL independent of the budget but would let a batch of
+	 * a hundred very fat rows overshoot it many times over, which is the failure this
+	 * bound exists to prevent. The first row is always rendered even when it alone
+	 * exceeds the budget — a slice that rendered nothing would advance no cursor and
+	 * stall the build on a row it could never fit.
+	 *
+	 * The caller needs the count back, not just the SQL: it is what tells a partly
+	 * rendered page apart from a page that simply ran out of table.
 	 *
 	 * @since 0.4.0
 	 *
-	 * @param string                   $table The validated table name.
-	 * @param array<int, array<mixed>> $rows  The rows to render, in emission order.
-	 * @return string The statements, each ending in a trailing newline; empty for no rows.
+	 * @param string                   $table     The validated table name.
+	 * @param array<int, array<mixed>> $rows      The rows available to render, in emission order.
+	 * @param int                      $max_bytes Upper bound on the rendered rows' bytes.
+	 * @return array{0: string, 1: int} The statements, each ending in a trailing newline
+	 *         (empty for no rows), and how many rows they carry.
 	 */
-	private function insert_statements( string $table, array $rows ): string {
+	private function insert_statements( string $table, array $rows, int $max_bytes ): array {
 
-		// Emit each batch of rows as one extended INSERT, close to
-		// mysqldump --extended-insert, so no single statement grows with the table.
-		$sql = '';
-		foreach ( array_chunk( $rows, self::ROWS_PER_INSERT ) as $batch ) {
-			$tuples = array_map( $this->row_tuple( ... ), $batch );
-			$sql .= "INSERT INTO `{$table}` VALUES " . implode( ',', $tuples ) . ";\n";
+		// Render row by row, stopping at the first row that fills the budget, so the
+		// slice's size is bounded in the unit the host kills a request over.
+		$tuples = [];
+		$bytes = 0;
+		foreach ( $rows as $row ) {
+			$tuple = $this->row_tuple( $row );
+			$tuples[] = $tuple;
+			$bytes += strlen( $tuple ) + 1;
+			if ( $bytes >= $max_bytes ) {
+				break;
+			}
 		}
 
-		return $sql;
+		// Emit each batch of rendered rows as one extended INSERT, close to
+		// mysqldump --extended-insert, so no single statement grows with the table.
+		$sql = '';
+		foreach ( array_chunk( $tuples, self::ROWS_PER_INSERT ) as $batch ) {
+			$sql .= "INSERT INTO `{$table}` VALUES " . implode( ',', $batch ) . ";\n";
+		}
+
+		return [ $sql, count( $tuples ) ];
 
 	}
 

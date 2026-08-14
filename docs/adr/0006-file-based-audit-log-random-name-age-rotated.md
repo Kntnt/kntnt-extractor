@@ -10,3 +10,9 @@ Rotation is by age, not entry count, since the log's purpose is "what happened i
 
 - Nothing about the log depends on the web server's own access-control mechanism (`.htaccess`, `Require all denied`, or equivalent) — it works identically regardless of server software.
 - A leaked filename from before a rotation-triggered deletion is worthless afterwards, since the replacement file gets a new random name.
+
+## Note (2026-08-14): a failed extraction is absent by design, and that reads as a gap
+
+Read against a real log, "every *successful* extraction" turned out to be easy to miss. On a production run whose main extraction stalled and was failed, `GET /audit-log` carried entries for the small preflight and bootstrap jobs that bracketed it and none for the 161-table, 49,228-file job between them — and the operator reasonably read a log missing its largest operation as a log that had dropped it, suspecting a size or timing limit in the write. There is none. The record is appended on the `kntnt_extractor_job_ready` transition because that is the instant an artifact becomes downloadable, which is the event the log exists to bind to a user (ADR-0004); a job that reached `failed` published nothing, so nothing left the site and nothing is recorded.
+
+This is not revised — recording attempts would make the log's central claim ("this data was taken off the site by this user") false — but the absence is now pinned as an acceptance criterion (`tests/Integration/audit-log-test.php`, AC7) rather than left as an unstated consequence of where the hook sits, so the next reader gets the answer from the suite instead of re-deriving it from the code.

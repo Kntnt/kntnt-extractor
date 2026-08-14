@@ -507,7 +507,7 @@ final class Dispatcher {
 
 		return sprintf(
 			/* translators: 1: number of consecutive attempts, 2: a description of the chunk being packaged, 3: the host's memory_limit setting, 4: the host's max_execution_time setting in seconds. */
-			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host reports memory_limit %3$s and max_execution_time %4$s. Lower KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file) so each chunk is smaller, or raise those host limits, and request the extraction again.', 'kntnt-extractor' ),
+			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host reports memory_limit %3$s and max_execution_time %4$s. Lower KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES, then KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file) so each chunk is smaller, or raise those host limits, and request the extraction again.', 'kntnt-extractor' ),
 			$job->attempts,
 			$this->stalled_chunk( $job ),
 			(string) ini_get( 'memory_limit' ),

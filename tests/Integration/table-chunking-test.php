@@ -28,6 +28,13 @@
  *    counter cleared by every real advance.
  *  - AC6: a job record written before this change still parses and still resumes
  *    (schema 5→6 back-compat).
+ *  - AC7: a slice is bounded by bytes as well as by rows, so a table of few fat rows
+ *    — the shape that sits inside any row budget and still cannot be packaged in one
+ *    slice — splits rather than stalls, and a page the byte budget cut short is never
+ *    mistaken for the end of the table.
+ *  - AC8: the poll's `chunks_done` advances on every packaging chunk, so a job working
+ *    steadily through one large table is distinguishable from a wedged one — which the
+ *    four whole-resource counters alone cannot do.
  *
  * @package Kntnt\Extractor
  * @since   0.4.0
@@ -225,9 +232,10 @@ $wpdb->query( "INSERT INTO `{$keyless_table}` (`n`, `tag`) VALUES " . implode( '
 $expected_slices = (int) ceil( $fixture_rows / $slice_rows );
 
 // The unchunked reference: the same table rendered in a single slice, straight from
-// the dumper. AC2 compares the reassembled multi-segment SQL against this.
+// the dumper, under budgets neither of which can bite. AC2 compares the reassembled
+// multi-segment SQL against this.
 $dumper = new Table_Dumper();
-$whole_dump = static fn( string $table ): string => $dumper->dump_chunk( $table, null, 0, 1000000 )[0];
+$whole_dump = static fn( string $table ): string => $dumper->dump_chunk( $table, null, 0, 1000000, PHP_INT_MAX )[0];
 
 // A caller's ephemeral X25519 keypair; only the public half is submitted.
 $keypair = sodium_crypto_box_keypair();
@@ -351,6 +359,15 @@ kntnt_extractor_assert( ( $progress['tables_done'] ?? null ) === 0, 'The table i
 kntnt_extractor_assert( ( $progress['table_offset'] ?? null ) === 2 * $slice_rows, 'The persisted progress carries the mid-table row offset (AC4)' );
 kntnt_extractor_assert( ( $progress['table_cursor'] ?? null ) === [ (string) ( 2 * $slice_rows ) ], 'The persisted progress carries the keyset cursor the next slice seeks past (AC4)' );
 
+// AC8: the poll can tell this healthy mid-table job from a wedged one. Its table
+// counter has not moved and cannot until the whole table is sealed — which on a real
+// site meant 3/186 standing still for minutes while the run was perfectly fine — so
+// the chunk counter is what carries the liveness a stall rule needs.
+$r_poll = $get_extraction( $r_id )->get_data();
+$r_progress = is_array( $r_poll ) && is_array( $r_poll['progress'] ?? null ) ? $r_poll['progress'] : [];
+kntnt_extractor_assert( ( $r_progress['tables_done'] ?? null ) === 0, 'A job two slices into its only table still reports zero tables done (AC8)' );
+kntnt_extractor_assert( ( $r_progress['chunks_done'] ?? null ) === 2, 'The same poll reports two chunks done, so slow is distinguishable from stuck (AC8)' );
+
 // Snapshot the committed prefix, then simulate a crashed partial write past it. A
 // true resume appends after the prefix and never rewrites it; a rebuild would reseal
 // the finished slices under fresh keys and nonces, changing those very bytes.
@@ -440,6 +457,70 @@ $tick( $l_id, $l_secret );
 $resumed = $get_extraction( $l_id )->get_data();
 kntnt_extractor_assert( is_array( $resumed ) && ( $resumed['state'] ?? null ) !== 'failed', 'A further tick resumes the pre-0.4.0 record rather than failing on the missing keys (schema 5→6 back-compat)' );
 
+// --- AC7: a slice is bounded by bytes as well as by rows ---
+
+// The shape a row budget alone cannot see, and the one that stopped a production
+// clone: a table whose rows are fat enough that it sits far inside the row budget and
+// still cannot be packaged in a single slice. On the real site it was 726 rows of
+// ~23 KB, taken whole under a 1,000-row budget and never finishing; here it is 20 rows
+// of ~50 KB under the 100-row budget forced above. The contrast that proves the unit
+// was wrong is the fixtures above: 250 narrow rows split happily, this one would not.
+$fat_table = 'kntnt_extractor_chunk_fat';
+$fat_rows = 20;
+$fat_width = 51200;
+$wpdb->query( "DROP TABLE IF EXISTS `{$fat_table}`" );
+$wpdb->query( "CREATE TABLE `{$fat_table}` ( `id` bigint(20) NOT NULL, `payload` longtext NOT NULL, PRIMARY KEY (`id`) )" );
+for ( $i = 1; $i <= $fat_rows; $i++ ) {
+	$wpdb->query( $wpdb->prepare( "INSERT INTO `{$fat_table}` (`id`, `payload`) VALUES (%d, %s)", $i, "FATMARK-{$i}-" . str_repeat( 'x', $fat_width ) ) );
+}
+
+// A byte budget a few of these rows fit inside but the table does not, while the
+// 100-row budget this file forces is never approached by a 20-row table at all.
+$fat_bytes = 4 * $fat_width;
+$force_bytes = static fn(): int => $fat_bytes;
+add_filter( 'kntnt_extractor_config_table_chunk_bytes', $force_bytes );
+
+// The byte budget bounds the slice even though the row budget is nowhere near spent.
+[ , , $fat_first_rows, $fat_first_complete ] = $dumper->dump_chunk( $fat_table, null, 0, 1000, $fat_bytes );
+kntnt_extractor_assert( $fat_first_rows > 0 && $fat_first_rows < $fat_rows, 'A slice renders only the rows its byte budget holds, though its row budget is untouched (AC7)' );
+
+// And a page cut short by that budget is NOT the end of the table. Deciding it on the
+// short page alone — the rule that was sound while rows were the only bound — would
+// end the table mid-row-set and seal a truncated dump that reloads without one error,
+// which is strictly worse than the loud stall this replaces.
+kntnt_extractor_assert( $fat_first_complete === false, 'A page cut short by the byte budget is not reported as the end of the table (AC7)' );
+
+// A row wider than the entire budget must still be rendered: a slice that rendered
+// nothing would advance no cursor and stall the build on a row it can never fit.
+[ , , $fat_min_rows ] = $dumper->dump_chunk( $fat_table, null, 0, 1000, 1 );
+kntnt_extractor_assert( $fat_min_rows === 1, 'A slice always renders at least one row, however small the byte budget (AC7)' );
+
+// A page the budget did not cut, and that came back short, is still the end of the
+// table — the byte bound must not turn every table into an endless one.
+[ , , , $fat_whole_complete ] = $dumper->dump_chunk( $fat_table, null, 0, 1000, PHP_INT_MAX );
+kntnt_extractor_assert( $fat_whole_complete === true, 'A short page the byte budget did not cut is still the end of the table (AC7)' );
+
+// End to end: the table completes across several sealed slices, and every row is
+// carried exactly once — the property a silently truncated table would break.
+wp_set_current_user( $owner->ID );
+$f_response = $post_extractions( [ 'tables' => [ $fat_table ], 'public_key' => base64_encode( $public_key ) ] );
+$f_id = is_array( $f_response->get_data() ) ? (string) ( $f_response->get_data()['id'] ?? '' ) : '';
+$f_secret = (string) ( ( $read_state( $work, $f_id ) ?? [] )['tick_secret'] ?? '' );
+$drive_to_ready( $f_id, $f_secret );
+$f_ready = $get_extraction( $f_id )->get_data();
+kntnt_extractor_assert( is_array( $f_ready ) && ( $f_ready['state'] ?? null ) === 'ready', 'A table of few fat rows reaches ready instead of stalling on one oversized slice (AC7)' );
+
+$f_container = $parse( $artifact_bytes( is_array( $f_ready ) ? $f_ready : [] ) );
+$f_names = $open_index( $f_container['sealed_index'], $keypair );
+$f_slices = is_array( $f_names ) ? count( array_filter( $f_names, static fn( string $n ): bool => $n === $fat_table ) ) : 0;
+kntnt_extractor_assert( $f_slices > 1, 'A table under its row budget is still split by its byte budget (AC7)' );
+
+$f_joined = $reassemble( $f_container, $f_names, $fat_table, $keypair );
+preg_match_all( '/FATMARK-\d+/', $f_joined, $f_found );
+kntnt_extractor_assert( count( $f_found[0] ) === $fat_rows && count( array_unique( $f_found[0] ) ) === $fat_rows, 'Every row of the byte-split table is carried exactly once, with no skips or duplicates (AC7)' );
+
+remove_filter( 'kntnt_extractor_config_table_chunk_bytes', $force_bytes );
+
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
 remove_filter( 'kntnt_extractor_config_table_chunk_rows', $force_slice );
@@ -448,6 +529,7 @@ remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
 $wpdb->query( "DROP TABLE IF EXISTS `{$single_table}`" );
 $wpdb->query( "DROP TABLE IF EXISTS `{$composite_table}`" );
 $wpdb->query( "DROP TABLE IF EXISTS `{$keyless_table}`" );
+$wpdb->query( "DROP TABLE IF EXISTS `{$fat_table}`" );
 $rmrf( $work );
 $rmrf( $work . '-downloads' );
 wp_set_current_user( 0 );

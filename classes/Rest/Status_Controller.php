@@ -74,9 +74,17 @@ final class Status_Controller {
 	 * segment carrying a name — the rule file parts already required — rather than
 	 * expecting one segment per table. The artifact's shape is part of the contract.
 	 *
+	 * Raised to 6 for the poll contract's fifth progress counter, `chunks_done`: the
+	 * four table/file counters advance only when a whole resource finishes, so a job
+	 * working steadily through one large table reports exactly what a wedged job
+	 * reports, and a client cannot tell slow from stuck. The new counter moves on every
+	 * packaging chunk. It is additive — every existing field keeps its meaning — but
+	 * the poll response is caller-visible, so it ships under a bump like any other
+	 * change to it.
+	 *
 	 * @since 0.1.0
 	 */
-	public const int API_VERSION = 5;
+	public const int API_VERSION = 6;
 
 	/**
 	 * Registers the status route. Hooked on `rest_api_init`.

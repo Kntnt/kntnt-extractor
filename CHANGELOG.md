@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.0] – 2026-08-14
+
+### Added
+
+- A table slice is now bounded by bytes as well as by rows, through the new `table_chunk_bytes` knob (`KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` or its filter, default 4 MiB), and ends at whichever bound it reaches first (ADR-0013). The default is deliberately half the file-part `KNTNT_EXTRACTOR_CHUNK_SIZE`: a host that packages 8 MiB file parts without complaint demonstrably survives that much segment payload, and a table slice costs more per byte than a file part, since it is fetched as PHP row arrays, escaped into SQL, and copied again through the seal. A table of ordinary rows never reaches the byte bound — the row budget is spent long first — so nothing that already worked packages differently.
+- The poll's `progress` object carries a fifth counter, `chunks_done`: packaging chunks committed so far — one table slice, one structure-only table, or one file part. The four existing counters advance only when a whole table or a whole file finishes, so a job working steadily through one large table reports exactly what a wedged job reports; a client watching this one can tell slow from stuck. It carries no total, because how many slices a table takes is not knowable before it is dumped, and it counts *committed* chunks, so a ready job reads one short of the artifact's segment count — the final chunk publishes the container rather than persisting progress. **Watch `chunks_done` for liveness and the other four for completion.**
+
+### Changed
+
+- Bumped the REST API version to `6` for the poll response's new `chunks_done` counter. The change is additive — every existing field keeps its meaning — but the poll response is caller-visible and ships under a bump like any other change to it.
+- A slice cut short by the byte budget groups its rows into `INSERT` statements differently than the same table dumped in one call would, so the reassembled SQL is equivalent to but not byte-identical with an unsliced dump. Every slice still ends on a complete statement, which is the only property reassembly ever needed; a consumer that concatenates a name's segments in index order is unaffected. Cutting on whole statement batches instead was considered and rejected: it would preserve byte-identity, but a single batch of a hundred fat rows can overshoot the byte budget many times over, which is the failure the bound exists to prevent.
+- The stall failure reason names `KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` first, ahead of the row knob, since it is now the one that most often wants lowering.
+- No behaviour change, but worth knowing if you have wondered: a job that reaches `failed` appends **no** audit entry. The record is written at `ready` because that is the instant an artifact becomes downloadable (ADR-0004/0006), so a run that stalled and failed is absent by design rather than dropped — which is how it read when a production log carried the small jobs around a failed extraction and nothing for the extraction itself. The absence is now an acceptance criterion in the suite and a note on ADR-0006 instead of an unstated consequence of where the hook sits.
+
+### Fixed
+
+- A table of few very fat rows no longer stalls an extraction (ADR-0013). The slice budget was a row count alone, on the reasoning that a site with unusually fat rows would lower the knob rather than discover the host's ceiling by being killed at it. A site discovered it by being killed at it: on production, `wp_rcb_template` — **726 rows, 16.31 MB, ~23 KB per row** — sat far inside the 1,000-row default, was therefore taken in a single slice, and never finished one, failing the job after three attempts that each died where no `catch` could see them. The contrast in the same run shows the unit itself was wrong rather than its value: `wp_postmeta`, at **100,890 rows and 493 MB**, went through in about a hundred slices without trouble, because a thousand narrow rows is a small slice. It is not a table's size that decides whether a slice fits, it is its rows'. Which of the host's two limits broke is not known — the plugin reports both and can observe neither killing it — so the default byte budget carries a margin rather than a measurement.
+- A page of rows cut short by the new byte budget is no longer mistaken for the end of the table. Completeness was decided on a short page alone, which was sound while rows were the only bound and becomes ambiguous the moment a page can be short for a second reason; left unchanged it would have ended a table mid-row-set and sealed a **silently truncated dump that reloads without a single error** — worse than the loud stall it replaces, because nothing downstream would ever say so. A table is now complete only when every fetched row was rendered *and* the page came back shorter than asked for, and the resume cursor is the last row rendered, never the last one fetched.
+
 ## [0.4.0] – 2026-08-13
 
 ### Added
@@ -79,7 +98,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.2.1

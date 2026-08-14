@@ -44,7 +44,7 @@ kntnt_extractor_assert( $response->get_status() === 200, 'GET /status responds 2
 
 // The anonymous body is exactly the API-version contract and nothing more — the
 // identity members must never appear for a caller who supplied no credentials.
-kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 5 ], 'GET /status returns { api_version: 5 } and nothing more to an anonymous caller' );
+kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 6 ], 'GET /status returns { api_version: 6 } and nothing more to an anonymous caller' );
 
 // The namespace is advertised in WordPress's REST index.
 $index = $server->dispatch( new WP_REST_Request( 'GET', '/' ) )->get_data();
@@ -61,7 +61,7 @@ kntnt_extractor_assert( $version !== '' && ! str_contains( $body, $version ), 'G
 $admin = get_users( [ 'role' => 'administrator', 'number' => 1 ] )[0];
 wp_set_current_user( $admin->ID );
 $authenticated = $get_status()->get_data();
-kntnt_extractor_assert( is_array( $authenticated ) && ( $authenticated['api_version'] ?? null ) === 5, 'The authenticated status response still carries the API version' );
+kntnt_extractor_assert( is_array( $authenticated ) && ( $authenticated['api_version'] ?? null ) === 6, 'The authenticated status response still carries the API version' );
 kntnt_extractor_assert( is_array( $authenticated ) && ( $authenticated['authenticated_as'] ?? null ) === $admin->user_login, 'GET /status names the authenticated user by user_login' );
 kntnt_extractor_assert(
 	is_array( $authenticated ) && ( $authenticated['capabilities'] ?? null ) === [ 'kntnt_extractor_operate' => true, 'manage_options' => true ],

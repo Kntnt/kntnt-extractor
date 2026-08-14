@@ -224,7 +224,7 @@ $progress = is_array( $running_entry ) && is_array( $running_entry['progress'] ?
 kntnt_extractor_assert( is_array( $progress ), 'A running job carries a progress object in the listing (AC1)' );
 $progress_keys = is_array( $progress ) ? array_keys( $progress ) : [];
 sort( $progress_keys );
-kntnt_extractor_assert( $progress_keys === [ 'files_done', 'files_total', 'tables_done', 'tables_total' ], 'The listed progress is the same four-counter shape as the poll (AC1)' );
+kntnt_extractor_assert( $progress_keys === [ 'chunks_done', 'files_done', 'files_total', 'tables_done', 'tables_total' ], 'The listed progress is the same five-counter shape as the poll (AC1)' );
 kntnt_extractor_assert( is_array( $progress ) && ( $progress['tables_total'] ?? null ) === 2 && ( $progress['files_total'] ?? null ) === 2, 'The listed progress reflects the selection sizes (AC1)' );
 
 // --- AC2: a terminal job persisted on disk is omitted ---
@@ -284,7 +284,7 @@ kntnt_extractor_assert( ! in_array( $ready_id, $listed_ids( $get_extractions() )
 // --- AC7: the REST API version reports 2 (the coordinated cutover bump) ---
 
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 5, 'GET /status reports api_version 5 (AC7)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 6, 'GET /status reports api_version 6 (AC7)' );
 
 // Leave the suite state clean for later files, including the served downloads sibling.
 remove_filter( 'pre_http_request', $intercept, 10 );

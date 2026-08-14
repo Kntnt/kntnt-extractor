@@ -62,12 +62,23 @@ Nothing is packaged whole. A selected table is dumped in bounded slices of rows 
 
 **To reassemble a table or a file, concatenate every segment carrying its name, in index order.** A reader that assumes one segment per name keeps only the last chunk of anything large.
 
-Two knobs bound the chunks, both settable as a `wp-config.php` constant or through the matching `kntnt_extractor_config_*` filter:
+Three knobs bound the chunks, all settable as a `wp-config.php` constant or through the matching `kntnt_extractor_config_*` filter:
 
-- `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` — rows per table slice, default 1000. Lower it on a site whose rows are unusually large (long post content, serialised meta blobs).
+- `KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` — bytes of rendered rows per table slice, default 4 MiB. This is the bound that matters on a table of few fat rows, which fits any row budget and still exceeds what a request can do.
+- `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` — rows per table slice, default 1000. The coarser bound; a slice ends at whichever of the two is reached first.
 - `KNTNT_EXTRACTOR_CHUNK_SIZE` — bytes per file part, default 8 MiB.
 
 If a chunk is still too big for the host, the job does not hang: after `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` attempts (default 3) that begin the same chunk and never finish it, the job reports `failed` and its poll's `error.message` names the table and row (or file and byte) it stalled on, together with the host's `memory_limit` and `max_execution_time`. Lower the relevant knob and request the extraction again.
+
+### Telling a slow job from a stuck one
+
+A poll of a running or ready job carries `progress`:
+
+```json
+{ "tables_done": 3, "tables_total": 186, "files_done": 0, "files_total": 49228, "chunks_done": 412 }
+```
+
+The four table and file counters advance only when a whole table or a whole file is finished, so a job working steadily through one large table reports the same counters for minutes at a time. `chunks_done` counts packaging chunks — one table slice, one structure-only table, or one file part — so it moves on every chunk the build seals. **Watch `chunks_done` for liveness and the other four for completion.** It has no total, because how many slices a table takes is not knowable before it is dumped, and it counts committed chunks, so on a ready job it reads one short of the artifact's segment count — the final chunk publishes the container rather than persisting progress.
 
 ### Checking who you are authenticated as
 
@@ -75,7 +86,7 @@ If a chunk is still too big for the host, the job does not hang: after `KNTNT_EX
 
 ```json
 {
-  "api_version": 5,
+  "api_version": 6,
   "authenticated_as": "your-wp-user-login",
   "capabilities": { "kntnt_extractor_operate": true, "manage_options": true }
 }

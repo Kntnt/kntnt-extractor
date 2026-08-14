@@ -57,9 +57,9 @@ final class Artifact_Builder {
 	 *
 	 * A table with more rows than this is split into several independently-sealed
 	 * slices, exactly as an oversized file is split into parts, so no single tick has
-	 * to hold — or finish — a whole table (ADR-0013). Rows rather than bytes, because
-	 * rows are what the query itself is bounded by; a site whose rows are unusually
-	 * fat lowers this rather than discovering the ceiling by being killed. Resolved
+	 * to hold — or finish — a whole table (ADR-0013). It is the coarser of a slice's
+	 * two bounds: it caps how many rows a page may READ, while
+	 * {@see DEFAULT_TABLE_CHUNK_BYTES} caps how many of them are rendered. Resolved
 	 * through the Config seam under the knob `table_chunk_rows`, so a site tunes it
 	 * with the `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` constant or its filter, and tests
 	 * force multi-slice behaviour on small fixtures. This is only the fallback when
@@ -68,6 +68,33 @@ final class Artifact_Builder {
 	 * @since 0.4.0
 	 */
 	private const int DEFAULT_TABLE_CHUNK_ROWS = 1000;
+
+	/**
+	 * Bytes of rendered rows packaged per bounded slice when the knob does not override it.
+	 *
+	 * The bound that a row count cannot express and a host nonetheless enforces. Rows
+	 * are what the page query is written in, but memory and execution time are what a
+	 * request is killed over, and the two part company completely on a table of few fat
+	 * rows: production met a 726-row, ~23 KB-per-row table that sat far inside the
+	 * 1,000-row budget, was therefore taken in a single slice, and never finished one —
+	 * while a 100,890-row table of small rows went through in a hundred slices without
+	 * trouble. It is not a table's size that decides this, it is its rows'.
+	 *
+	 * Four MiB, deliberately half the file-part {@see DEFAULT_CHUNK_SIZE}. That host
+	 * packaged 8 MiB file parts without complaint, so 8 MiB of segment is demonstrably
+	 * survivable there; a table slice of the same size costs more, since it is fetched
+	 * as PHP row arrays, escaped into SQL, and copied again through the seal, so the
+	 * default takes the file part's known-good figure and halves it. Which of the host's
+	 * two limits actually broke is not known and could not be measured without another
+	 * production run, so the margin stands in for the measurement. A table of ordinary
+	 * rows never reaches this bound at all — the row budget is spent long first — so it
+	 * costs nothing on the tables that already worked. Resolved through the Config seam
+	 * under the knob `table_chunk_bytes`, so a site tunes it with the
+	 * `KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` constant or its filter.
+	 *
+	 * @since 0.5.0
+	 */
+	private const int DEFAULT_TABLE_CHUNK_BYTES = 4194304;
 
 	/**
 	 * Binds the builder to the table dumper and the Config seam it reads.
@@ -163,7 +190,7 @@ final class Artifact_Builder {
 		// left and only the trailer remains to be written.
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
-			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows() );
+			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows(), $this->table_chunk_bytes() );
 			$writer->add_segment( $table, $this->stream_of( $slice ) );
 			$names[] = $table;
 			if ( $table_complete ) {
@@ -401,6 +428,25 @@ final class Artifact_Builder {
 		$configured = $this->config->get( 'table_chunk_rows', self::DEFAULT_TABLE_CHUNK_ROWS );
 
 		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_TABLE_CHUNK_ROWS );
+
+	}
+
+	/**
+	 * Resolves the table-slice byte budget through the Config seam, clamped to at least one.
+	 *
+	 * The floor keeps a misconfigured knob from disabling the bound: at one byte every
+	 * slice still renders its first row, so the build advances a row at a time rather
+	 * than stopping.
+	 *
+	 * @since 0.5.0
+	 *
+	 * @return int The maximum bytes of rendered rows packaged into one table slice.
+	 */
+	private function table_chunk_bytes(): int {
+
+		$configured = $this->config->get( 'table_chunk_bytes', self::DEFAULT_TABLE_CHUNK_BYTES );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_TABLE_CHUNK_BYTES );
 
 	}
 

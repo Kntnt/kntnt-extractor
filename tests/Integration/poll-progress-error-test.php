@@ -149,7 +149,7 @@ kntnt_extractor_assert(
 // internal container mechanics (segment names, byte offsets, sealed-index details).
 $keys = array_keys( $prog1 );
 sort( $keys );
-kntnt_extractor_assert( $keys === [ 'files_done', 'files_total', 'tables_done', 'tables_total' ], 'progress exposes exactly the four caller-facing counters, no internal mechanics (AC5)' );
+kntnt_extractor_assert( $keys === [ 'chunks_done', 'files_done', 'files_total', 'tables_done', 'tables_total' ], 'progress exposes exactly the five caller-facing counters, no internal mechanics (AC5)' );
 
 // AC1: the counters advance as the build is driven. The second table advances
 // tables_done to its total; sealing the first file then advances files_done.
@@ -212,7 +212,7 @@ remove_filter( 'kntnt_extractor_config_chunk_size', $small_chunk );
 // trio (GET /environment and its siblings). So assert the current reported
 // version rather than a frozen 1.
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 5, 'GET /status reports the current api_version, which this poll change did not bump (AC6)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 6, 'GET /status reports the current api_version (AC6)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

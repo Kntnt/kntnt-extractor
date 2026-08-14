@@ -376,21 +376,40 @@ final class Extractions_Controller {
 	 * Reported while running and, reading as complete, once ready — omitted for every
 	 * other state, matching the field's optionality (a queued job has started nothing).
 	 * The shape is deliberately a stable, caller-facing summary derived from the job:
-	 * how many of the selected tables and files are done out of their totals. It never
-	 * surfaces the internal {@see Build_Progress} mechanics — segment names, byte
-	 * offsets, the sealed-index detail — which are resume bookkeeping coupled to the
-	 * on-disk container format (ADR-0007/0009), not a caller concern (AC5). No derived
-	 * percentage is offered: a file's total byte size is not known up front, so a
-	 * percentage would mislead, whereas discrete counters are honest advancement.
+	 * how many of the selected tables and files are done out of their totals, plus how
+	 * many packaging chunks have been committed. It never surfaces the internal
+	 * {@see Build_Progress} mechanics themselves — segment names, byte offsets, keyset
+	 * cursors, the sealed-index detail — which are resume bookkeeping coupled to the
+	 * on-disk container format (ADR-0007/0009), not a caller concern (AC5); a bare
+	 * count of committed chunks discloses nothing about them beyond how much work has
+	 * happened, which is the caller's own question. No derived percentage is offered:
+	 * a file's total byte size is not known up front, so a percentage would mislead,
+	 * whereas discrete counters are honest advancement.
 	 *
 	 * A running job that has not yet sealed its first segment carries no persisted
 	 * progress, which reads as nothing-done-yet (zero counters) rather than a missing
 	 * field, so a poll during the very first chunk still reports the totals.
 	 *
+	 * `chunks_done` is the fifth counter and the only fine-grained one. The four above
+	 * advance only when a whole table or a whole file is finished, which since tables
+	 * became sliceable (ADR-0013) means a job working steadily through one large table
+	 * or one large file reports counters identical to a wedged job's — observed in the
+	 * field as `3/186` standing still for minutes while the run was perfectly healthy,
+	 * and answered by clients widening their stall windows until a real stall took
+	 * hours to notice. This counts packaging chunks instead: one table slice, one
+	 * structure-only table, or one file part, so it moves on every chunk the build
+	 * seals and a stall rule watching it distinguishes slow from stuck. It carries no
+	 * total, because how many slices a table takes is not knowable before it is dumped
+	 * — it is a liveness signal, not a completion ratio. It counts chunks whose
+	 * progress was COMMITTED, so on a ready job it is one short of the container's
+	 * segment count: the final chunk finalizes and publishes rather than persisting
+	 * progress, which is exactly why the four counters above report a ready job's
+	 * completion instead.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The polled job.
-	 * @return array{tables_done: int, tables_total: int, files_done: int, files_total: int}|null
+	 * @return array{tables_done: int, tables_total: int, files_done: int, files_total: int, chunks_done: int}|null
 	 */
 	private function progress_of( Extraction_Job $job ): ?array {
 
@@ -399,6 +418,7 @@ final class Extractions_Controller {
 		// "N of M tables" that spans both selections, full then structure-only.
 		$tables_total = count( $job->tables ) + count( $job->structure_only );
 		$files_total = count( $job->files );
+		$chunks_done = $job->progress === null ? 0 : count( $job->progress->segment_names );
 
 		// A ready job is complete by definition, so report every table and file done
 		// rather than the penultimate chunk's persisted progress. A running job reports
@@ -410,12 +430,14 @@ final class Extractions_Controller {
 				'tables_total' => $tables_total,
 				'files_done' => $files_total,
 				'files_total' => $files_total,
+				'chunks_done' => $chunks_done,
 			],
 			Job_State::Running => [
 				'tables_done' => $job->progress === null ? 0 : $job->progress->tables_done + $job->progress->structure_done,
 				'tables_total' => $tables_total,
 				'files_done' => $job->progress === null ? 0 : $job->progress->file_index,
 				'files_total' => $files_total,
+				'chunks_done' => $chunks_done,
 			],
 			default => null,
 		};
