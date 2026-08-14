@@ -411,7 +411,7 @@ kntnt_extractor_assert( ( $s_state['attempts'] ?? null ) === 0, 'A chunk that ad
 
 // One attempt short of the bound the job must still be driven, not failed: the bound
 // exists to stop an impossible chunk, never to abandon a merely unlucky one.
-$s_state['attempts'] = 2;
+$s_state['attempts'] = 1;
 $write_state( $work, $s_id, $s_state );
 $tick( $s_id, $s_secret );
 $s_after = $read_state( $work, $s_id ) ?? [];

@@ -98,16 +98,86 @@ final class Dispatcher {
 	 * exhausted memory limit or execution time kills the worker where it stands, so the
 	 * tick's own `catch` never runs, the job stays running with a heartbeat the watchdog
 	 * keeps refreshing, and it is retried forever while a polling caller reads a state
-	 * that never changes. Three attempts is enough to ride out a transient — a lock
-	 * wait, a momentarily loaded host — and few enough that a genuinely impossible chunk
-	 * is reported within a couple of poll cycles rather than hours. Resolved through the
-	 * Config seam under the knob `max_stall_attempts`, so a site tunes it with the
+	 * that never changes. Resolved through the Config seam under the knob
+	 * `max_stall_attempts`, so a site tunes it with the
 	 * `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` constant or its filter. This is only the
 	 * fallback when neither is set.
 	 *
+	 * Two, lowered from three when what exceeding the bound *does* changed. It used to
+	 * fail the job outright, so a false positive cost the whole run and being cautious
+	 * was worth several attempts. It now halves the chunk and carries on (ADR-0015), so
+	 * a false positive costs throughput for the rest of the run and nothing else, while
+	 * every extra attempt costs a full execution-time limit — paid 23 times over on the
+	 * way from 8 MiB to the floor, and paid only on a host that is already failing.
+	 *
+	 * Not one, which the same reasoning nearly reaches. The kill is usually
+	 * deterministic and a second attempt at the same size usually dies the same way, but
+	 * not every kill is about the size: an FPM reload, the kernel's OOM killer choosing
+	 * this worker because of a neighbour, or a momentary I/O stall on a networked mount
+	 * all present identically. At one attempt each of those permanently halves the
+	 * budget, which never recovers within a run. One confirmation before a decision that
+	 * cannot be undone is proportionate; a third is not.
+	 *
 	 * @since 0.4.0
 	 */
-	private const int DEFAULT_MAX_STALL_ATTEMPTS = 3;
+	private const int DEFAULT_MAX_STALL_ATTEMPTS = 2;
+
+	/**
+	 * Seconds of execution time a tick asks the host for before it packages anything.
+	 *
+	 * The counterpart to shrinking the chunk (ADR-0015), and the cheaper half: where
+	 * adaptation searches downward for a size the host survives, this simply asks the
+	 * host upward for room, once per tick, with no search and no persisted state. If
+	 * the ask is granted the whole search is skipped for a stall the clock caused.
+	 *
+	 * Deliberately finite. Zero would remove the last bound inside PHP on a chunk that
+	 * genuinely hangs, and such a chunk holds the per-job tick lock until the process
+	 * ends. It costs little to be generous instead: `tick_budget` already stops a tick
+	 * after its wall-clock slice, so this bounds one pathological chunk rather than the
+	 * tick, and 900 seconds is well above the 300 the observed production host reports.
+	 *
+	 * Resolved through the Config seam under `max_execution_time`, so a site tunes it
+	 * with the `KNTNT_EXTRACTOR_MAX_EXECUTION_TIME` constant or its filter, and a site
+	 * that wants the host's own value left alone sets it to a value the host already
+	 * meets. This is a *request*: many managed hosts lock the directive, and PHP's own
+	 * timer does not count time in system calls on Unix, so a grant is neither certain
+	 * nor sufficient. {@see stall_reason()} reports what was asked and what was given.
+	 *
+	 * @since 0.6.0
+	 */
+	private const int DEFAULT_MAX_EXECUTION_TIME = 900;
+
+	/**
+	 * Bytes of memory a tick asks the host for before it packages anything.
+	 *
+	 * The memory-side twin of {@see DEFAULT_MAX_EXECUTION_TIME}, and subject to the
+	 * same caveats plus a harder one: a container or cgroup cap kills the worker
+	 * whatever `memory_limit` says, so even a granted raise can be overruled by the
+	 * kernel. The raise never lowers an existing limit, and never touches a host that
+	 * already allows more. One GiB, a modest step above the 768 MB the observed
+	 * production host reports.
+	 *
+	 * Resolved through the Config seam under `memory_limit`, so a site tunes it with
+	 * the `KNTNT_EXTRACTOR_MEMORY_LIMIT` constant or its filter.
+	 *
+	 * @since 0.6.0
+	 */
+	private const int DEFAULT_MEMORY_LIMIT = 1073741824;
+
+	/**
+	 * The host's own limits, captured before this process first raised them.
+	 *
+	 * A raise is unconditional and happens on every tick, so by the time a stall is
+	 * diagnosed `ini_get()` reports what this process asked for rather than what the
+	 * site is configured with. Reporting only that would hide the very number the
+	 * operator needs. These hold the pre-raise reading so the stall reason can name
+	 * both, and stay null while nothing has been raised.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @var array{time: string, memory: string}|null
+	 */
+	private ?array $host_limits = null;
 
 	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
@@ -163,6 +233,12 @@ final class Dispatcher {
 		// The nudging client disconnects almost immediately by design; the tick must
 		// keep packaging after that abort rather than dying mid-chunk (ADR-0010).
 		ignore_user_abort( true );
+
+		// Ask the host for room before packaging anything. This is the cheap half of the
+		// stall remedy: shrinking the chunk searches downward over many attempts, while
+		// this asks upward once and skips that search entirely when the clock or the
+		// memory ceiling was the whole problem (ADR-0015).
+		$this->raise_limits();
 
 		// Pre-check before taking the lock: a ready or unresumable terminal job is a
 		// no-op, so a duplicate or late loopback never rebuilds a done job. A
@@ -543,10 +619,12 @@ final class Dispatcher {
 	private function stall_reason( Extraction_Job $job ): string {
 
 		return sprintf(
-			/* translators: 1: number of consecutive attempts, 2: a description of the chunk being packaged, 3: the host's memory_limit setting, 4: the host's max_execution_time setting in seconds. */
-			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host reports memory_limit %3$s and max_execution_time %4$s. Lower KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES, then KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file) so each chunk is smaller, or raise those host limits, and request the extraction again.', 'kntnt-extractor' ),
+			/* translators: 1: number of consecutive attempts, 2: a description of the chunk being packaged, 3: the host's own memory_limit setting, 4: the host's own max_execution_time setting in seconds, 5: the memory_limit in force after the plugin asked for more, 6: the max_execution_time in force after the plugin asked for more. */
+			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host is configured with memory_limit %3$s and max_execution_time %4$s; the plugin asked for more and is running with memory_limit %5$s and max_execution_time %6$s. Where those two pairs are equal the host refused the request, and the only remedy left is to raise the limits in the host configuration. Where they differ the raise was granted and the chunk still died, so what killed it is the web server or the container rather than PHP, and neither a smaller chunk nor a larger PHP limit will help. Otherwise lower KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES, then KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file), and request the extraction again.', 'kntnt-extractor' ),
 			$job->attempts,
 			$this->stalled_chunk( $job ),
+			$this->host_limits['memory'] ?? (string) ini_get( 'memory_limit' ),
+			$this->host_limits['time'] ?? (string) ini_get( 'max_execution_time' ),
 			(string) ini_get( 'memory_limit' ),
 			(string) ini_get( 'max_execution_time' ),
 		);
@@ -796,6 +874,77 @@ final class Dispatcher {
 			'file' => $budgets->halved_for_file(),
 			default => null,
 		};
+
+	}
+
+	/**
+	 * Asks the host for execution time and memory before a tick packages anything.
+	 *
+	 * The cheap half of the stall remedy, and the one that runs first. Shrinking the
+	 * chunk (ADR-0015) searches downward for a size the host survives, at three
+	 * attempts per step; this asks upward once, costs nothing, and removes the need for
+	 * that search entirely when a host limit — rather than the work itself — was what
+	 * killed the worker.
+	 *
+	 * Everything here is best-effort, and deliberately so. A managed host may lock
+	 * either directive, may disable `set_time_limit()` outright, and may cap the
+	 * process from a container the raise cannot reach. PHP's own timer does not count
+	 * time spent in system calls on Unix either, so a granted raise does not even prove
+	 * the clock was the killer. None of that is a reason not to ask: a refused ask
+	 * leaves the run exactly where it was, and a granted one that still dies is itself
+	 * a finding — the kill came from above PHP or from the kernel, which is a diagnosis
+	 * the attempt counter alone can never reach. {@see stall_reason()} reports what was
+	 * asked for beside what the host actually granted, so the difference is visible.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return void
+	 */
+	private function raise_limits(): void {
+
+		// Read the host's own settings once, before anything has been asked for, so the
+		// stall reason can still name them after a raise has overwritten what ini_get()
+		// reports. A second tick in the same process must not overwrite that reading.
+		$this->host_limits ??= [
+			'time' => (string) ini_get( 'max_execution_time' ),
+			'memory' => (string) ini_get( 'memory_limit' ),
+		];
+
+		// Ask for execution time. Best-effort by nature: the directive is locked on many
+		// managed hosts, set_time_limit() may be disabled outright, and on Unix the timer
+		// ignores time spent in system calls — so a grant is neither certain nor enough.
+		$seconds = $this->configured( 'max_execution_time', self::DEFAULT_MAX_EXECUTION_TIME );
+		if ( $seconds > 0 && function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( $seconds ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged -- a host that locks the directive raises a warning the operator can do nothing about; the outcome is read back and reported instead.
+		}
+
+		// Ask for memory, but never lower what the host already grants. Even a granted
+		// raise can be overruled by a container's own cap, which no PHP setting reaches.
+		$bytes = $this->configured( 'memory_limit', self::DEFAULT_MEMORY_LIMIT );
+		if ( $bytes > 0 && wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) < $bytes ) {
+			@ini_set( 'memory_limit', (string) $bytes ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.memory_limit_Disallowed -- raising the ceiling for one packaging chunk is the documented remedy this endpoint exists to attempt; the outcome is read back and reported.
+		}
+
+	}
+
+	/**
+	 * Reads one runtime-limit knob through the Config seam, clamped to at least zero.
+	 *
+	 * Zero is meaningful and means "ask for nothing": a site that wants its own host
+	 * settings honoured verbatim sets the knob to zero rather than guessing a value
+	 * the host would refuse anyway.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param string $knob     The Config key to resolve.
+	 * @param int    $fallback The compiled-in value to use when the knob is unset.
+	 * @return int The amount to ask the host for, or zero to ask for nothing.
+	 */
+	private function configured( string $knob, int $fallback ): int {
+
+		$configured = $this->config->get( $knob, $fallback );
+
+		return max( 0, is_numeric( $configured ) ? (int) $configured : $fallback );
 
 	}
 

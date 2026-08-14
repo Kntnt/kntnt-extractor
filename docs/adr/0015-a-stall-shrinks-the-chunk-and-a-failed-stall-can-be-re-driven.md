@@ -6,6 +6,18 @@ A job stalled and failed by a release that could do none of that — an on-disk 
 
 The two halves belong together. Resume without adaptation walks straight back into the wall that spent the attempt counter; adaptation without resume leaves every record an earlier release stranded unrecoverable, and discards everything it packaged. Together an upgrade over a dead run becomes "carry on" instead of "start over".
 
+## Ask before shrinking
+
+Shrinking is not the first remedy, only the durable one. Before a tick packages anything it asks the host for execution time and memory. That costs one call each, needs no search and no persisted state, and where a host limit rather than the work itself was the killer it removes the search entirely.
+
+Every part of that ask can fail. A managed host may lock either directive or disable `set_time_limit()`; a container cap kills the worker whatever `memory_limit` says; and PHP's timer does not count time spent in system calls on Unix, so even a granted raise does not prove the clock was the killer. None of that argues against asking. A refused ask leaves the run exactly where it was, and the outcome is information either way — which is why the stall reason reports what was asked for beside what the host granted. Equal pairs mean the host refused and only its own configuration can help. Differing pairs mean the raise was granted and the chunk died anyway, so the kill came from above PHP or from the kernel — a diagnosis the attempt counter alone can never reach, and one that tells the operator to stop shrinking.
+
+## Why two attempts, not three
+
+`max_stall_attempts` was three when exceeding it failed the job. A false positive then cost the whole run, so several attempts were worth their price. Exceeding it now halves the chunk and carries on, so a false positive costs throughput for the remainder of the run and nothing more — while every attempt costs a full execution-time limit, paid 23 times over on the way from 8 MiB to the floor, and paid only on a host that is already failing. The balance moved, so the number moved with it.
+
+It does not move all the way to one. The kill is usually deterministic and a second attempt at the same size usually dies the same way, which is the argument for one. But not every kill is about the size: an FPM reload, the kernel's OOM killer choosing this worker because of a neighbour, and a momentary I/O stall on a networked mount all present identically to the counter. At one attempt each of those permanently halves the budget, which never recovers within a run. One confirmation before an irreversible decision is proportionate; a third is not. If the budget ever learns to recover on sustained success, one becomes the right number.
+
 ## Which bounds shrink, and why more than one
 
 A file part spends exactly one bound: the bytes read into the seal. A table slice spends two, and both have to give. `table_chunk_bytes` caps only what is *rendered*, escaped and sealed; the rows themselves are materialised in memory by `$wpdb->get_results()` under `table_chunk_rows` alone, which is the half a memory kill is likeliest to have happened in. Halving the byte budget while leaving the fetch exactly as large as the one that just died is an adaptation that reads as one and measurably is not: it burns another whole attempt window at the same real size, and repeats that all the way to the floor. So a table stall halves both, each down to its own floor, and the slice is at the floor only when both are.
