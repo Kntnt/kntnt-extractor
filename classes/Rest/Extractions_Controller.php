@@ -400,11 +400,10 @@ final class Extractions_Controller {
 	 * structure-only table, or one file part, so it moves on every chunk the build
 	 * seals and a stall rule watching it distinguishes slow from stuck. It carries no
 	 * total, because how many slices a table takes is not knowable before it is dumped
-	 * — it is a liveness signal, not a completion ratio. It counts chunks whose
-	 * progress was COMMITTED, so on a ready job it is one short of the container's
-	 * segment count: the final chunk finalizes and publishes rather than persisting
-	 * progress, which is exactly why the four counters above report a ready job's
-	 * completion instead.
+	 * — it is a liveness signal, not a completion ratio. On a ready job it equals the
+	 * artifact's segment count: the finalizing step reports its progress like any
+	 * other ({@see Build_Step}), so the chunk that publishes the container is counted
+	 * rather than lost.
 	 *
 	 * @since 0.1.0
 	 *

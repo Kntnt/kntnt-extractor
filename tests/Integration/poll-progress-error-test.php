@@ -174,6 +174,19 @@ kntnt_extractor_assert(
 );
 kntnt_extractor_assert( ! array_key_exists( 'error', $ready ), 'A ready poll carries no error (AC4)' );
 
+// AC1: chunks_done advances on every chunk, which is what makes it a liveness signal
+// where the four counters above are completion signals. Here the four moved on three of
+// the four chunks — the second table's chunk left files_done at zero — while this one
+// moved on all of them.
+kntnt_extractor_assert( ( $prog1['chunks_done'] ?? null ) === 1 && ( $prog2['chunks_done'] ?? null ) === 2 && ( $prog3['chunks_done'] ?? null ) === 3, 'chunks_done advances on every packaging chunk (AC1)' );
+
+// AC3: and a ready job's count equals the artifact's segment count — two tables plus
+// two files is four chunks, four segments, four counted. The finalizing chunk used to
+// be lost, because the call that seals the last segment also publishes the container
+// and reported only "complete"; it now reports its progress like any other step, so
+// the counter needs no caveat in the docs and none here.
+kntnt_extractor_assert( ( $readyp['chunks_done'] ?? null ) === 4, 'A ready poll counts every chunk, the finalizing one included (AC3)' );
+
 // --- AC4: a failed job's poll surfaces an error ---
 
 // Drive a file into a mid-build change so the packaging throws and the job fails: a

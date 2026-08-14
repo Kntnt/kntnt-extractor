@@ -260,17 +260,20 @@ final class Dispatcher {
 		// Package exactly one bounded chunk; a build that throws drops the job to failed
 		// rather than leaving it stuck in running.
 		try {
-			$progress = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
+			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
 		} catch ( Throwable ) {
 			$failed = $running->with_state( Job_State::Failed );
 			$this->store->save( $failed );
 			return $failed;
 		}
 
-		// A null result means the last chunk finalized and published the container, so
-		// the job is ready for download and its completion is announced.
-		if ( $progress === null ) {
-			$ready = $running->with_state( Job_State::Ready );
+		// A complete step means the last chunk finalized and published the container, so
+		// the job is ready for download and its completion is announced. Its progress is
+		// persisted alongside the state rather than discarded: the finalizing step sealed
+		// a segment like any other, and dropping its record would leave a ready job
+		// reporting one chunk fewer than its artifact holds.
+		if ( $step->complete ) {
+			$ready = $running->with_progress( $step->progress )->with_state( Job_State::Ready );
 			$this->store->save( $ready );
 			do_action( 'kntnt_extractor_job_ready', $ready );
 			return $ready;
@@ -279,7 +282,7 @@ final class Dispatcher {
 		// Work remains: persist the advanced progress and keep the job running with a
 		// fresh heartbeat. The continuation loopback for the next chunk is fired once by
 		// the budgeted loop in tick() after the lock is released, not per chunk here.
-		$advanced = $running->with_progress( $progress );
+		$advanced = $running->with_progress( $step->progress );
 		$this->store->save( $advanced );
 
 		return $advanced;

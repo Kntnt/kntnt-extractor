@@ -28,9 +28,9 @@ use RuntimeException;
  *
  * The build is resumable by construction (ADR-0007): {@see advance()} packages
  * exactly ONE bounded chunk — one slice of a table's rows, or one file part up to the
- * configured chunk size — appends it to the in-progress container, and returns the
- * progress the next tick resumes from, or null once the last chunk has finalized and
- * published the container. Because each segment is sealed independently there is no
+ * configured chunk size — appends it to the in-progress container, and returns a
+ * {@see Build_Step}: the progress reached, and whether the container has now been
+ * finalized and published. Because each segment is sealed independently there is no
  * cross-segment authentication state to serialise: resuming reopens the container
  * and appends, never re-encrypting a completed segment.
  *
@@ -121,23 +121,26 @@ final class Artifact_Builder {
 	 * (ADR-0004/0008).
 	 *
 	 * The job's own persisted {@see Build_Progress} (null before the first chunk) says
-	 * where to resume; the return value is the progress the next tick resumes from, or
-	 * null once the build is complete and published. The build is crash-safe: reopening
-	 * truncates the container back to the committed offset, so a partial write a crashed
-	 * tick left behind is discarded rather than sealed into the result (AC3).
+	 * where to resume; the {@see Build_Step} handed back carries the progress to persist
+	 * and, separately, whether the build is now complete. Both answers are always given,
+	 * including on the step that finalizes: the call that seals a selection's last
+	 * segment also publishes the container, and reporting only "complete" there would
+	 * lose the record of the segment it had just sealed. The build is crash-safe:
+	 * reopening truncates the container back to the committed offset, so a partial write
+	 * a crashed tick left behind is discarded rather than sealed into the result (AC3).
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job           The running job whose selection to package.
 	 * @param string         $build_path    Absolute path of the in-progress container in the job's state directory.
 	 * @param string         $download_path Absolute path the finished container is published to.
-	 * @return Build_Progress|null The progress to persist and resume from, or null once complete.
+	 * @return Build_Step The progress to persist, and whether the build is complete.
 	 *
 	 * @throws RuntimeException When the public key is undecodable, a file resolves outside
 	 *                          the root or cannot be read, or the container cannot be
 	 *                          written or published.
 	 */
-	public function advance( Extraction_Job $job, string $build_path, string $download_path ): ?Build_Progress {
+	public function advance( Extraction_Job $job, string $build_path, string $download_path ): Build_Step {
 
 		// Recover the 32 raw bytes the seal draws each segment's key against from the
 		// canonical base64 the job persisted; an undecodable key is a corrupt record.
@@ -161,6 +164,7 @@ final class Artifact_Builder {
 			$table_offset = 0;
 			$table_cursor = null;
 			$names = [];
+			$container_bytes = 0;
 			$writer->open( $public_key );
 		} else {
 
@@ -169,7 +173,7 @@ final class Artifact_Builder {
 			// finished artifact already sits at the download path. Treat that as complete
 			// rather than failing to resume a container that was correctly moved away.
 			if ( ! is_file( $build_path ) && is_file( $download_path ) ) {
-				return null;
+				return new Build_Step( $progress, true );
 			}
 			$tables_done = $progress->tables_done;
 			$structure_done = $progress->structure_done;
@@ -180,7 +184,8 @@ final class Artifact_Builder {
 			$table_offset = $progress->table_offset;
 			$table_cursor = $progress->table_cursor;
 			$names = $progress->segment_names;
-			$writer->resume( $public_key, $names, $progress->container_bytes );
+			$container_bytes = $progress->container_bytes;
+			$writer->resume( $public_key, $names, $container_bytes );
 		}
 
 		// Seal the next bounded chunk in a fixed order: every full-data table as bounded
@@ -222,21 +227,24 @@ final class Artifact_Builder {
 		} else {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
-			return null;
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
 
 		// The build is complete once the last table and the last file part are sealed:
 		// finalize the sealed index and publish the container in one atomic rename.
 		// Otherwise suspend the container and hand back the offset the next tick resumes
-		// from, so a completed segment is never redone or re-encrypted.
+		// from, so a completed segment is never redone or re-encrypted. A completing step
+		// reports the offset it came in with, since finalize() has closed the writer and
+		// a published container is never resumed; its segment list, which the poll does
+		// read, is exact either way.
 		if ( $tables_done >= count( $job->tables ) && $structure_done >= count( $job->structure_only ) && $file_index >= count( $job->files ) ) {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
-			return null;
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
 		$container_bytes = $writer->suspend();
 
-		return new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor );
+		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $names, $file_size, $file_mtime, $table_offset, $table_cursor ), false );
 
 	}
 

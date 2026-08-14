@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- `progress.chunks_done` now counts every packaging chunk on a ready job, the finalizing one included. It used to read one short of the artifact's segment count, because the call that seals a selection's last segment also finalizes and publishes the container and reported only "the build is complete" — so the segment it had just sealed was never recorded. 0.5.0 shipped that as a documented off-by-one in three places; it is now simply correct, and `Artifact_Builder::advance()` answers with a `Build_Step` that carries the progress and the completion flag separately rather than conflating them. The REST API version is unchanged: `chunks_done` has no total and is documented as a liveness signal rather than a completion ratio, so its terminal value was an implementation artifact, not a promise a caller could build on.
+
+### Changed
+
+- The chunked table dump is now covered on every primary-key shape under a byte budget that cuts inside a page, not just the single-column one: a composite cursor is a tuple taken from the last rendered row and a keyless table resumes on the rendered row count, so a byte cut that mis-set either would skip or duplicate rows silently. It does neither — proven rather than assumed, on all three shapes.
+
 ## [0.5.0] – 2026-08-14
 
 ### Added

@@ -78,7 +78,7 @@ A poll of a running or ready job carries `progress`:
 { "tables_done": 3, "tables_total": 186, "files_done": 0, "files_total": 49228, "chunks_done": 412 }
 ```
 
-The four table and file counters advance only when a whole table or a whole file is finished, so a job working steadily through one large table reports the same counters for minutes at a time. `chunks_done` counts packaging chunks — one table slice, one structure-only table, or one file part — so it moves on every chunk the build seals. **Watch `chunks_done` for liveness and the other four for completion.** It has no total, because how many slices a table takes is not knowable before it is dumped, and it counts committed chunks, so on a ready job it reads one short of the artifact's segment count — the final chunk publishes the container rather than persisting progress.
+The four table and file counters advance only when a whole table or a whole file is finished, so a job working steadily through one large table reports the same counters for minutes at a time. `chunks_done` counts packaging chunks — one table slice, one structure-only table, or one file part — so it moves on every chunk the build seals. **Watch `chunks_done` for liveness and the other four for completion.** It has no total, because how many slices a table takes is not knowable before it is dumped; on a ready job it equals the number of segments the artifact holds.
 
 ### Checking who you are authenticated as
 

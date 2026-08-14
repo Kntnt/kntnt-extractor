@@ -519,6 +519,37 @@ $f_joined = $reassemble( $f_container, $f_names, $fat_table, $keypair );
 preg_match_all( '/FATMARK-\d+/', $f_joined, $f_found );
 kntnt_extractor_assert( count( $f_found[0] ) === $fat_rows && count( array_unique( $f_found[0] ) ) === $fat_rows, 'Every row of the byte-split table is carried exactly once, with no skips or duplicates (AC7)' );
 
+// AC7: the byte cut must be correct on every key shape, not just the simple one.
+// The fat fixture above has a single-column primary key, which is the easy case: the
+// cursor is one value. A composite cursor is a tuple taken from the last RENDERED row,
+// and a keyless table has no cursor at all and resumes on the rendered row count — so a
+// byte cut that mis-set either would skip or duplicate rows across the slice boundary,
+// and neither the dump nor the import would say a word about it. Drive each shape to
+// completion under a budget small enough to cut inside a page and count the rows.
+$drive_dump = static function ( string $table, int $max_bytes ) use ( $dumper ): array {
+	$sql = '';
+	$rows_done = 0;
+	$cursor = null;
+	$slices = 0;
+	do {
+		[ $part, $cursor, $rows_done, $complete ] = $dumper->dump_chunk( $table, $cursor, $rows_done, 1000, $max_bytes );
+		$sql .= $part;
+		$slices++;
+	} while ( ! $complete && $slices < 500 );
+	return [ $sql, $rows_done, $slices ];
+};
+
+foreach ( [ $composite_table => 'COMPOSITEMARK', $keyless_table => 'KEYLESSMARK', $single_table => 'SINGLEMARK' ] as $shape_table => $shape_marker ) {
+	[ $shape_sql, $shape_rows, $shape_slices ] = $drive_dump( $shape_table, 300 );
+	preg_match_all( '/' . $shape_marker . '-(\d+)/', $shape_sql, $shape_found );
+
+	// The budget must actually have bitten, or the assertions below prove nothing.
+	kntnt_extractor_assert( $shape_slices > 1, "The byte budget splits {$shape_table} into several slices (AC7)" );
+	kntnt_extractor_assert( $shape_rows === $fixture_rows, "Byte-cut slicing of {$shape_table} renders every row exactly once by count (AC7)" );
+	kntnt_extractor_assert( count( $shape_found[0] ) === $fixture_rows && count( array_unique( $shape_found[0] ) ) === $fixture_rows, "Byte-cut slicing of {$shape_table} skips and duplicates no row (AC7)" );
+	kntnt_extractor_assert( array_map( 'intval', $shape_found[1] ) === range( 1, $fixture_rows ), "Byte-cut slicing of {$shape_table} keeps the rows in order across every cut (AC7)" );
+}
+
 remove_filter( 'kntnt_extractor_config_table_chunk_bytes', $force_bytes );
 
 // Leave the suite state clean for later files.
