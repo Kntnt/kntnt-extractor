@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.5.1] – 2026-08-14
+
 ### Fixed
 
 - `progress.chunks_done` now counts every packaging chunk on a ready job, the finalizing one included. It used to read one short of the artifact's segment count, because the call that seals a selection's last segment also finalizes and publishes the container and reported only "the build is complete" — so the segment it had just sealed was never recorded. 0.5.0 shipped that as a documented off-by-one in three places; it is now simply correct, and `Artifact_Builder::advance()` answers with a `Build_Step` that carries the progress and the completion flag separately rather than conflating them. The REST API version is unchanged: `chunks_done` has no total and is documented as a liveness signal rather than a completion ratio, so its terminal value was an implementation artifact, not a promise a caller could build on.
@@ -106,7 +108,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.3.0
