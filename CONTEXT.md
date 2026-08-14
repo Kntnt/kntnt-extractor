@@ -44,7 +44,7 @@ The artifact's unit of encryption and of reassembly: one bounded chunk of one se
 _Avoid_: block, piece
 
 **Stalled build**:
-A build that has begun the same chunk repeatedly and finished none of those times — the shape left behind when a host limit kills the PHP worker outright, since no failure path gets to run. Recognised by counting begun-but-unfinished attempts on the job record rather than by any wall clock, and terminal once the count reaches its bound: the job reports `failed`, naming the chunk it stalled on and the host limits that most likely killed it, instead of being restarted forever.
+A build that has begun the same chunk repeatedly and finished none of those times — the shape left behind when a host limit kills the PHP worker outright, since no failure path gets to run. Recognised by counting begun-but-unfinished attempts on the job record rather than by any wall clock. On that signal the driver halves the budget of the chunk that died and retries, so the run calibrates to whatever the host can actually package; only a budget already at one byte is terminal. A job that did fail from a diagnosed stall can be re-driven from its persisted progress, with the adapted budget and a fresh attempt window. An opaque failure — an unexpected throw, which carries no reason — is not resumed.
 _Avoid_: timeout, crash, hang
 
 **Download link**:

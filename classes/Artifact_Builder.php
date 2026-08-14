@@ -201,7 +201,7 @@ final class Artifact_Builder {
 		// left and only the trailer remains to be written.
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
-			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows(), $this->table_chunk_bytes() );
+			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $this->table_chunk_rows(), $this->table_chunk_bytes( $job ) );
 			$writer->add_segment( $table, $this->stream_of( $slice ) );
 			++$segment_count;
 			if ( $table_complete ) {
@@ -219,7 +219,7 @@ final class Artifact_Builder {
 			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
-			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime );
+			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $job );
 			$writer->add_segment( $file, $this->stream_of( $part ) );
 			++$segment_count;
 			if ( $file_done ) {
@@ -273,17 +273,18 @@ final class Artifact_Builder {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string   $file           The installation-root-relative file path.
-	 * @param int      $offset         Byte offset the part starts at.
-	 * @param int|null $expected_size  Pinned size from the first part, or null on the first part.
-	 * @param int|null $expected_mtime Pinned mtime from the first part, or null on the first part.
+	 * @param string         $file           The installation-root-relative file path.
+	 * @param int            $offset         Byte offset the part starts at.
+	 * @param int|null       $expected_size  Pinned size from the first part, or null on the first part.
+	 * @param int|null       $expected_mtime Pinned mtime from the first part, or null on the first part.
+	 * @param Extraction_Job $job            The running job, whose persisted file-part budget overrides the Config default after a stall (ADR-0015).
 	 * @return array{0: string, 1: int, 2: bool, 3: int, 4: int} The part bytes, the offset
 	 *         after it, whether the file is now fully packaged, and the pinned size and mtime.
 	 *
 	 * @throws RuntimeException When the path resolves outside the root, cannot be read, or
 	 *                          changed since its first part was sealed.
 	 */
-	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime ): array {
+	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime, Extraction_Job $job ): array {
 
 		// Re-resolve the path inside the root every time (defence in depth against a
 		// record altered after create-time validation), then measure the file so the
@@ -314,7 +315,7 @@ final class Artifact_Builder {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing after a failed seek; see the fopen above.
 			throw new RuntimeException( 'Unable to seek a requested file for packaging.' );
 		}
-		$part = $offset < $size ? (string) fread( $handle, max( 1, $this->chunk_size() ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading one bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
+		$part = $offset < $size ? (string) fread( $handle, max( 1, $this->chunk_size( $job ) ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading one bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the read handle after one bounded part; see the fopen above.
 
 		// Report the offset after this part and whether it reached the file's end, so the
@@ -416,13 +417,23 @@ final class Artifact_Builder {
 	}
 
 	/**
-	 * Resolves the file-part chunk size through the Config seam, clamped to at least one.
+	 * Resolves the file-part chunk size for a job, clamped to at least one.
+	 *
+	 * A positive per-job budget — persisted when a stall halved it (ADR-0015) — wins
+	 * over the Config knob, so a resumed or continued job packages the size that
+	 * survived rather than rediscovering the host's ceiling. Zero means "not yet
+	 * adapted" and falls through to the configured default.
 	 *
 	 * @since 0.1.0
 	 *
+	 * @param Extraction_Job $job The job whose persisted budget, if any, to honour.
 	 * @return int The maximum bytes packaged into one file part.
 	 */
-	private function chunk_size(): int {
+	public function chunk_size( Extraction_Job $job ): int {
+
+		if ( $job->chunk_size > 0 ) {
+			return $job->chunk_size;
+		}
 
 		$configured = $this->config->get( 'chunk_size', self::DEFAULT_CHUNK_SIZE );
 
@@ -446,17 +457,24 @@ final class Artifact_Builder {
 	}
 
 	/**
-	 * Resolves the table-slice byte budget through the Config seam, clamped to at least one.
+	 * Resolves the table-slice byte budget for a job, clamped to at least one.
 	 *
-	 * The floor keeps a misconfigured knob from disabling the bound: at one byte every
-	 * slice still renders its first row, so the build advances a row at a time rather
-	 * than stopping.
+	 * A positive per-job budget wins over the Config knob for the same reason
+	 * {@see chunk_size()} does: a stall that halved this value must stick, or the
+	 * next tick walks back into the wall. The floor keeps a misconfigured knob
+	 * from disabling the bound: at one byte every slice still renders its first
+	 * row, so the build advances a row at a time rather than stopping.
 	 *
 	 * @since 0.5.0
 	 *
+	 * @param Extraction_Job $job The job whose persisted budget, if any, to honour.
 	 * @return int The maximum bytes of rendered rows packaged into one table slice.
 	 */
-	private function table_chunk_bytes(): int {
+	public function table_chunk_bytes( Extraction_Job $job ): int {
+
+		if ( $job->table_chunk_bytes > 0 ) {
+			return $job->table_chunk_bytes;
+		}
 
 		$configured = $this->config->get( 'table_chunk_bytes', self::DEFAULT_TABLE_CHUNK_BYTES );
 

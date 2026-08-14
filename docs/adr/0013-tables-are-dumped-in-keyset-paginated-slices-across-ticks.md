@@ -21,7 +21,7 @@ The failure reason is caller-visible, which is a narrowing of the opacity the ti
 - The persisted job record is schema 6. A record written by an earlier release parses unchanged: an absent mid-table position reads as "no table mid-dump" and an absent attempt counter as zero, so an in-flight job survives the upgrade rather than being abandoned.
 - Rows of a keyed table are now emitted in primary-key order, where before they came back in whatever order the engine chose. The dump reloads identically either way, but a byte-for-byte comparison against an artifact produced by an earlier release will differ.
 - A job whose chunk cannot complete reaches `failed` within a few poll cycles instead of never, and its `error.message` explains why. A caller that treated `failed` as needing no further inspection now has something worth reading.
-- The stall bound is a bound on retries, not a diagnosis: it cannot tell which host limit did the killing, only that something outside PHP did. The reported settings are what let a reader decide.
+- The stall bound is a bound on retries, not a diagnosis: it cannot tell which host limit did the killing, only that something outside PHP did. The reported settings are what let a reader decide. **Superseded in part by [0015](./0015-a-stall-shrinks-the-chunk-and-a-failed-stall-can-be-re-driven.md):** a spent counter now halves the chunk's budget and continues; only a one-byte floor still fails the job.
 - `max_stall_attempts` and `table_chunk_rows` join the Config knobs, both floored so a misconfiguration cannot disable the protection they exist to give.
 
 ## Addendum (2026-08-14) — a slice is bounded by bytes as well as by rows

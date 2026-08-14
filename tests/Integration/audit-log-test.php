@@ -196,9 +196,10 @@ $fail_id = is_array( $fail_response->get_data() ) ? (string) ( $fail_response->g
 $fail_state = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/state.json' ), true );
 $fail_secret = is_array( $fail_state ) && is_string( $fail_state['tick_secret'] ?? null ) ? $fail_state['tick_secret'] : '';
 
-// Plant the attempt count a chunk killed outside PHP leaves behind, which is exactly
-// how the production job died, then tick once so the driver fails it.
+// Plant a spent attempt counter at the one-byte floor — the only stall that still
+// fails the job, now that a shrinkable budget adapts instead of dying.
 $fail_state['attempts'] = 3;
+$fail_state['table_chunk_bytes'] = 1;
 file_put_contents( $work . '/' . $fail_id . '/state.json', (string) wp_json_encode( $fail_state ) );
 $tick( $fail_id, $fail_secret );
 $failed_job = json_decode( (string) file_get_contents( $work . '/' . $fail_id . '/state.json' ), true );

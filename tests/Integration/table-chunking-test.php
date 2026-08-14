@@ -22,10 +22,11 @@
  *    completed slice is never redone or re-encrypted, and the result is still
  *    byte-identical. The persisted progress carries the mid-table row offset and
  *    keyset cursor that make that possible.
- *  - AC5: a chunk that keeps dying where no `catch` can see it stops being retried:
- *    the job reports `failed` with a reason naming the table and row it stalled on,
- *    while a job that can still progress is left to progress and has its attempt
- *    counter cleared by every real advance.
+ *  - AC5: a chunk that keeps dying where no `catch` can see it first shrinks its
+ *    byte budget and keeps going; only a budget already at one byte fails the job,
+ *    with a reason naming the table and row it stalled on. A job that can still
+ *    progress is left to progress and has its attempt counter cleared by every
+ *    real advance.
  *  - AC6: a job record written before this change still parses and still resumes
  *    (schema 5→6 back-compat).
  *  - AC7: a slice is bounded by bytes as well as by rows, so a table of few fat rows
@@ -417,20 +418,41 @@ $s_after = $read_state( $work, $s_id ) ?? [];
 kntnt_extractor_assert( ( $s_after['state'] ?? null ) === 'running' && ( $s_after['attempts'] ?? null ) === 0, 'A job one attempt short of the bound still advances and resets the counter (AC5)' );
 
 // At the bound, the attempts stand as evidence that the chunk was begun three times
-// and finished none of them — the shape a memory or execution-time kill leaves, since
-// it kills the worker outright and no catch ever runs. The job must now report failed.
+// and finished none of them — the shape a memory or execution-time kill leaves. The
+// job must now shrink the table-slice budget and keep going, not fail: failing here
+// is what made every crash cost the whole run, and the bound exists to detect the
+// wall, not to walk into it.
 $s_after['attempts'] = 3;
 $write_state( $work, $s_id, $s_after );
 $tick( $s_id, $s_secret );
-$s_failed = $get_extraction( $s_id )->get_data();
-kntnt_extractor_assert( is_array( $s_failed ) && ( $s_failed['state'] ?? null ) === 'failed', 'A chunk begun repeatedly without ever finishing fails the job instead of spinning (AC5)' );
+$s_adapted = $read_state( $work, $s_id ) ?? [];
+kntnt_extractor_assert( ( $s_adapted['state'] ?? null ) !== 'failed', 'A stall whose table budget can still shrink does not fail the job (AC5)' );
+kntnt_extractor_assert( ( $s_adapted['attempts'] ?? null ) === 0, 'Adapting a table stall resets the attempt counter (AC5)' );
+kntnt_extractor_assert( is_int( $s_adapted['table_chunk_bytes'] ?? null ) && $s_adapted['table_chunk_bytes'] > 0 && $s_adapted['table_chunk_bytes'] < 4194304, 'A table-chunk stall halves the persisted byte budget (AC5)' );
+
+// The floor is what still fails the job: a one-byte budget that has already been
+// begun three times cannot shrink further, and retrying it would spin forever.
+// A fresh job is used because the adapted tick above may have finished the table.
+wp_set_current_user( $owner->ID );
+$floor_response = $post_extractions( [ 'tables' => [ $single_table ], 'public_key' => base64_encode( $public_key ) ] );
+$floor_id = is_array( $floor_response->get_data() ) ? (string) ( $floor_response->get_data()['id'] ?? '' ) : '';
+$floor_secret = (string) ( ( $read_state( $work, $floor_id ) ?? [] )['tick_secret'] ?? '' );
+$tick( $floor_id, $floor_secret );
+$floor_state = $read_state( $work, $floor_id ) ?? [];
+$floor_row = is_array( $floor_state['progress'] ?? null ) && is_int( $floor_state['progress']['table_offset'] ?? null ) ? $floor_state['progress']['table_offset'] : 0;
+$floor_state['attempts'] = 3;
+$floor_state['table_chunk_bytes'] = 1;
+$write_state( $work, $floor_id, $floor_state );
+$tick( $floor_id, $floor_secret );
+$s_failed = $get_extraction( $floor_id )->get_data();
+kntnt_extractor_assert( is_array( $s_failed ) && ( $s_failed['state'] ?? null ) === 'failed', 'A stall at a one-byte table budget fails the job instead of spinning (AC5)' );
 
 // The reason has to explain the next occurrence with no server log to consult, so it
 // names the chunk it stalled on and the two host limits that are almost always why.
 $message = is_array( $s_failed ) && is_array( $s_failed['error'] ?? null ) ? (string) ( $s_failed['error']['message'] ?? '' ) : '';
 kntnt_extractor_assert( $message !== '' && str_contains( $message, $single_table ), 'The failed poll names the table the build stalled on (AC5)' );
 kntnt_extractor_assert( str_contains( $message, 'memory_limit' ) && str_contains( $message, 'max_execution_time' ), 'The failure reason names the two host limits that cause this stall (AC5)' );
-kntnt_extractor_assert( str_contains( $message, 'row ' . 2 * $slice_rows ), 'The failure reason names the row the two advanced slices had reached, so the chunk is reproducible (AC5)' );
+kntnt_extractor_assert( str_contains( $message, 'row ' . $floor_row ), 'The failure reason names the row the advanced slices had reached, so the chunk is reproducible (AC5)' );
 
 // --- AC6: a record written before this change still parses and still resumes ---
 
