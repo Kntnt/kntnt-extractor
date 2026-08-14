@@ -73,30 +73,20 @@ use WP_REST_Server;
 final class Extractions_Controller {
 
 	/**
-	 * Non-terminal jobs allowed at once when the knob does not override it.
+	 * Wires the controller to the access gate, the job store, and the driver.
 	 *
-	 * One global job by default (ADR-0004): an extraction is heavy, and a second
-	 * concurrent one is refused with 429. The ceiling is resolved through the
-	 * Config seam under the knob `max_active_jobs`, so a site raises it with the
-	 * `KNTNT_EXTRACTOR_MAX_ACTIVE_JOBS` constant or the matching filter.
-	 *
-	 * @since 0.1.0
-	 */
-	private const int DEFAULT_MAX_ACTIVE_JOBS = 1;
-
-	/**
-	 * Wires the controller to the access gate, the Config seam, and the job store.
+	 * The Config seam is deliberately absent: the concurrency ceiling was the only
+	 * knob this endpoint read, and it now belongs to {@see Job_Store::has_free_slot()}
+	 * beside the count it bounds, so the controller no longer configures anything.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param Authorizer $authorizer The shared both-capabilities access gate.
-	 * @param Config     $config     The constant-then-filter configuration seam.
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
 	 * @param Dispatcher $dispatcher Drives a job forward and nudges a stalled queue.
 	 */
 	public function __construct(
 		private readonly Authorizer $authorizer,
-		private readonly Config $config,
 		private readonly Job_Store $store,
 		private readonly Dispatcher $dispatcher,
 	) {}
@@ -233,7 +223,7 @@ final class Extractions_Controller {
 
 		// Enforce the global concurrency ceiling: a create beyond it is a 429, the
 		// caller's cue to poll or consume the active job before starting another.
-		if ( $this->store->count_active() >= $this->max_active_jobs() ) {
+		if ( ! $this->store->has_free_slot() ) {
 			return new WP_Error(
 				'kntnt_extractor_too_many_jobs',
 				__( 'Another extraction is already in progress. Wait for it to finish before starting another.', 'kntnt-extractor' ),
@@ -912,24 +902,6 @@ final class Extractions_Controller {
 		}
 
 		return null;
-
-	}
-
-	/**
-	 * Resolves the concurrency ceiling through the Config seam, clamped to at least one.
-	 *
-	 * A non-numeric or non-positive override cannot disable creation outright; the
-	 * floor of one keeps the endpoint usable however the knob is misconfigured.
-	 *
-	 * @since 0.1.0
-	 *
-	 * @return int The maximum number of non-terminal jobs allowed at once.
-	 */
-	private function max_active_jobs(): int {
-
-		$configured = $this->config->get( 'max_active_jobs', self::DEFAULT_MAX_ACTIVE_JOBS );
-
-		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_ACTIVE_JOBS );
 
 	}
 

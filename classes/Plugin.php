@@ -121,7 +121,7 @@ final class Plugin {
 		$tables_controller = new Tables_Controller( $authorizer );
 		$environment_controller = new Environment_Controller( $authorizer, $config );
 		$files_controller = new Files_Controller( $authorizer, $config );
-		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $dispatcher );
+		$extractions_controller = new Extractions_Controller( $authorizer, $job_store, $dispatcher );
 		$audit_log_controller = new Audit_Log_Controller( $audit_log );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );

@@ -45,8 +45,8 @@ final readonly class Extraction_Job {
 	 * and the no-progress attempt counter and recorded failure reason to the job, to 7
 	 * when the record was split across two files and the build progress traded its
 	 * segment-name list for a count and an index offset (ADR-0014), and to 8 when a
-	 * stall began persisting the per-job file-part and table-slice budgets it had
-	 * adapted down to (ADR-0015).
+	 * stall began persisting the per-job file-part, table-slice and table-fetch budgets
+	 * it had adapted down to (ADR-0015).
 	 *
 	 * @since 0.1.0
 	 */
@@ -100,6 +100,7 @@ final readonly class Extraction_Job {
 	 * @param string|null         $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Surfaced verbatim to the polling owner, so it carries no filesystem path, SQL, or other internal detail.
 	 * @param int                 $chunk_size  Per-job file-part budget in bytes, or 0 to use the Config default. Persisted when a stall halves it (ADR-0015) so the next tick — and a resume of a failed job — packages a smaller part rather than walking back into the same wall.
 	 * @param int                 $table_chunk_bytes Per-job table-slice byte budget, or 0 to use the Config default. The table-side counterpart of $chunk_size.
+	 * @param int                 $table_chunk_rows Per-job upper bound on rows fetched for one table slice, or 0 to use the Config default. Halved alongside $table_chunk_bytes, because the byte budget bounds only what is rendered while this bounds what `$wpdb->get_results()` materialises — the half a table stall is most likely to have died in (ADR-0015).
 	 */
 	public function __construct(
 		public string $id,
@@ -119,6 +120,7 @@ final readonly class Extraction_Job {
 		public ?string $error = null,
 		public int $chunk_size = 0,
 		public int $table_chunk_bytes = 0,
+		public int $table_chunk_rows = 0,
 	) {}
 
 	/**
@@ -135,7 +137,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows );
 
 	}
 
@@ -156,7 +158,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_attempt(): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows );
 
 	}
 
@@ -176,7 +178,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows );
 
 	}
 
@@ -202,7 +204,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows );
 
 	}
 
@@ -217,33 +219,51 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.6.0
 	 *
-	 * @param int $chunk_size        The file-part budget to persist.
-	 * @param int $table_chunk_bytes The table-slice byte budget to persist.
+	 * @param Chunk_Budgets $budgets The adapted bounds to persist.
 	 * @return self A new record identical to this one but with the budgets and no attempts.
 	 */
-	public function with_budgets( int $chunk_size, int $table_chunk_bytes ): self {
+	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $chunk_size, $table_chunk_bytes );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows );
 
 	}
 
 	/**
 	 * Returns a copy re-entered into `running` from `failed`, with a fresh attempt window.
 	 *
-	 * Reserved for a diagnosed stall (ADR-0015): the job still holds the container and
-	 * the progress a resume needs, and the budgets have already been adapted so the
-	 * next chunk is not the one that killed it. The failure reason is cleared because
-	 * the job is no longer failed. An opaque throw stays failed and never reaches here.
+	 * Reserved for a diagnosed stall an earlier release recorded before it could adapt
+	 * (ADR-0015): the job still holds the container and the progress a resume needs, and
+	 * the budgets handed in here are already smaller than the ones it died on. The
+	 * failure reason is cleared because the job is no longer failed. An opaque throw, and
+	 * a stall this release already adapted, stay failed and never reach here.
 	 *
 	 * @since 0.6.0
 	 *
-	 * @param int $chunk_size        The file-part budget to persist across the resume.
-	 * @param int $table_chunk_bytes The table-slice byte budget to persist across the resume.
+	 * @param Chunk_Budgets $budgets The adapted bounds to persist across the resume.
 	 * @return self A new record identical to this one but running, with no attempts or error.
 	 */
-	public function with_resume( int $chunk_size, int $table_chunk_bytes ): self {
+	public function with_resume( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $chunk_size, $table_chunk_bytes );
+		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows );
+
+	}
+
+	/**
+	 * Whether a stall has ever shrunk this job's packaging budgets.
+	 *
+	 * False means the record still packages at the Config defaults — either because
+	 * nothing has stalled yet, or because it was written by a release that failed a
+	 * stall outright instead of adapting around it. The resume path (ADR-0015) reads it
+	 * as exactly that second thing, which is what keeps an automatic resume from ever
+	 * re-driving a job back into a wall this release has already measured.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return bool True once any of the three budgets has been adapted down.
+	 */
+	public function has_adapted_budgets(): bool {
+
+		return $this->chunk_size > 0 || $this->table_chunk_bytes > 0 || $this->table_chunk_rows > 0;
 
 	}
 
@@ -258,7 +278,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int}
 	 */
 	public function to_array(): array {
 
@@ -281,6 +301,7 @@ final readonly class Extraction_Job {
 			'error' => $this->error,
 			'chunk_size' => $this->chunk_size,
 			'table_chunk_bytes' => $this->table_chunk_bytes,
+			'table_chunk_rows' => $this->table_chunk_rows,
 		];
 
 	}
@@ -344,12 +365,15 @@ final readonly class Extraction_Job {
 		$error = is_string( $data['error'] ?? null ) ? $data['error'] : null;
 
 		// The per-job packaging budgets are a schema-8 addition (ADR-0015); an older
-		// record carries neither, so an absent value reads as "use the Config default"
-		// rather than disqualifying the record. A present-but-ill-typed value falls
-		// back the same way: a hand-edited budget never makes a live job unreadable,
-		// it just starts the next stall from the configured size.
+		// record carries none of them, so an absent value reads as "use the Config
+		// default" rather than disqualifying the record. That absence is also what
+		// tells a resume the record predates adaptation ({@see Dispatcher}). A
+		// present-but-ill-typed value falls back the same way: a hand-edited budget
+		// never makes a live job unreadable, it just starts the next stall from the
+		// configured size.
 		$chunk_size = ( isset( $data['chunk_size'] ) && is_int( $data['chunk_size'] ) && $data['chunk_size'] >= 0 ) ? $data['chunk_size'] : 0;
 		$table_chunk_bytes = ( isset( $data['table_chunk_bytes'] ) && is_int( $data['table_chunk_bytes'] ) && $data['table_chunk_bytes'] >= 0 ) ? $data['table_chunk_bytes'] : 0;
+		$table_chunk_rows = ( isset( $data['table_chunk_rows'] ) && is_int( $data['table_chunk_rows'] ) && $data['table_chunk_rows'] >= 0 ) ? $data['table_chunk_rows'] : 0;
 
 		// Reject the record unless every field is present and correctly typed; a
 		// pre-execution record without the tick secret or artifact name is a schema
@@ -368,7 +392,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows );
 
 	}
 

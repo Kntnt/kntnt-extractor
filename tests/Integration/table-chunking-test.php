@@ -430,9 +430,36 @@ kntnt_extractor_assert( ( $s_adapted['state'] ?? null ) !== 'failed', 'A stall w
 kntnt_extractor_assert( ( $s_adapted['attempts'] ?? null ) === 0, 'Adapting a table stall resets the attempt counter (AC5)' );
 kntnt_extractor_assert( is_int( $s_adapted['table_chunk_bytes'] ?? null ) && $s_adapted['table_chunk_bytes'] > 0 && $s_adapted['table_chunk_bytes'] < 4194304, 'A table-chunk stall halves the persisted byte budget (AC5)' );
 
-// The floor is what still fails the job: a one-byte budget that has already been
-// begun three times cannot shrink further, and retrying it would spin forever.
-// A fresh job is used because the adapted tick above may have finished the table.
+// Both of the slice's bounds have to give. The byte budget caps only what is rendered,
+// escaped and sealed; the rows themselves are materialised by `$wpdb->get_results()`
+// under the row budget alone, which is the half a memory kill is likeliest to have
+// happened in. Halving the bytes and leaving the fetch exactly as large as the one
+// that just died would burn the next attempt window at the same real size — an
+// adaptation that reads as one and measurably is not.
+kntnt_extractor_assert( is_int( $s_adapted['table_chunk_rows'] ?? null ) && $s_adapted['table_chunk_rows'] > 0 && $s_adapted['table_chunk_rows'] < 1000, 'A table-chunk stall halves the persisted row budget too, so the fetch shrinks with the render (AC5)' );
+
+// A byte budget alone at the floor is therefore NOT the floor: the fetch can still be
+// halved, and that is a real attempt worth making rather than a failure. A fresh job
+// carries it, because the adapted tick above may already have finished the table.
+wp_set_current_user( $owner->ID );
+$rows_response = $post_extractions( [ 'tables' => [ $single_table ], 'public_key' => base64_encode( $public_key ) ] );
+$rows_id = is_array( $rows_response->get_data() ) ? (string) ( $rows_response->get_data()['id'] ?? '' ) : '';
+$rows_secret = (string) ( ( $read_state( $work, $rows_id ) ?? [] )['tick_secret'] ?? '' );
+$tick( $rows_id, $rows_secret );
+$rows_state = $read_state( $work, $rows_id ) ?? [];
+$rows_state['attempts'] = 3;
+$rows_state['table_chunk_bytes'] = 1;
+$rows_state['table_chunk_rows'] = 64;
+$write_state( $work, $rows_id, $rows_state );
+$tick( $rows_id, $rows_secret );
+$s_rows_only = $read_state( $work, $rows_id ) ?? [];
+kntnt_extractor_assert( ( $s_rows_only['state'] ?? null ) !== 'failed', 'A one-byte table budget whose row budget can still shrink does not fail the job (AC5)' );
+kntnt_extractor_assert( ( $s_rows_only['table_chunk_rows'] ?? null ) === 32, 'That stall shrinks the row budget alone, the byte budget already being at its floor (AC5)' );
+
+// The floor is what still fails the job: a slice whose byte AND row budgets have both
+// been begun three times at one cannot shrink further, and retrying it would spin
+// forever. A fresh job is used because the adapted ticks above may have finished the
+// table.
 wp_set_current_user( $owner->ID );
 $floor_response = $post_extractions( [ 'tables' => [ $single_table ], 'public_key' => base64_encode( $public_key ) ] );
 $floor_id = is_array( $floor_response->get_data() ) ? (string) ( $floor_response->get_data()['id'] ?? '' ) : '';
@@ -442,6 +469,7 @@ $floor_state = $read_state( $work, $floor_id ) ?? [];
 $floor_row = is_array( $floor_state['progress'] ?? null ) && is_int( $floor_state['progress']['table_offset'] ?? null ) ? $floor_state['progress']['table_offset'] : 0;
 $floor_state['attempts'] = 3;
 $floor_state['table_chunk_bytes'] = 1;
+$floor_state['table_chunk_rows'] = 1;
 $write_state( $work, $floor_id, $floor_state );
 $tick( $floor_id, $floor_secret );
 $s_failed = $get_extraction( $floor_id )->get_data();

@@ -10,20 +10,39 @@
  * permission, plus a way to not walk straight back into the same wall. This file
  * drives both halves end to end against the live REST server.
  *
+ * Which failures resume is narrower than "any diagnosed stall", and the distinction
+ * is the point of half these cases. A stall this release meets never fails the job
+ * while its budget can still shrink — it halves and carries on — so the only stall
+ * that reaches `failed` here is one already at the floor, and re-driving that would
+ * walk back into a wall already measured all the way down. What resume is actually
+ * for is the record an EARLIER release left behind: stalled, failed at the first
+ * wall, budgets never tried at anything smaller. That is a job stranded by an
+ * upgrade, and it is recovered rather than restarted from segment zero. The absence
+ * of the schema-8 budget keys is what identifies it, so the cases below write those
+ * records the way 0.5.1 wrote them — without the keys — rather than with the keys
+ * zeroed, which no release ever produced.
+ *
  * It pins:
- *  - AC1: a job marked `failed` after a diagnosed stall is re-driven from its
- *    persisted progress by a further tick. Garbage appended past `container_bytes`
- *    — the crash-mid-chunk shape — is truncated away, the committed prefix is
- *    kept, and the finished container reassembles without a duplicated segment.
+ *  - AC1: a pre-adaptation record marked `failed` after a diagnosed stall is
+ *    re-driven from its persisted progress by a further tick. Garbage appended past
+ *    `container_bytes` — the crash-mid-chunk shape — is truncated away, the
+ *    committed prefix is kept, and the finished container reassembles without a
+ *    duplicated segment.
  *  - AC2: a chunk begun repeatedly without finishing does not fail the job while
  *    its budget can still shrink. The file-part size is halved, the attempt
  *    counter is reset, and the job stays `running` and reaches `ready`.
  *  - AC3: a budget already at the floor of one byte still fails the job, with the
- *    stall reason naming the chunk. Adaptation is not an infinite retry.
+ *    stall reason naming the chunk. Adaptation is not an infinite retry — and
+ *    neither is resume: a failure this release adapted its way into is never
+ *    re-driven, whatever its budgets would still allow.
  *  - AC4: a job that failed opaquely (an unexpected throw, `error` null) is not
  *    resumed. Automatic resume of a permanent error would loop forever.
- *  - AC5: the watchdog restarts a stall-failed job the same way it restarts a
- *    stale running one, and leaves an opaque failure alone.
+ *  - AC5: the watchdog restarts a pre-adaptation stall-failed job the same way it
+ *    restarts a stale running one, and leaves an opaque failure alone.
+ *  - AC6: a resume is declined when the concurrency ceiling has no room, because a
+ *    failed job frees its slot and a create may already have taken it. The same
+ *    record resumes once there is room, which is the control proving the refusal
+ *    was the ceiling.
  *
  * @package Kntnt\Extractor
  * @since   0.6.0
@@ -290,15 +309,17 @@ $committed_bytes = is_int( $r_progress['container_bytes'] ?? null ) ? $r_progres
 $committed_prefix = $r_build !== '' && $committed_bytes > 0 ? substr( (string) file_get_contents( $r_build ), 0, $committed_bytes ) : '';
 kntnt_extractor_assert( strlen( $committed_prefix ) === $committed_bytes && $committed_bytes > 0, 'The committed prefix is captured before the crash (AC1)' );
 
-// Simulate a tick killed after appending bytes it never acknowledged, then drop
-// the job to failed the way a spent attempt counter used to — the state a
-// production clone was left in.
+// Simulate a tick killed after appending bytes it never acknowledged, then drop the
+// job to failed exactly as 0.5.1 did: a spent attempt counter, a recorded reason, and
+// no budget keys at all, because that release had none to write. That is the record a
+// stranded production run is found in after this plugin is upgraded over it.
 if ( $r_build !== '' ) {
 	file_put_contents( $r_build, random_bytes( 32 ), FILE_APPEND );
 }
 $r_partial['state'] = 'failed';
 $r_partial['attempts'] = 3;
 $r_partial['error'] = 'The extraction stalled: 3 consecutive attempts to package a file ended without advancing.';
+unset( $r_partial['chunk_size'], $r_partial['table_chunk_bytes'], $r_partial['table_chunk_rows'] );
 $write_state( $work, $r_id, $r_partial );
 
 $tick( $r_id, $r_secret );
@@ -351,6 +372,23 @@ $tick( $f_id, $f_secret );
 $f_still = $get_extraction( $f_id )->get_data();
 kntnt_extractor_assert( is_array( $f_still ) && ( $f_still['state'] ?? null ) === 'failed', 'A further tick leaves a floor-failed job failed (AC3)' );
 
+// The floor is not the whole of it, and this is the case that says so. Give the same
+// failed job budgets that HAVE been adapted and could still be halved several times
+// over, so nothing about its size stops a resume. It must still stay failed: a stall
+// this release recorded is one it already shrank its way into, and re-driving it
+// re-runs a search whose every remaining step has been tried. Without this the resume
+// predicate could be satisfied by any diagnosed stall, which is a promise the
+// adaptation path makes it impossible to keep — and, being unreachable, one no other
+// case in this file would notice being broken.
+$f_adapted = $read_state( $work, $f_id ) ?? [];
+$f_adapted['chunk_size'] = 65536;
+$f_adapted['table_chunk_bytes'] = 65536;
+$f_adapted['table_chunk_rows'] = 512;
+$write_state( $work, $f_id, $f_adapted );
+$tick( $f_id, $f_secret );
+$f_adapted_after = $read_state( $work, $f_id ) ?? [];
+kntnt_extractor_assert( ( $f_adapted_after['state'] ?? null ) === 'failed', 'A stall this release already adapted around is never re-driven, however much budget is left (AC3)' );
+
 // --- AC4: an opaque throw-failure is not resumed ---
 
 wp_set_current_user( $owner->ID );
@@ -381,6 +419,7 @@ $w_state['state'] = 'failed';
 $w_state['attempts'] = 3;
 $w_state['error'] = 'The extraction stalled: 3 consecutive attempts ended without advancing.';
 $w_state['updated_at'] = time() - 86400;
+unset( $w_state['chunk_size'], $w_state['table_chunk_bytes'], $w_state['table_chunk_rows'] );
 $write_state( $work, $w_id, $w_state );
 
 $opaque_response = $post_extractions( $selection );
@@ -398,6 +437,41 @@ kntnt_extractor_assert( in_array( $w_id, $driven_ids, true ), 'The watchdog rest
 kntnt_extractor_assert( ! in_array( $opaque_id, $driven_ids, true ), 'The watchdog leaves an opaque failed job alone (AC5)' );
 kntnt_extractor_assert( ( ( $read_state( $work, $w_id ) ?? [] )['state'] ?? null ) !== 'failed', 'The stall-failed job the watchdog drove is no longer failed (AC5)' );
 kntnt_extractor_assert( ( ( $read_state( $work, $opaque_id ) ?? [] )['state'] ?? null ) === 'failed', 'The opaque failed job is still failed after the patrol (AC5)' );
+
+// --- AC6: a resume never takes a slot the concurrency ceiling has already given away ---
+
+// A failed job is terminal and frees its slot, so a `POST /extractions` may have taken
+// it in the meantime. Re-entering `running` occupies it again, and doing that past the
+// ceiling would put two live builds on a site whose whole design says one. The same
+// job is ticked twice against two different ceilings, so the second result is the
+// control for the first: whatever refuses the resume under a full ceiling demonstrably
+// is the ceiling, and not some other property of the record.
+wp_set_current_user( $owner->ID );
+$c_response = $post_extractions( $selection );
+$c_id = is_array( $c_response->get_data() ) ? (string) ( $c_response->get_data()['id'] ?? '' ) : '';
+$c_secret = (string) ( ( $read_state( $work, $c_id ) ?? [] )['tick_secret'] ?? '' );
+$tick( $c_id, $c_secret );
+$c_state = $read_state( $work, $c_id ) ?? [];
+$c_state['state'] = 'failed';
+$c_state['attempts'] = 3;
+$c_state['error'] = 'The extraction stalled: 3 consecutive attempts to package a file ended without advancing.';
+unset( $c_state['chunk_size'], $c_state['table_chunk_bytes'], $c_state['table_chunk_rows'] );
+$write_state( $work, $c_id, $c_state );
+
+// A live job now holds the only slot a ceiling of one allows.
+$rival_response = $post_extractions( $selection );
+$rival_id = is_array( $rival_response->get_data() ) ? (string) ( $rival_response->get_data()['id'] ?? '' ) : '';
+$full = static fn(): int => 1;
+add_filter( 'kntnt_extractor_config_max_active_jobs', $full, 20 );
+$tick( $c_id, $c_secret );
+kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['state'] ?? null ) === 'failed', 'A resume that would exceed the concurrency ceiling is declined (AC6)' );
+kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['error'] ?? null ) !== null, 'A declined resume leaves the failure reason intact, so the job is exactly as it was found (AC6)' );
+
+// Control: the same record, the same tick, a ceiling with room in it.
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $full, 20 );
+$tick( $c_id, $c_secret );
+kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['state'] ?? null ) !== 'failed', 'The same record resumes once the ceiling has room, so the refusal above was the ceiling (AC6)' );
+kntnt_extractor_assert( $rival_id !== '' && ( ( $read_state( $work, $rival_id ) ?? [] )['state'] ?? null ) !== null, 'The rival job that held the slot is untouched by the declined resume (AC6)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

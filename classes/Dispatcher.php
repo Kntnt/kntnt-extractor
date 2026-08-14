@@ -28,12 +28,13 @@ use Throwable;
  * lock is released the tick fires the continuation loopback once, and only when work
  * remains. A build that throws drops the job to failed rather than leaving it wedged in
  * running (ADR-0010). A build whose chunk keeps dying where no `catch` can see it
- * — a memory or execution-time kill — first halves the budget of the chunk that
- * died and retries, and is failed only once that budget cannot shrink further
- * (ADR-0015). A job that did fail from a diagnosed stall can be re-driven from
- * its persisted progress: the next tick, or the watchdog, re-enters `running`
- * with a fresh attempt window and the adapted budget, truncating the container
- * to the last acknowledged offset so an uncommitted tail cannot be duplicated.
+ * — a memory or execution-time kill — first halves the budgets of the chunk that
+ * died and retries, and is failed only once they cannot shrink further
+ * (ADR-0015). A job stalled and failed by a release that could not do that — an
+ * on-disk record from 0.5.1 or earlier — is re-driven instead: the next tick, or
+ * the watchdog, re-enters `running` with a fresh attempt window and adapted
+ * budgets, truncating the container to the last acknowledged offset so an
+ * uncommitted tail cannot be duplicated.
  *
  * Two liveness signals share the job's own state and heartbeat rather than a lock.
  * A tick is the authenticated driver, so it advances any queued or still-running
@@ -109,17 +110,6 @@ final class Dispatcher {
 	private const int DEFAULT_MAX_STALL_ATTEMPTS = 3;
 
 	/**
-	 * Non-terminal jobs allowed at once when the knob does not override it.
-	 *
-	 * Mirrored from the create path so a resume of a failed job honours the same
-	 * ceiling: re-entering `running` occupies the slot again, and must not sneak
-	 * past a job that was created in the window while this one was failed.
-	 *
-	 * @since 0.6.0
-	 */
-	private const int DEFAULT_MAX_ACTIVE_JOBS = 1;
-
-	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
 	 *
 	 * @since 0.1.0
@@ -147,10 +137,10 @@ final class Dispatcher {
 	 * heartbeat, and the continuation loopback is fired once after the lock is released
 	 * so the next tick runs without waiting for a poll. A finished, ready, or
 	 * unresumable terminal job is left untouched, so a duplicate loopback is a
-	 * harmless no-op. A stall-failed job is the exception: it is re-entered into
-	 * running under the lock, with a fresh attempt window and a halved budget,
-	 * then packaged like any other running job (ADR-0015). A build failure lands
-	 * the job in failed.
+	 * harmless no-op. A never-adapted stall-failed job is the exception: it is
+	 * re-entered into running under the lock, with a fresh attempt window and
+	 * halved budgets, then packaged like any other running job (ADR-0015). A build
+	 * failure lands the job in failed.
 	 *
 	 * The nudger's client disconnects almost immediately by design, so the tick calls
 	 * {@see ignore_user_abort()} first and keeps packaging through that abort.
@@ -174,9 +164,9 @@ final class Dispatcher {
 		// keep packaging after that abort rather than dying mid-chunk (ADR-0010).
 		ignore_user_abort( true );
 
-		// Cheap pre-check before touching the filesystem: a ready or unresumable
-		// terminal job is a no-op, so a duplicate or late loopback never rebuilds a
-		// done job. A stall-failed job is the exception — it still holds the
+		// Pre-check before taking the lock: a ready or unresumable terminal job is a
+		// no-op, so a duplicate or late loopback never rebuilds a done job. A
+		// never-adapted stall-failed job is the exception — it still holds the
 		// container a resume needs (ADR-0015).
 		if ( $job->state !== Job_State::Queued && $job->state !== Job_State::Running && ! $this->is_resumable( $job ) ) {
 			return $job;
@@ -202,8 +192,8 @@ final class Dispatcher {
 
 			// Re-check the guard against that committed state, so a tick that lost the race
 			// to finish this job cannot rebuild it or clobber the state the winner saved.
-			// A stall-failed job is re-entered into running here, under the lock, so the
-			// slot is taken back before any chunk runs.
+			// A resumable stall-failed job is re-entered into running here, under the
+			// lock, so the slot is taken back before any chunk runs.
 			if ( $current->state === Job_State::Failed ) {
 				$resumed = $this->resume_failed( $current );
 				if ( $resumed === null ) {
@@ -255,8 +245,9 @@ final class Dispatcher {
 	 * restarted by every watchdog cycle and reporting a frozen progress to its caller.
 	 * The attempt counter, incremented before the work and cleared by every real
 	 * advance, is what makes that visible after the fact. Once it is spent the driver
-	 * halves the budget of the chunk that died and retries; only a budget that cannot
-	 * shrink further fails the job, with a reason naming the chunk (ADR-0013/0015).
+	 * halves the bounds the chunk that died actually spends and retries; only bounds
+	 * that cannot shrink further fail the job, with a reason naming the chunk
+	 * (ADR-0013/0015).
 	 *
 	 * @since 0.1.0
 	 *
@@ -268,10 +259,10 @@ final class Dispatcher {
 		// Call the build stalled once this many attempts have begun on the same chunk
 		// without one of them ever finishing it: the attempts were counted before the
 		// work, so a chunk killed outside PHP still leaves its evidence. While the
-		// relevant budget can still shrink, halve it and retry rather than failing —
-		// that is what makes a crash "carry on" instead of "start over" (ADR-0015).
-		// A budget already at one byte cannot shrink, and retrying it would only
-		// reproduce the kill, so that is the case that still fails the job.
+		// bounds that chunk actually spends can still shrink, halve them and retry
+		// rather than failing — that is what makes a crash "carry on" instead of
+		// "start over" (ADR-0015). Bounds already at their floor cannot shrink, and
+		// retrying would only reproduce the kill, so that is the case that still fails.
 		if ( $job->attempts >= $this->max_stall_attempts() ) {
 			$adapted = $this->adapt( $job );
 			if ( $adapted === null ) {
@@ -508,8 +499,8 @@ final class Dispatcher {
 	 * A queued job always qualifies. A running job qualifies only once its heartbeat
 	 * has gone stale — until then it is being ticked right now and must be left to
 	 * its live driver. A stall-failed job qualifies when it is still resumable: the
-	 * watchdog is what re-drives a diagnosed stall that has left `running`, so a
-	 * crash becomes "carry on" without a new REST verb (ADR-0015). Every other
+	 * watchdog is what re-drives a never-adapted stall left behind by an earlier
+	 * release, so an upgrade recovers it without a new REST verb (ADR-0015). Every other
 	 * terminal or ready state is finished and qualifies for neither. This single
 	 * predicate is what keeps the tick guard and the poll-nudge in exact agreement
 	 * about what "currently being ticked" means. The poll-nudge still never sees a
@@ -673,15 +664,33 @@ final class Dispatcher {
 	}
 
 	/**
-	 * Whether a failed job still holds a diagnosed stall that can be re-driven.
+	 * Whether a failed job holds a stall that was never adapted, and so can be re-driven.
 	 *
-	 * Three things have to be true together, and each one closes a resume that
-	 * would be unsafe (ADR-0015). The failure must be one the plugin diagnosed —
-	 * an unexpected throw leaves `error` null and must stay dead, or a permanent
-	 * bug would retry forever. The relevant budget must still be able to shrink,
-	 * or the next chunk is the same wall the job just died on. And re-entering
-	 * `running` must not push the site past the concurrency ceiling, because a
-	 * failed job frees its slot and a new create may already have taken it.
+	 * Four things have to be true together, and each one closes a resume that would be
+	 * unsafe or pointless (ADR-0015).
+	 *
+	 * The failure must be one the plugin diagnosed. An unexpected throw leaves `error`
+	 * null and must stay dead, or a permanent bug — a file that changed mid-build, a
+	 * path that no longer resolves — would retry forever.
+	 *
+	 * The job's budgets must be untouched. This is the condition that decides what
+	 * automatic resume is actually *for*, and it is narrower than it first looks. A
+	 * stall this release meets never fails the job while its budget can still shrink:
+	 * it halves and carries on, and the only stall that reaches `failed` is one already
+	 * at the floor. Re-driving that would walk straight back into a wall this release
+	 * has already measured all the way down. What remains, and what this predicate
+	 * admits, is a job stalled and failed by a release that had no adaptation at all —
+	 * an on-disk record from 0.5.1 or earlier, whose container and progress are still
+	 * valid and whose budget has never been tried at anything smaller. That is the
+	 * upgrade path a stranded production run is actually recovered through, and it is
+	 * self-limiting: the resume persists adapted budgets, so a second failure of the
+	 * same job is no longer resumable.
+	 *
+	 * That untouched budget must still be able to shrink, so the re-driven job packages
+	 * something smaller than what killed it rather than repeating it.
+	 *
+	 * And re-entering `running` must not push the site past the concurrency ceiling,
+	 * because a failed job frees its slot and a new create may already have taken it.
 	 *
 	 * @since 0.6.0
 	 *
@@ -692,19 +701,26 @@ final class Dispatcher {
 
 		return $job->state === Job_State::Failed
 			&& $job->error !== null
+			&& ! $job->has_adapted_budgets()
 			&& $this->adapted_budgets( $job ) !== null
-			&& $this->store->count_active() < $this->max_active_jobs();
+			&& $this->store->has_free_slot();
 
 	}
 
 	/**
 	 * Re-enters a stall-failed job into `running`, or null when it must stay failed.
 	 *
-	 * Persists the transition under the caller-held tick lock so the slot is taken
-	 * back before any chunk runs. The budgets are the adapted pair; the attempt
-	 * counter and the failure reason are cleared. The container is not touched
-	 * here — {@see Artifact_Builder::advance()} truncates it to the committed
-	 * offset on the first chunk, which is what discards an unacknowledged tail.
+	 * Persists the transition under the caller-held tick lock so the slot is taken back
+	 * before any chunk runs, then re-reads the live job set and stands down if a create
+	 * claimed the same slot in the window between the two. The tick lock is per job, so
+	 * it cannot serialise this against a `POST /extractions` for a different one; taking
+	 * the slot first and yielding it back on a lost race is what keeps the ceiling from
+	 * being exceeded, and it yields in the direction that favours the caller's explicit
+	 * create over an automatic resume.
+	 *
+	 * The container is not touched here — {@see Artifact_Builder::advance()} truncates it
+	 * to the committed offset on the first chunk, which is what discards an
+	 * unacknowledged tail.
 	 *
 	 * @since 0.6.0
 	 *
@@ -713,17 +729,25 @@ final class Dispatcher {
 	 */
 	private function resume_failed( Extraction_Job $job ): ?Extraction_Job {
 
+		// Judge the resume and compute the smaller budgets it will run under; either
+		// answering no leaves the job exactly as it was found.
 		if ( ! $this->is_resumable( $job ) ) {
 			return null;
 		}
-
 		$budgets = $this->adapted_budgets( $job );
 		if ( $budgets === null ) {
 			return null;
 		}
 
-		$resumed = $job->with_resume( $budgets[0], $budgets[1] );
+		// Take the slot back by committing the transition, then confirm nothing else took
+		// it first. Losing that race restores the failure verbatim, so a declined resume
+		// is indistinguishable on disk from one that was never attempted.
+		$resumed = $job->with_resume( $budgets );
 		$this->store->save( $resumed );
+		if ( ! $this->store->has_free_slot( 1 ) ) {
+			$this->store->save( $job );
+			return null;
+		}
 
 		return $resumed;
 
@@ -743,40 +767,35 @@ final class Dispatcher {
 	private function adapt( Extraction_Job $job ): ?Extraction_Job {
 
 		$budgets = $this->adapted_budgets( $job );
-		if ( $budgets === null ) {
-			return null;
-		}
 
-		return $job->with_budgets( $budgets[0], $budgets[1] );
+		return $budgets === null ? null : $job->with_budgets( $budgets );
 
 	}
 
 	/**
-	 * Computes the next file-part and table-slice budgets after one stall, or null.
+	 * Computes the budgets to package under after one stall, or null at the floor.
 	 *
-	 * Exactly one of the two budgets shrinks: the one the current chunk is using.
-	 * A structure-only table and the sealed index have no budget to shrink, so
-	 * those stalls return null and fail the job. A budget already at one byte
-	 * also returns null — that is the floor.
+	 * Only the bounds the current chunk actually spends shrink, because halving one the
+	 * failing work never consulted changes nothing and merely burns another attempt
+	 * window at the same real size. A file part spends one bound; a table slice spends
+	 * both of its own ({@see Chunk_Budgets}). A structure-only table and the sealed
+	 * index spend none, so those stalls return null and fail the job, as does a chunk
+	 * whose bounds are all at their floor.
 	 *
 	 * @since 0.6.0
 	 *
 	 * @param Extraction_Job $job The job whose current chunk has stalled.
-	 * @return array{0: int, 1: int}|null The next file-part and table-slice budgets.
+	 * @return Chunk_Budgets|null The budgets for the next attempt, or null at the floor.
 	 */
-	private function adapted_budgets( Extraction_Job $job ): ?array {
+	private function adapted_budgets( Extraction_Job $job ): ?Chunk_Budgets {
 
-		$file_bytes = $this->builder->chunk_size( $job );
-		$table_bytes = $this->builder->table_chunk_bytes( $job );
-		$which = $this->stalled_budget( $job );
-		if ( $which === 'file' && $file_bytes > 1 ) {
-			return [ max( 1, intdiv( $file_bytes, 2 ) ), $table_bytes ];
-		}
-		if ( $which === 'table' && $table_bytes > 1 ) {
-			return [ $file_bytes, max( 1, intdiv( $table_bytes, 2 ) ) ];
-		}
+		$budgets = $this->builder->budgets( $job );
 
-		return null;
+		return match ( $this->stalled_budget( $job ) ) {
+			'table' => $budgets->halved_for_table(),
+			'file' => $budgets->halved_for_file(),
+			default => null,
+		};
 
 	}
 
@@ -806,21 +825,6 @@ final class Dispatcher {
 		}
 
 		return null;
-
-	}
-
-	/**
-	 * Resolves the concurrency ceiling through the Config seam, clamped to at least one.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @return int Non-terminal jobs allowed at once.
-	 */
-	private function max_active_jobs(): int {
-
-		$configured = $this->config->get( 'max_active_jobs', self::DEFAULT_MAX_ACTIVE_JOBS );
-
-		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_ACTIVE_JOBS );
 
 	}
 

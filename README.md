@@ -68,7 +68,9 @@ Three knobs bound the chunks, all settable as a `wp-config.php` constant or thro
 - `KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS` — rows per table slice, default 1000. The coarser bound; a slice ends at whichever of the two is reached first.
 - `KNTNT_EXTRACTOR_CHUNK_SIZE` — bytes per file part, default 8 MiB.
 
-If a chunk is still too big for the host, the job does not hang: after `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` attempts (default 3) that begin the same chunk and never finish it, the job reports `failed` and its poll's `error.message` names the table and row (or file and byte) it stalled on, together with the host's `memory_limit` and `max_execution_time`. Lower the relevant knob and request the extraction again.
+If a chunk is still too big for the host, the job neither hangs nor dies: after `KNTNT_EXTRACTOR_MAX_STALL_ATTEMPTS` attempts (default 3) that begin the same chunk and never finish it, the job halves the bounds that chunk spends and carries on, keeping everything it has already packaged. A file part halves its byte budget; a table slice halves both of its own, because the byte budget caps only what is rendered while the row budget caps what is fetched into memory. So the run calibrates itself to the host instead of asking you to guess a constant, and the knobs above are a starting point rather than something you must get right.
+
+Only a chunk whose bounds have all reached their floor — one byte, one row — still fails the job. Then the poll's `error.message` names the table and row (or file and byte) it stalled on, together with the host's `memory_limit` and `max_execution_time`: at that point the size is not the problem, so raise those host limits rather than lowering a knob, and request the extraction again.
 
 ### Telling a slow job from a stuck one
 

@@ -66,6 +66,21 @@ final class Job_Store {
 	private const string DIR_NAME = 'kntnt-extractor';
 
 	/**
+	 * Non-terminal jobs allowed at once when the knob does not override it.
+	 *
+	 * One global job by default (ADR-0004): an extraction is heavy, and a second
+	 * concurrent one is refused with 429. Resolved through the Config seam under
+	 * `max_active_jobs`, so a site raises it with the `KNTNT_EXTRACTOR_MAX_ACTIVE_JOBS`
+	 * constant or the matching filter. It lives here, beside the count it bounds,
+	 * because two callers now ask about the slot — the create endpoint and the resume
+	 * path (ADR-0015) — and a ceiling defined once per caller is a ceiling that
+	 * eventually differs between them.
+	 *
+	 * @since 0.6.0
+	 */
+	private const int DEFAULT_MAX_ACTIVE_JOBS = 1;
+
+	/**
 	 * Suffix appended to the working directory to name the served downloads directory.
 	 *
 	 * The served artifacts live in a sibling of the state working directory, named by
@@ -311,6 +326,46 @@ final class Job_Store {
 	public function count_active(): int {
 
 		return count( array_filter( $this->all(), static fn( Extraction_Job $job ): bool => ! $job->state->is_terminal() ) );
+
+	}
+
+	/**
+	 * Whether the site's concurrency ceiling leaves room for one more live job.
+	 *
+	 * The single answer to "may another job occupy the slot", so the create endpoint
+	 * and the resume path (ADR-0015) cannot drift apart on where the ceiling sits or
+	 * how a misconfigured knob is clamped. It is asked in two situations: before
+	 * claiming the slot, and — by a caller that has already committed a job into it —
+	 * to confirm nothing else claimed it in the same window. `$already_taken` is what
+	 * separates them: it discounts jobs the caller itself just made active, so the
+	 * second question is not answered no by the caller's own job.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param int $already_taken Active jobs the caller has itself committed and may keep.
+	 * @return bool True when another job fits under the ceiling.
+	 */
+	public function has_free_slot( int $already_taken = 0 ): bool {
+
+		return ( $this->count_active() - $already_taken ) < $this->max_active_jobs();
+
+	}
+
+	/**
+	 * Resolves the concurrency ceiling through the Config seam, clamped to at least one.
+	 *
+	 * A non-numeric or non-positive override cannot disable creation outright; the
+	 * floor of one keeps the endpoint usable however the knob is misconfigured.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return int The maximum number of non-terminal jobs allowed at once.
+	 */
+	private function max_active_jobs(): int {
+
+		$configured = $this->config->get( 'max_active_jobs', self::DEFAULT_MAX_ACTIVE_JOBS );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_ACTIVE_JOBS );
 
 	}
 
