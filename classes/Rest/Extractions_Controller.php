@@ -329,10 +329,11 @@ final class Extractions_Controller {
 	 * @param WP_REST_Request $request The incoming poll request, carrying the id.
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state, download_url }` plus
 	 *                                   `progress` while running or ready, `error`
-	 *                                   once failed, and `skipped_files` when a
+	 *                                   once failed, `skipped_files` when a
 	 *                                   `strict: false` create dropped vanished
-	 *                                   files; a 404 for an unknown job, or a 403
-	 *                                   for a non-owner.
+	 *                                   files, and `attempts` once any chunk has
+	 *                                   been begun; a 404 for an unknown job, or a
+	 *                                   403 for a non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -357,10 +358,12 @@ final class Extractions_Controller {
 		];
 
 		// Append the state-scoped optional fields of the v1 poll contract: progress while
-		// the build is advancing (and complete once ready), a reason once it failed, and
-		// skipped files when a strict: false create dropped vanished paths. Missing-key
+		// the build is advancing (and complete once ready), a reason once it failed,
+		// skipped files when a strict: false create dropped vanished paths, and the
+		// bounded attempt log once any chunk has been begun (ADR-0016). Missing-key
 		// optionality — a field the contract marks absent is omitted, never sent as
-		// null — so `progress?`/`error?`/`skipped_files?` read exactly as the spec defines.
+		// null — so `progress?`/`error?`/`skipped_files?`/`attempts?` read exactly as
+		// the spec defines.
 		$progress = $this->progress_of( $job );
 		if ( $progress !== null ) {
 			$response['progress'] = $progress;
@@ -371,6 +374,10 @@ final class Extractions_Controller {
 		}
 		if ( $job->skipped_files !== [] ) {
 			$response['skipped_files'] = $job->skipped_files;
+		}
+		$attempts = $this->attempts_of( $job );
+		if ( $attempts !== [] ) {
+			$response['attempts'] = $attempts;
 		}
 
 		return new WP_REST_Response( $response );
@@ -471,6 +478,44 @@ final class Extractions_Controller {
 		return $job->state === Job_State::Failed
 			? [ 'message' => $job->error ?? __( 'The extraction failed.', 'kntnt-extractor' ) ]
 			: null;
+
+	}
+
+	/**
+	 * Reports the poll contract's `attempts?` — the bounded last-N of begun chunks.
+	 *
+	 * A debug surface, not the audit log (ADR-0016): each entry names the chunk a
+	 * tick began, resolved from the caller's own selection at read time so the
+	 * persisted record never holds a path. Empty until the first tick, and then
+	 * last-N, so a queued poll omits the member and a long run never grows without
+	 * bound. The sealed index has no name.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $job The polled job.
+	 * @return list<array{at: int, kind: string, offset: int, name?: string}>
+	 */
+	private function attempts_of( Extraction_Job $job ): array {
+
+		$attempts = [];
+		foreach ( $job->attempt_log as $attempt ) {
+
+			// Project the persisted scalars and resolve the caller-facing name
+			// from the selection, so the state file never held a path.
+			$entry = [
+				'at' => $attempt->at,
+				'kind' => $attempt->kind->value,
+				'offset' => $attempt->offset,
+			];
+			$name = $attempt->name_on( $job );
+			if ( $name !== null ) {
+				$entry['name'] = $name;
+			}
+			$attempts[] = $entry;
+
+		}
+
+		return $attempts;
 
 	}
 

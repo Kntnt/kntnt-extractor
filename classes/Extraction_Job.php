@@ -48,13 +48,27 @@ final readonly class Extraction_Job {
 	 * stall began persisting the per-job file-part, table-slice and table-fetch budgets
 	 * it had adapted down to (ADR-0015). Still unreleased, the same version also carries
 	 * the first-tick pre-raise and post-raise `memory_limit` and `max_execution_time`
-	 * a later stall reason reads, and the `skipped_files` a `strict: false` create
+	 * a later stall reason reads, the `skipped_files` a `strict: false` create
 	 * records when a named file has vanished between the manifest walk and the POST,
-	 * so neither needs a bump.
+	 * and the bounded `attempt_log` a tick records so a poll can answer what was
+	 * begun (ADR-0016), so none of those needs a bump.
 	 *
 	 * @since 0.1.0
 	 */
 	public const int SCHEMA_VERSION = 8;
+
+	/**
+	 * Newest begun attempts the job record keeps.
+	 *
+	 * A last-N ring, not a lifetime log: every tick begins one attempt, and an
+	 * unbounded list would grow with the build the way `segment_names` once did
+	 * (ADR-0014). Eight is enough to see a stuck chunk retrying versus a run
+	 * still advancing, and small enough that `state.json` stays a few hundred
+	 * bytes (ADR-0016).
+	 *
+	 * @since 0.6.0
+	 */
+	public const int ATTEMPT_LOG_BOUND = 8;
 
 	/**
 	 * The record's keys that are persisted apart from the rest, in the selection file.
@@ -87,30 +101,31 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string              $id          Unguessable job identifier; also its directory name.
-	 * @param Job_State           $state       Lifecycle state the job is in.
-	 * @param int                 $owner       WordPress user id the job is bound to.
-	 * @param string              $public_key  Caller's ephemeral X25519 public key, as base64.
-	 * @param array<int, string>  $tables      Requested full-data table names, already resolved to existing tables.
-	 * @param array<int, string>  $structure_only Requested structure-only (DDL, no rows) table names, already resolved to existing tables (issue #16).
-	 * @param array<int, string>  $files       Requested file paths, already resolved inside the root.
-	 * @param int                 $created_at  Unix timestamp the job was created at.
-	 * @param int                 $updated_at  Unix timestamp the job last changed state at.
-	 * @param string              $tick_secret Per-job secret authenticating the internal tick endpoint.
-	 * @param string              $artifact    Unguessable filename of the sealed artifact in the job directory.
-	 * @param Build_Progress|null $progress   How far the chunked build has got, or null before it begins.
-	 * @param int|null            $progressed_at Unix timestamp the build last advanced a chunk, or null before it has (treated as the creation time). Distinct from $updated_at, which every state save refreshes: this moves only on real progress, so the sweep's absolute ceiling can tell a slow-but-advancing large job from one whose chunk fails uncatchably every attempt.
-	 * @param int                 $attempts    Chunk attempts begun since the build last advanced, reset to zero by every real advance. The counter the tick driver bounds a chunk that dies uncatchably with (ADR-0013), so a job whose tick is killed from outside PHP fails rather than retrying forever.
-	 * @param string|null         $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Surfaced verbatim to the polling owner, so it carries no filesystem path, SQL, or other internal detail.
-	 * @param int                 $chunk_size  Per-job file-part budget in bytes, or 0 to use the Config default. Persisted when a stall halves it (ADR-0015) so the next tick — and a resume of a failed job — packages a smaller part rather than walking back into the same wall.
-	 * @param int                 $table_chunk_bytes Per-job table-slice byte budget, or 0 to use the Config default. The table-side counterpart of $chunk_size.
-	 * @param int                 $table_chunk_rows Per-job upper bound on rows fetched for one table slice, or 0 to use the Config default. Halved alongside $table_chunk_bytes, because the byte budget bounds only what is rendered while this bounds what `$wpdb->get_results()` materialises — the half a table stall is most likely to have died in (ADR-0015).
-	 * @param bool                $budget_keys_present Whether the schema-8 budget keys were on the record this snapshot came from. True for every object this release constructs; false only when {@see from_array()} rebuilt a 0.5.1-or-earlier write that never had them. Not itself a persisted field — {@see to_array()} uses it to omit the keys again, so a save cannot turn a pre-adaptation stall into a this-release zero-budget write.
-	 * @param string|null         $host_memory_limit The host's `memory_limit` before the first tick asked for more, or null until that tick has run. The stall reason reads this rather than the live process, so a later tick still names the pair in force when the chunk died.
-	 * @param string|null         $host_max_execution_time The host's `max_execution_time` before the first tick asked for more, or null until that tick has run.
-	 * @param string|null         $raised_memory_limit The `memory_limit` in force after the first tick's ask, or null until that tick has run.
-	 * @param string|null         $raised_max_execution_time The `max_execution_time` in force after the first tick's ask, or null until that tick has run.
-	 * @param array<int, string>  $skipped_files Install-root-relative paths a `strict: false` create dropped because they no longer existed. Empty when nothing was skipped. Written once, with the selection.
+	 * @param string                    $id          Unguessable job identifier; also its directory name.
+	 * @param Job_State                 $state       Lifecycle state the job is in.
+	 * @param int                       $owner       WordPress user id the job is bound to.
+	 * @param string                    $public_key  Caller's ephemeral X25519 public key, as base64.
+	 * @param array<int, string>        $tables      Requested full-data table names, already resolved to existing tables.
+	 * @param array<int, string>        $structure_only Requested structure-only (DDL, no rows) table names, already resolved to existing tables (issue #16).
+	 * @param array<int, string>        $files       Requested file paths, already resolved inside the root.
+	 * @param int                       $created_at  Unix timestamp the job was created at.
+	 * @param int                       $updated_at  Unix timestamp the job last changed state at.
+	 * @param string                    $tick_secret Per-job secret authenticating the internal tick endpoint.
+	 * @param string                    $artifact    Unguessable filename of the sealed artifact in the job directory.
+	 * @param Build_Progress|null       $progress   How far the chunked build has got, or null before it begins.
+	 * @param int|null                  $progressed_at Unix timestamp the build last advanced a chunk, or null before it has (treated as the creation time). Distinct from $updated_at, which every state save refreshes: this moves only on real progress, so the sweep's absolute ceiling can tell a slow-but-advancing large job from one whose chunk fails uncatchably every attempt.
+	 * @param int                       $attempts    Chunk attempts begun since the build last advanced, reset to zero by every real advance. The counter the tick driver bounds a chunk that dies uncatchably with (ADR-0013), so a job whose tick is killed from outside PHP fails rather than retrying forever.
+	 * @param string|null               $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Surfaced verbatim to the polling owner, so it carries no filesystem path, SQL, or other internal detail.
+	 * @param int                       $chunk_size  Per-job file-part budget in bytes, or 0 to use the Config default. Persisted when a stall halves it (ADR-0015) so the next tick — and a resume of a failed job — packages a smaller part rather than walking back into the same wall.
+	 * @param int                       $table_chunk_bytes Per-job table-slice byte budget, or 0 to use the Config default. The table-side counterpart of $chunk_size.
+	 * @param int                       $table_chunk_rows Per-job upper bound on rows fetched for one table slice, or 0 to use the Config default. Halved alongside $table_chunk_bytes, because the byte budget bounds only what is rendered while this bounds what `$wpdb->get_results()` materialises — the half a table stall is most likely to have died in (ADR-0015).
+	 * @param bool                      $budget_keys_present Whether the schema-8 budget keys were on the record this snapshot came from. True for every object this release constructs; false only when {@see from_array()} rebuilt a 0.5.1-or-earlier write that never had them. Not itself a persisted field — {@see to_array()} uses it to omit the keys again, so a save cannot turn a pre-adaptation stall into a this-release zero-budget write.
+	 * @param string|null               $host_memory_limit The host's `memory_limit` before the first tick asked for more, or null until that tick has run. The stall reason reads this rather than the live process, so a later tick still names the pair in force when the chunk died.
+	 * @param string|null               $host_max_execution_time The host's `max_execution_time` before the first tick asked for more, or null until that tick has run.
+	 * @param string|null               $raised_memory_limit The `memory_limit` in force after the first tick's ask, or null until that tick has run.
+	 * @param string|null               $raised_max_execution_time The `max_execution_time` in force after the first tick's ask, or null until that tick has run.
+	 * @param array<int, string>        $skipped_files Install-root-relative paths a `strict: false` create dropped because they no longer existed. Empty when nothing was skipped. Written once, with the selection.
+	 * @param array<int, Chunk_Attempt> $attempt_log Newest begun chunk attempts, oldest first, capped at {@see ATTEMPT_LOG_BOUND}. Empty until the first tick. A debug surface, not the stall counter (ADR-0016).
 	 */
 	public function __construct(
 		public string $id,
@@ -137,6 +152,7 @@ final readonly class Extraction_Job {
 		public ?string $raised_memory_limit = null,
 		public ?string $raised_max_execution_time = null,
 		public array $skipped_files = [],
+		public array $attempt_log = [],
 	) {}
 
 	/**
@@ -153,7 +169,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -168,13 +184,23 @@ final readonly class Extraction_Job {
 	 * it again on every real advance, so the count is always consecutive attempts since
 	 * the last progress, never a lifetime total.
 	 *
+	 * The same moment appends a {@see Chunk_Attempt} onto the bounded attempt log
+	 * (ADR-0016), so a later poll can name the chunks that were begun even when the
+	 * stall counter has since been reset. The log is last-N, never a lifetime total.
+	 *
 	 * @since 0.4.0
 	 *
 	 * @return self A new record identical to this one but counting one more attempt.
 	 */
 	public function with_attempt(): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		// Append this begin onto the last-N log, dropping the oldest once full.
+		$log = [ ...$this->attempt_log, Chunk_Attempt::begun_on( $this ) ];
+		if ( count( $log ) > self::ATTEMPT_LOG_BOUND ) {
+			$log = array_slice( $log, -self::ATTEMPT_LOG_BOUND );
+		}
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log );
 
 	}
 
@@ -194,7 +220,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -220,7 +246,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -242,7 +268,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -265,7 +291,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_resume( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -306,7 +332,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_host_limits( string $host_memory_limit, string $host_max_execution_time, string $raised_memory_limit, string $raised_max_execution_time ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log );
 
 	}
 
@@ -372,7 +398,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size?: int, table_chunk_bytes?: int, table_chunk_rows?: int, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size?: int, table_chunk_bytes?: int, table_chunk_rows?: int, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
 	 */
 	public function to_array(): array {
 
@@ -425,6 +451,17 @@ final readonly class Extraction_Job {
 		// the same record it always did.
 		if ( $this->skipped_files !== [] ) {
 			$record['skipped_files'] = $this->skipped_files;
+		}
+
+		// The attempt log is a later addition to unreleased schema 8; omit the key
+		// when nothing has been begun so a job that has not been ticked writes the
+		// same record it always did (ADR-0016).
+		if ( $this->attempt_log !== [] ) {
+			$serialized = [];
+			foreach ( $this->attempt_log as $attempt ) {
+				$serialized[] = $attempt->to_array();
+			}
+			$record['attempt_log'] = $serialized;
 		}
 
 		return $record;
@@ -521,6 +558,22 @@ final readonly class Extraction_Job {
 			$skipped_files = [];
 		}
 
+		// The attempt log is a later addition to unreleased schema 8; an older write
+		// carries none, so an absent or ill-typed value reads as nothing begun rather
+		// than disqualifying the record. A malformed entry is dropped, not fatal.
+		$attempt_log = [];
+		if ( isset( $data['attempt_log'] ) && is_array( $data['attempt_log'] ) && array_is_list( $data['attempt_log'] ) ) {
+			foreach ( $data['attempt_log'] as $entry ) {
+				$attempt = Chunk_Attempt::from_array( $entry );
+				if ( $attempt !== null ) {
+					$attempt_log[] = $attempt;
+				}
+			}
+			if ( count( $attempt_log ) > self::ATTEMPT_LOG_BOUND ) {
+				$attempt_log = array_slice( $attempt_log, -self::ATTEMPT_LOG_BOUND );
+			}
+		}
+
 		// Reject the record unless every field is present and correctly typed; a
 		// pre-execution record without the tick secret or artifact name is a schema
 		// this release cannot drive, so it reads as no readable job here.
@@ -538,7 +591,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log );
 
 	}
 

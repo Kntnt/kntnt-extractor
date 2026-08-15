@@ -65,4 +65,10 @@ The plugin's unconditional promise that no response under `kntnt-extractor/v1` m
 _Avoid_: cache headers (as a synonym for the guarantee)
 
 **Audit log**:
-The append-only record of every successful extraction (user, tables/files, timestamp). Stored as a randomly-named file, not a database table; read only through its own REST endpoint, gated on `manage_options`.
+The append-only record of every successful extraction (user, tables/files, timestamp). Stored as a randomly-named file, not a database table; read only through its own REST endpoint, gated on `manage_options`. Records the instant an artifact becomes downloadable, never an attempt — a failed or still-running job publishes nothing, so nothing is logged. "What was attempted" is the attempt log's question.
+_Avoid_: extraction history, activity log
+
+**Attempt log**:
+The bounded last-N of packaging chunks an extraction job has begun, persisted on the job record and reported on `GET /extractions/{id}` as `attempts?`. A debug surface for a long or stuck run, not an audit trail and not the stall counter: it names what was started, drops the oldest entry past eight, and never grows with the selection. Distinct from the audit log, which records only a ready transition.
+_Avoid_: audit, history, observability
+

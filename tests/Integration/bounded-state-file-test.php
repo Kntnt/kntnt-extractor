@@ -185,9 +185,10 @@ $bsf_selection = [
 $bsf_expected_segments = 1 + count( $bsf_files );
 
 // The ceiling AC1 holds the per-save file to. Generous enough that the record's fixed
-// scalars — two 32-byte hex tokens, a base64 key, the counters — never approach it,
-// and far below what even this modest 40-path selection serialises to.
-$bsf_ceiling = 1024;
+// scalars — two 32-byte hex tokens, a base64 key, the counters, the last-N attempt
+// log — never approach it, and far below what even this modest 40-path selection
+// serialises to.
+$bsf_ceiling = 2048;
 
 // --- Create the job and drive it to ready, watching the two files as it goes ------
 
