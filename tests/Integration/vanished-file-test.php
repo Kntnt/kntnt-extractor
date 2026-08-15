@@ -286,20 +286,56 @@ kntnt_extractor_assert(
 
 // --- AC4: a traversal is never a skip ---
 
-wp_set_current_user( 0 );
+// Posted beside a live file so empty-after-skip cannot 404 on its own: if the
+// traversal were classified vanished, strict: false would skip it and create.
+// Two jobs already hold the slot, so raise the ceiling for that counterfactual.
+wp_set_current_user( $owner->ID );
+$force_max_ac4 = static fn(): int => 3;
+add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max_ac4 );
+
 $traversal = $post_extractions(
 	[
-		'files' => [ '../wp-load.php' ],
+		'files' => [ 'wp-load.php', '../wp-load.php' ],
 		'strict' => false,
 		'public_key' => $valid_key,
 	]
 );
 $traversal_data = $traversal->get_data();
-kntnt_extractor_assert( $traversal->get_status() === 404, 'A traversal path is still 404 under strict: false (AC4)' );
+kntnt_extractor_assert( $traversal->get_status() === 404, 'A traversal beside a live file is still 404 under strict: false, not 201 (AC4)' );
 kntnt_extractor_assert(
 	is_array( $traversal_data ) && is_array( $traversal_data['data'] ?? null ) && ( $traversal_data['data']['files'] ?? null ) === [ '../wp-load.php' ],
 	'The traversal 404 names the out-of-root path (AC4)'
 );
+kntnt_extractor_assert(
+	is_array( $traversal_data )
+		&& ! in_array( '../wp-load.php', $traversal_data['skipped_files'] ?? [], true )
+		&& ! ( is_array( $traversal_data['data'] ?? null ) && in_array( '../wp-load.php', $traversal_data['data']['skipped_files'] ?? [], true ) ),
+	'A traversal is never recorded as a skipped file (AC4)'
+);
+
+$unresolved = $post_extractions(
+	[
+		'files' => [ 'wp-load.php', 'wp-content/../../etc/missing' ],
+		'strict' => false,
+		'public_key' => $valid_key,
+	]
+);
+$unresolved_data = $unresolved->get_data();
+kntnt_extractor_assert( $unresolved->get_status() === 404, 'An unresolved traversal beside a live file is still 404 under strict: false, not 201 (AC4)' );
+kntnt_extractor_assert(
+	is_array( $unresolved_data ) && is_array( $unresolved_data['data'] ?? null ) && ( $unresolved_data['data']['files'] ?? null ) === [ 'wp-content/../../etc/missing' ],
+	'The unresolved-traversal 404 names the out-of-root path (AC4)'
+);
+kntnt_extractor_assert(
+	is_array( $unresolved_data )
+		&& ! in_array( 'wp-content/../../etc/missing', $unresolved_data['skipped_files'] ?? [], true )
+		&& ! ( is_array( $unresolved_data['data'] ?? null ) && in_array( 'wp-content/../../etc/missing', $unresolved_data['data']['skipped_files'] ?? [], true ) ),
+	'An unresolved traversal is never recorded as a skipped file (AC4)'
+);
+
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max_ac4 );
+
+wp_set_current_user( 0 );
 kntnt_extractor_assert(
 	$post_extractions(
 		[

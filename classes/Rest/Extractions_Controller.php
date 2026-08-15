@@ -893,16 +893,18 @@ final class Extractions_Controller {
 	 * Splits requested files into those inside the root, those that vanished, and
 	 * those that are out of bounds.
 	 *
-	 * The boundary is a `realpath` check, never a sanitiser: a path is accepted only
-	 * when it resolves to a real location at or under the installation root, and a
-	 * traversal is rejected outright rather than rewritten (ADR-0003). A path that
-	 * does not resolve at all is vanished — gone between the manifest walk and this
-	 * POST — and is what `strict: false` may skip. A null-byte path and a path that
-	 * resolves outside the root are out of bounds and are never a skip. The root
-	 * and each resolved path are compared on `wp_normalize_path`'d separators so
-	 * the boundary holds on Windows/IIS too. When the root itself cannot be
-	 * resolved — a broken install — the request fails closed, treating every file
-	 * as out of bounds.
+	 * The boundary is never a sanitiser: a path is accepted only when it resolves
+	 * to a real location at or under the installation root, and a traversal is
+	 * rejected outright rather than rewritten (ADR-0003). A `..` segment attempts
+	 * to leave the root even when `realpath` cannot resolve the target, so it is
+	 * out of bounds rather than vanished. A path that does not resolve and never
+	 * attempted to leave the root is vanished — gone between the manifest walk
+	 * and this POST — and is what `strict: false` may skip. A null-byte path, a
+	 * `..` segment, and a path that resolves outside the root are out of bounds
+	 * and are never a skip. The root and each resolved path are compared on
+	 * `wp_normalize_path`'d separators so the boundary holds on Windows/IIS too.
+	 * When the root itself cannot be resolved — a broken install — the request
+	 * fails closed, treating every file as out of bounds.
 	 *
 	 * @since 0.6.0
 	 *
@@ -949,8 +951,17 @@ final class Extractions_Controller {
 				continue;
 			}
 
-			// A false realpath is a vanished file; a resolved path is kept only when it
-			// sits at or under the root on wp_normalize_path'd separators.
+			// A `..` segment is a traversal attempt even when the target does not
+			// exist; realpath would then be false and must not become a skip.
+			$segments = explode( '/', str_replace( '\\', '/', $file ) );
+			if ( in_array( '..', $segments, true ) ) {
+				$out_of_bounds[] = $file;
+				continue;
+			}
+
+			// A false realpath inside the root is a vanished file; a resolved path is
+			// kept only when it sits at or under the root on wp_normalize_path'd
+			// separators.
 			$resolved = realpath( $root . '/' . $file );
 			if ( $resolved === false ) {
 				$vanished[] = $file;
