@@ -171,11 +171,12 @@ final class Job_Store {
 	 * @param array<int, string> $tables         Requested full-data table names, already resolved.
 	 * @param array<int, string> $structure_only Requested structure-only table names, already resolved (issue #16).
 	 * @param array<int, string> $files          Requested file paths, already resolved inside the root.
+	 * @param array<int, string> $skipped_files  Paths a `strict: false` create dropped because they no longer existed.
 	 * @return Extraction_Job The persisted, queued job.
 	 *
 	 * @throws RuntimeException When the job's state file cannot be written whole.
 	 */
-	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files ): Extraction_Job {
+	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files, array $skipped_files = [] ): Extraction_Job {
 
 		// Resolve and harden the working directory, and lay down the separate served
 		// downloads directory the ready artifact will be fetched from, then mint an
@@ -187,7 +188,7 @@ final class Job_Store {
 		$this->ensure_downloads();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
-		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed' );
+		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed', skipped_files: array_values( $skipped_files ) );
 
 		// Give the job its own directory, drop an index.html into it as defence in
 		// depth, and persist the two files that let a later request resume it. The

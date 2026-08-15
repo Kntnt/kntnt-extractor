@@ -58,7 +58,8 @@ use WP_REST_Server;
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
  * key a 400, a selection naming a credential-bearing restricted path (ADR-0011)
  * a 422 naming every offending path, and an unknown table or a file resolving
- * outside the installation root a 404 — and that 404 is decided BEFORE the
+ * outside the installation root a 404 that names every missing table and every
+ * missing file in `data` — and that 404 is decided BEFORE the
  * capability gate, so the plugin rejects a request for something that does not
  * exist without first disclosing whether the caller could have been authorized.
  * The restricted-path check runs before the existence check for the same
@@ -66,7 +67,10 @@ use WP_REST_Server;
  * existence holds does the shared both-capabilities Authorizer get to refuse an
  * unauthorized caller with 403. The out-of-root check is a `realpath` boundary,
  * never a sanitiser: a traversal path is rejected outright, not rewritten into
- * a safe one.
+ * a safe one. An optional `strict` member, defaulting to true, is the one
+ * exception to a vanished *file* being a 404: `strict: false` drops those
+ * paths from the selection, records them on the job, and still 404s a missing
+ * table, a traversal, or a selection that is empty after the skip.
  *
  * @since 0.1.0
  */
@@ -209,8 +213,8 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return WP_REST_Response|WP_Error A 201 with `{ id, state }`, or a 429 when the
-	 *                                   concurrency ceiling is already reached.
+	 * @return WP_REST_Response|WP_Error A 201 with `{ id, state, skipped_files? }`, or a
+	 *                                   429 when the concurrency ceiling is already reached.
 	 */
 	public function create( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -234,14 +238,21 @@ final class Extractions_Controller {
 		// Persist a queued job bound to the caller, then schedule its first continuation
 		// for after this 201 is sent, so the response never waits on loopback or
 		// packaging work — the job's execution begins post-response (ADR-0007/0010).
-		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'] );
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'] );
 		$this->dispatcher->continue_after_response( $job );
 
+		// Echo the id and queued state; name skipped files only when a strict: false
+		// create actually dropped any, matching the poll's missing-key optionality.
+		$response = [
+			'id' => $job->id,
+			'state' => $job->state->value,
+		];
+		if ( $job->skipped_files !== [] ) {
+			$response['skipped_files'] = $job->skipped_files;
+		}
+
 		return new WP_REST_Response(
-			[
-				'id' => $job->id,
-				'state' => $job->state->value,
-			],
+			$response,
 			201,
 		);
 
@@ -317,8 +328,10 @@ final class Extractions_Controller {
 	 *
 	 * @param WP_REST_Request $request The incoming poll request, carrying the id.
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state, download_url }` plus
-	 *                                   `progress` while running or ready and `error`
-	 *                                   once failed; a 404 for an unknown job, or a 403
+	 *                                   `progress` while running or ready, `error`
+	 *                                   once failed, and `skipped_files` when a
+	 *                                   `strict: false` create dropped vanished
+	 *                                   files; a 404 for an unknown job, or a 403
 	 *                                   for a non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
@@ -344,9 +357,10 @@ final class Extractions_Controller {
 		];
 
 		// Append the state-scoped optional fields of the v1 poll contract: progress while
-		// the build is advancing (and complete once ready), and a reason once it failed.
-		// Both use missing-key optionality — a field the contract marks absent is omitted,
-		// never sent as null — so `progress?`/`error?` read exactly as the spec defines.
+		// the build is advancing (and complete once ready), a reason once it failed, and
+		// skipped files when a strict: false create dropped vanished paths. Missing-key
+		// optionality — a field the contract marks absent is omitted, never sent as
+		// null — so `progress?`/`error?`/`skipped_files?` read exactly as the spec defines.
 		$progress = $this->progress_of( $job );
 		if ( $progress !== null ) {
 			$response['progress'] = $progress;
@@ -354,6 +368,9 @@ final class Extractions_Controller {
 		$error = $this->error_of( $job );
 		if ( $error !== null ) {
 			$response['error'] = $error;
+		}
+		if ( $job->skipped_files !== [] ) {
+			$response['skipped_files'] = $job->skipped_files;
 		}
 
 		return new WP_REST_Response( $response );
@@ -658,10 +675,18 @@ final class Extractions_Controller {
 	 * is a 422; an absent or malformed public key is a 400; a file matching the
 	 * credential-bearing deny-list (ADR-0011) is a 422 naming every offending path;
 	 * an unknown table (full-data or structure-only) or a file resolving outside the
-	 * installation root is a 404. Existence is deliberately the last of these so a
+	 * installation root is a 404 naming every missing table and every missing file.
+	 * Existence is deliberately the last of these so a
 	 * well-formed request is never told a resource is missing before it is told its
 	 * own shape is wrong or that it selects a restricted path, yet still ahead of the
 	 * capability gate its caller runs afterwards.
+	 *
+	 * `strict` is optional and defaults to true, which is today's hard fail. A
+	 * present non-boolean is a 422. `strict: false` drops vanished files from the
+	 * selection (and reports them as `skipped_files`) but still 404s a missing
+	 * table, a traversal, a null-byte path, or a selection that is empty once
+	 * the vanished files are gone. Old clients that omit the member keep the
+	 * behaviour they already understood, which is why this stays at api_version 6.
 	 *
 	 * The structure-only selection (issue #16) is additive and independently
 	 * omittable: an absent or null `tables_structure_only` behaves as `[]`, so a
@@ -670,7 +695,7 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string}|WP_Error
+	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>}|WP_Error
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
@@ -694,6 +719,14 @@ final class Extractions_Controller {
 		// both lists is a contradictory request, a malformed body rather than a not-found.
 		if ( array_intersect( $tables, $structure_only ) !== [] ) {
 			return $this->error( 422, 'kntnt_extractor_overlapping_selection', __( 'A table may appear in tables or tables_structure_only, but not both.', 'kntnt-extractor' ) );
+		}
+
+		// A present-but-non-boolean strict is a malformed body; an omitted one is
+		// today's hard fail, so an old client that never heard of the member is
+		// unchanged.
+		$strict = $data['strict'] ?? true;
+		if ( ! is_bool( $strict ) ) {
+			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'strict must be a boolean when provided.', 'kntnt-extractor' ) );
 		}
 
 		// Require a well-formed key: present, valid base64, exactly a 32-byte X25519
@@ -723,19 +756,35 @@ final class Extractions_Controller {
 			);
 		}
 
-		// Existence-first: an unknown table — full-data or structure-only — or an
-		// out-of-root file is a 404, decided before the capability gate (ADR-0003).
-		// Both table lists are existence-checked the same way, before files.
-		$missing = $this->first_missing_table( $tables ) ?? $this->first_missing_table( $structure_only ) ?? $this->first_out_of_root_file( $files );
-		if ( $missing !== null ) {
-			return $this->error( 404, 'kntnt_extractor_unknown_resource', __( 'A requested table or file does not exist within this installation.', 'kntnt-extractor' ) );
+		// Existence-first: collect every missing table and every file that does not
+		// resolve inside the root, then 404 naming all of them (ADR-0003). A missing
+		// table always fails. A vanished file fails unless the caller asked for
+		// `strict: false`, in which case it is dropped and reported; a traversal or
+		// a null-byte path is never a skip.
+		$missing_tables = [ ...$this->missing_tables( $tables ), ...$this->missing_tables( $structure_only ) ];
+		$classified = $this->classify_files( $files );
+		$missing_files = [ ...$classified['vanished'], ...$classified['out_of_bounds'] ];
+		$skipped_files = ( ! $strict ) ? $classified['vanished'] : [];
+		$kept_files = ( ! $strict ) ? $classified['kept'] : $files;
+		$hard_missing_files = $strict ? $missing_files : $classified['out_of_bounds'];
+		if ( $missing_tables !== [] || $hard_missing_files !== [] || ( $kept_files === [] && $tables === [] && $structure_only === [] ) ) {
+			return new WP_Error(
+				'kntnt_extractor_unknown_resource',
+				__( 'A requested table or file does not exist within this installation.', 'kntnt-extractor' ),
+				[
+					'status' => 404,
+					'tables' => $missing_tables,
+					'files' => $missing_files,
+				],
+			);
 		}
 
 		return [
 			'tables' => $tables,
 			'structure_only' => $structure_only,
-			'files' => $files,
+			'files' => $kept_files,
 			'public_key' => $public_key,
+			'skipped_files' => $skipped_files,
 		];
 
 	}
@@ -802,7 +851,7 @@ final class Extractions_Controller {
 	}
 
 	/**
-	 * Returns the first requested table that does not exist, or null when all do.
+	 * Returns every requested table that does not exist, in request order.
 	 *
 	 * Table existence is checked against the database's own catalog, never against
 	 * a caller-supplied fragment of SQL (ADR-0003); the caller sends only names.
@@ -810,13 +859,13 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param array<int, string> $tables The requested table names.
-	 * @return string|null The first unknown table name, or null when every one exists.
+	 * @return array<int, string> The unknown table names, or empty when every one exists.
 	 */
-	private function first_missing_table( array $tables ): ?string {
+	private function missing_tables( array $tables ): array {
 
 		// Skip the catalog query entirely when no table is requested.
 		if ( $tables === [] ) {
-			return null;
+			return [];
 		}
 
 		/**
@@ -826,44 +875,49 @@ final class Extractions_Controller {
 		 */
 		global $wpdb;
 
-		// Compare each requested name against the site's actual tables; the first one
-		// absent from the catalog is the unknown resource that triggers the 404.
+		// Compare each requested name against the site's actual tables; every one
+		// absent from the catalog is named in the 404, not merely the first.
 		$existing = $wpdb->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery -- the site's table catalog is the authoritative existence check (ADR-0003); a schema listing has nothing to prepare or cache.
+		$missing = [];
 		foreach ( $tables as $table ) {
 			if ( ! in_array( $table, $existing, true ) ) {
-				return $table;
+				$missing[] = $table;
 			}
 		}
 
-		return null;
+		return $missing;
 
 	}
 
 	/**
-	 * Returns the first requested file that resolves outside the root, or null.
+	 * Splits requested files into those inside the root, those that vanished, and
+	 * those that are out of bounds.
 	 *
 	 * The boundary is a `realpath` check, never a sanitiser: a path is accepted only
 	 * when it resolves to a real location at or under the installation root, and a
-	 * traversal or absent path is rejected outright rather than rewritten (ADR-0003).
-	 * The root and each resolved path are compared on `wp_normalize_path`'d separators
-	 * so the boundary holds on Windows/IIS too, where `realpath` renders paths with
-	 * backslashes a forward-slash prefix would never match — without that normalisation
-	 * every valid in-root file would 404 there, disabling file selection on a platform
-	 * the plugin explicitly supports. A path carrying a null byte is rejected here too:
-	 * `realpath` would raise a ValueError on such input, so it counts as out of root
-	 * rather than reaching that boundary. When the root itself cannot be resolved — a
-	 * broken install — the request fails closed, treating every file as out of bounds.
+	 * traversal is rejected outright rather than rewritten (ADR-0003). A path that
+	 * does not resolve at all is vanished — gone between the manifest walk and this
+	 * POST — and is what `strict: false` may skip. A null-byte path and a path that
+	 * resolves outside the root are out of bounds and are never a skip. The root
+	 * and each resolved path are compared on `wp_normalize_path`'d separators so
+	 * the boundary holds on Windows/IIS too. When the root itself cannot be
+	 * resolved — a broken install — the request fails closed, treating every file
+	 * as out of bounds.
 	 *
-	 * @since 0.1.0
+	 * @since 0.6.0
 	 *
 	 * @param array<int, string> $files The requested installation-root-relative file paths.
-	 * @return string|null The first out-of-root or absent path, or null when all resolve inside.
+	 * @return array{kept: array<int, string>, vanished: array<int, string>, out_of_bounds: array<int, string>}
 	 */
-	private function first_out_of_root_file( array $files ): ?string {
+	private function classify_files( array $files ): array {
 
 		// Nothing to check when no file is requested.
 		if ( $files === [] ) {
-			return null;
+			return [
+				'kept' => [],
+				'vanished' => [],
+				'out_of_bounds' => [],
+			];
 		}
 
 		// Fail closed if the root cannot be canonicalised: without a trusted root
@@ -872,36 +926,51 @@ final class Extractions_Controller {
 		// too, where realpath yields backslashes a forward-slash needle would never match.
 		$root = realpath( ABSPATH );
 		if ( $root === false ) {
-			return reset( $files );
+			return [
+				'kept' => [],
+				'vanished' => [],
+				'out_of_bounds' => $files,
+			];
 		}
 		$root = wp_normalize_path( $root );
 
-		// Check every requested path against the root, rejecting the first that does
-		// not resolve to a real location at or under it — outright, never rewritten.
+		$kept = [];
+		$vanished = [];
+		$out_of_bounds = [];
+
+		// Sort every requested path: inside the root, gone, or hostile.
 		foreach ( $files as $file ) {
 
 			// A null byte can never belong to a real path and would make realpath raise
-			// a ValueError before authorization even runs; treat it as out of root so a
+			// a ValueError before authorization even runs; treat it as out of bounds so a
 			// hostile path 404s like any other, never crashing the boundary.
 			if ( str_contains( $file, "\0" ) ) {
-				return $file;
+				$out_of_bounds[] = $file;
+				continue;
 			}
 
-			// A false realpath (no such file) is out of root outright; otherwise the
-			// comparison runs on wp_normalize_path'd separators so a path at or under the
-			// root is recognised on every platform, not only where realpath uses slashes.
+			// A false realpath is a vanished file; a resolved path is kept only when it
+			// sits at or under the root on wp_normalize_path'd separators.
 			$resolved = realpath( $root . '/' . $file );
 			if ( $resolved === false ) {
-				return $file;
+				$vanished[] = $file;
+				continue;
 			}
 			$resolved = wp_normalize_path( $resolved );
 			if ( $resolved !== $root && ! str_starts_with( $resolved, $root . '/' ) ) {
-				return $file;
+				$out_of_bounds[] = $file;
+				continue;
 			}
+
+			$kept[] = $file;
 
 		}
 
-		return null;
+		return [
+			'kept' => $kept,
+			'vanished' => $vanished,
+			'out_of_bounds' => $out_of_bounds,
+		];
 
 	}
 

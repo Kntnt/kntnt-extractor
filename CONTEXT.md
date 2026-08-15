@@ -36,8 +36,12 @@ The stage an extraction job is in, reported verbatim to a polling caller. Seven 
 _Avoid_: status
 
 **Job record**:
-An extraction job's own persisted state, held as two files in its working directory rather than one: the *selection file* carries the requested tables and files and is written once, and the *state file* carries everything a tick changes and is what every save rewrites. The split is on what is unbounded, not on what is immutable — a selection runs to tens of thousands of paths and a save happens twice per packaged chunk, so keeping the two apart is what makes a save's cost independent of how much was selected.
+The extraction job's own persisted state, held as two files in its working directory rather than one: the *selection file* carries the requested tables and files — and, when a `strict: false` create dropped vanished paths, those skipped names — and is written once, and the *state file* carries everything a tick changes and is what every save rewrites. The split is on what is unbounded, not on what is immutable — a selection runs to tens of thousands of paths and a save happens twice per packaged chunk, so keeping the two apart is what makes a save's cost independent of how much was selected.
 _Avoid_: job file, job.json
+
+**Skipped file**:
+A file named in a `strict: false` submission that no longer exists on disk at job creation. Dropped from the selection rather than failing the job, recorded on the job record, and reported on the create and poll responses so the caller can see what was omitted. A missing table is never skipped: silence there is data loss. A path that resolves outside the installation root is not vanished either, and still 404s.
+_Avoid_: ignored file, optional file
 
 **Segment**:
 The artifact's unit of encryption and of reassembly: one bounded chunk of one selected table or file, sealed on its own and recorded in the sealed index under that table's name or that file's installation-root-relative path. Nothing is packaged whole, so a table or file larger than one chunk contributes several segments carrying the same name and a reader reassembles a resource by concatenating, in index order, every segment that carries its name.

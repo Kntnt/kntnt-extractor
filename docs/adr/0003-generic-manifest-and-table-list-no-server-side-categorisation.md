@@ -6,9 +6,12 @@ Building that classification logic into the plugin was considered and rejected: 
 
 The manifest is delivered complete, but not necessarily in one HTTP response: on a large installation it is paged through an opaque, ordering-based cursor that the caller loops over to reassemble the whole listing. This keeps that intent — no round trip per file — while bounding each response's memory and time, and it is never a semantic filter: the reassembled manifest is still every file from the installation root downward.
 
-Table names are validated against the database's actual table list before use; no fragment of SQL is ever accepted from a caller. File paths are `realpath`-normalised and rejected outright — not merely sanitised — if they resolve outside the WordPress installation root.
+Table names are validated against the database's actual table list before use; no fragment of SQL is ever accepted from a caller. File paths are `realpath`-normalised and rejected outright — not merely sanitised — if they resolve outside the WordPress installation root. A 404 names every missing table and every missing file in `data`, so a missing table is distinguishable from a missing file and a caller never has to re-walk the manifest to learn which of 49,000 paths died.
+
+A file that existed in the manifest and is gone by the POST is a vanished file, not a categorisation. `strict: false` converts that fatal mismatch into a reported skip: the path is dropped from the selection, recorded on the job, and returned on the create and the poll. A missing table still 404s — silence there is data loss — and a traversal is still rejected, never rewritten into a skip. Omitted `strict` is `true`, which is the hard fail this ADR originally described, so an old client is unchanged. That is why the REST API version stays 6: the new members are additive and the default is current behaviour. A change that old clients must understand to stay correct would have bumped it ([0005](./0005-github-releases-self-hosted-update-checker.md)).
 
 ## Consequences
 
 - Any client wanting a filtered or categorised selection (e.g. "only original images, not regenerated thumbnails") must compute that filter itself from the manifest and table list, then submit the resolved list.
-- A resource name that doesn't already exist (an unknown table, a path outside the root) is rejected before any capability check runs.
+- A resource name that doesn't already exist (an unknown table, a path outside the root) is rejected before any capability check runs, and the 404 names every offender.
+- `strict: false` is the one exception, and only for vanished files: the job proceeds without them and reports what it skipped.
