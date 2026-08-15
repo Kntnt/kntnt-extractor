@@ -46,7 +46,9 @@ final readonly class Extraction_Job {
 	 * when the record was split across two files and the build progress traded its
 	 * segment-name list for a count and an index offset (ADR-0014), and to 8 when a
 	 * stall began persisting the per-job file-part, table-slice and table-fetch budgets
-	 * it had adapted down to (ADR-0015).
+	 * it had adapted down to (ADR-0015). Still unreleased, the same version also carries
+	 * the first-tick pre-raise and post-raise `memory_limit` and `max_execution_time`
+	 * a later stall reason reads, so it does not need a bump.
 	 *
 	 * @since 0.1.0
 	 */
@@ -102,6 +104,10 @@ final readonly class Extraction_Job {
 	 * @param int                 $table_chunk_bytes Per-job table-slice byte budget, or 0 to use the Config default. The table-side counterpart of $chunk_size.
 	 * @param int                 $table_chunk_rows Per-job upper bound on rows fetched for one table slice, or 0 to use the Config default. Halved alongside $table_chunk_bytes, because the byte budget bounds only what is rendered while this bounds what `$wpdb->get_results()` materialises — the half a table stall is most likely to have died in (ADR-0015).
 	 * @param bool                $budget_keys_present Whether the schema-8 budget keys were on the record this snapshot came from. True for every object this release constructs; false only when {@see from_array()} rebuilt a 0.5.1-or-earlier write that never had them. Not itself a persisted field — {@see to_array()} uses it to omit the keys again, so a save cannot turn a pre-adaptation stall into a this-release zero-budget write.
+	 * @param string|null         $host_memory_limit The host's `memory_limit` before the first tick asked for more, or null until that tick has run. The stall reason reads this rather than the live process, so a later tick still names the pair in force when the chunk died.
+	 * @param string|null         $host_max_execution_time The host's `max_execution_time` before the first tick asked for more, or null until that tick has run.
+	 * @param string|null         $raised_memory_limit The `memory_limit` in force after the first tick's ask, or null until that tick has run.
+	 * @param string|null         $raised_max_execution_time The `max_execution_time` in force after the first tick's ask, or null until that tick has run.
 	 */
 	public function __construct(
 		public string $id,
@@ -123,6 +129,10 @@ final readonly class Extraction_Job {
 		public int $table_chunk_bytes = 0,
 		public int $table_chunk_rows = 0,
 		public bool $budget_keys_present = true,
+		public ?string $host_memory_limit = null,
+		public ?string $host_max_execution_time = null,
+		public ?string $raised_memory_limit = null,
+		public ?string $raised_max_execution_time = null,
 	) {}
 
 	/**
@@ -139,7 +149,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -160,7 +170,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_attempt(): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -180,7 +190,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -206,7 +216,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -226,7 +236,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -246,7 +256,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_resume( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows );
+		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -266,6 +276,48 @@ final readonly class Extraction_Job {
 	public function has_adapted_budgets(): bool {
 
 		return $this->chunk_size > 0 || $this->table_chunk_bytes > 0 || $this->table_chunk_rows > 0;
+
+	}
+
+	/**
+	 * Returns a copy carrying the first tick's pre-raise and post-raise host limits.
+	 *
+	 * Written once, when the first tick measures them. A later tick's stall reason
+	 * reads this pair from the record rather than from the live process, so a run
+	 * that adapts over hours still describes the limits in force when the chunk
+	 * died (ADR-0015).
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param string $host_memory_limit The host's `memory_limit` before the ask.
+	 * @param string $host_max_execution_time The host's `max_execution_time` before the ask.
+	 * @param string $raised_memory_limit The `memory_limit` in force after the ask.
+	 * @param string $raised_max_execution_time The `max_execution_time` in force after the ask.
+	 * @return self A new record identical to this one but carrying the measured pair.
+	 */
+	public function with_host_limits( string $host_memory_limit, string $host_max_execution_time, string $raised_memory_limit, string $raised_max_execution_time ): self {
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time );
+
+	}
+
+	/**
+	 * Whether this record already carries the first tick's measured host-limit pair.
+	 *
+	 * False until that tick has run. The driver uses it to persist the pair once
+	 * and leave later ticks alone, so a stall reason cannot pick up a later
+	 * process's numbers.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return bool True once all four readings have been persisted.
+	 */
+	public function has_recorded_limits(): bool {
+
+		return $this->host_memory_limit !== null
+			&& $this->host_max_execution_time !== null
+			&& $this->raised_memory_limit !== null
+			&& $this->raised_max_execution_time !== null;
 
 	}
 
@@ -311,7 +363,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size?: int, table_chunk_bytes?: int, table_chunk_rows?: int}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size?: int, table_chunk_bytes?: int, table_chunk_rows?: int, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string}
 	 */
 	public function to_array(): array {
 
@@ -341,6 +393,22 @@ final readonly class Extraction_Job {
 			$record['chunk_size'] = $this->chunk_size;
 			$record['table_chunk_bytes'] = $this->table_chunk_bytes;
 			$record['table_chunk_rows'] = $this->table_chunk_rows;
+		}
+
+		// The first-tick limit pair is written only once it has been measured. An
+		// older schema-8 record, or a job that has not been ticked yet, keeps the
+		// keys absent rather than inventing empty readings.
+		if ( $this->host_memory_limit !== null ) {
+			$record['host_memory_limit'] = $this->host_memory_limit;
+		}
+		if ( $this->host_max_execution_time !== null ) {
+			$record['host_max_execution_time'] = $this->host_max_execution_time;
+		}
+		if ( $this->raised_memory_limit !== null ) {
+			$record['raised_memory_limit'] = $this->raised_memory_limit;
+		}
+		if ( $this->raised_max_execution_time !== null ) {
+			$record['raised_max_execution_time'] = $this->raised_max_execution_time;
 		}
 
 		return $record;
@@ -421,6 +489,14 @@ final readonly class Extraction_Job {
 		$table_chunk_bytes = ( isset( $data['table_chunk_bytes'] ) && is_int( $data['table_chunk_bytes'] ) && $data['table_chunk_bytes'] >= 0 ) ? $data['table_chunk_bytes'] : 0;
 		$table_chunk_rows = ( isset( $data['table_chunk_rows'] ) && is_int( $data['table_chunk_rows'] ) && $data['table_chunk_rows'] >= 0 ) ? $data['table_chunk_rows'] : 0;
 
+		// The first-tick limit pair is a later addition to unreleased schema 8; an
+		// older write carries none of them, so an absent or ill-typed value reads
+		// as not-yet-measured rather than disqualifying the record.
+		$host_memory_limit = is_string( $data['host_memory_limit'] ?? null ) ? $data['host_memory_limit'] : null;
+		$host_max_execution_time = is_string( $data['host_max_execution_time'] ?? null ) ? $data['host_max_execution_time'] : null;
+		$raised_memory_limit = is_string( $data['raised_memory_limit'] ?? null ) ? $data['raised_memory_limit'] : null;
+		$raised_max_execution_time = is_string( $data['raised_max_execution_time'] ?? null ) ? $data['raised_max_execution_time'] : null;
+
 		// Reject the record unless every field is present and correctly typed; a
 		// pre-execution record without the tick secret or artifact name is a schema
 		// this release cannot drive, so it reads as no readable job here.
@@ -438,7 +514,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $budget_keys_present );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time );
 
 	}
 

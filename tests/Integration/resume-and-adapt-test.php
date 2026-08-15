@@ -43,6 +43,10 @@
  *    failed job frees its slot and a create may already have taken it. The same
  *    record resumes once there is room, which is the control proving the refusal
  *    was the ceiling.
+ *  - P8.1: the first tick persists the pre-raise and post-raise host-limit pair
+ *    on the job, a later tick's stall reason names that pair rather than the
+ *    live process, and a schema-8 record written without the new fields still
+ *    parses.
  *
  * @package Kntnt\Extractor
  * @since   0.6.0
@@ -54,6 +58,7 @@ use Kntnt\Extractor\Artifact_Builder;
 use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Crypto\Sealed_Writer;
 use Kntnt\Extractor\Dispatcher;
+use Kntnt\Extractor\Extraction_Job;
 use Kntnt\Extractor\Job_Store;
 use Kntnt\Extractor\Table_Dumper;
 use Kntnt\Extractor\Watchdog;
@@ -536,6 +541,87 @@ if ( $so_job !== null ) {
 	$store->reclaim_staging( $so_job );
 }
 kntnt_extractor_assert( is_file( $work . '/' . $so_id . '/state.json' ), 'A null-byte artifact token is nothing to reclaim rather than a throw (P3)' );
+
+// --- P8.1: persist the first tick's limit pair; a later stall reads the record ---
+
+// The pair is a measurement taken once, when the first tick asks the host. A
+// later tick that writes the stall reason must name those numbers, not whatever
+// this process happens to be running under after hours of adaptation.
+wp_set_current_user( $owner->ID );
+$p_response = $post_extractions( $selection );
+$p_id = is_array( $p_response->get_data() ) ? (string) ( $p_response->get_data()['id'] ?? '' ) : '';
+$p_secret = (string) ( ( $read_state( $work, $p_id ) ?? [] )['tick_secret'] ?? '' );
+$tick( $p_id, $p_secret );
+$p_first = $read_state( $work, $p_id ) ?? [];
+kntnt_extractor_assert(
+	is_string( $p_first['host_memory_limit'] ?? null )
+	&& is_string( $p_first['host_max_execution_time'] ?? null )
+	&& is_string( $p_first['raised_memory_limit'] ?? null )
+	&& is_string( $p_first['raised_max_execution_time'] ?? null ),
+	'The first tick persists the pre-raise and post-raise limit pair (P8.1)'
+);
+kntnt_extractor_assert(
+	( $p_first['raised_memory_limit'] ?? null ) === (string) ini_get( 'memory_limit' )
+	&& ( $p_first['raised_max_execution_time'] ?? null ) === (string) ini_get( 'max_execution_time' ),
+	'The persisted post-raise pair is the measurement this first tick is running under (P8.1)'
+);
+
+// Plant a pair no live process can report, then floor-stall on a later tick.
+$p_first['host_memory_limit'] = '48M';
+$p_first['host_max_execution_time'] = '17';
+$p_first['raised_memory_limit'] = '96M';
+$p_first['raised_max_execution_time'] = '31';
+$p_first['attempts'] = 3;
+$p_first['chunk_size'] = 1;
+$write_state( $work, $p_id, $p_first );
+$tick( $p_id, $p_secret );
+$p_failed = $get_extraction( $p_id )->get_data();
+$p_message = is_array( $p_failed ) && is_array( $p_failed['error'] ?? null ) ? (string) ( $p_failed['error']['message'] ?? '' ) : '';
+kntnt_extractor_assert( is_array( $p_failed ) && ( $p_failed['state'] ?? null ) === 'failed', 'The later tick still floor-fails the job (P8.1)' );
+kntnt_extractor_assert(
+	str_contains( $p_message, 'memory_limit 48M' )
+	&& str_contains( $p_message, 'max_execution_time 17' )
+	&& str_contains( $p_message, 'memory_limit 96M' )
+	&& str_contains( $p_message, 'max_execution_time 31' ),
+	'A later tick\'s stall reason names the first tick\'s persisted pair, not the live process (P8.1)'
+);
+
+// A schema-8 record written before these fields existed still parses, and the
+// absence of the pair is not the pre-adaptation signal — that remains the
+// absence of the budget keys.
+$p_legacy = [
+	'id' => 'legacy-schema-8-limits',
+	'state' => 'failed',
+	'owner' => 1,
+	'public_key' => 'AAAA',
+	'tables' => [],
+	'structure_only' => [],
+	'files' => [],
+	'created_at' => 1,
+	'updated_at' => 1,
+	'tick_secret' => 'secret',
+	'artifact' => 'a.sealed',
+	'error' => 'The extraction stalled.',
+	'chunk_size' => 0,
+	'table_chunk_bytes' => 0,
+	'table_chunk_rows' => 0,
+];
+$p_parsed = Extraction_Job::from_array( $p_legacy );
+kntnt_extractor_assert( $p_parsed !== null, 'A schema-8 record without the limit-pair fields still parses (P8.1)' );
+kntnt_extractor_assert(
+	$p_parsed !== null
+	&& $p_parsed->host_memory_limit === null
+	&& $p_parsed->host_max_execution_time === null
+	&& $p_parsed->raised_memory_limit === null
+	&& $p_parsed->raised_max_execution_time === null,
+	'Missing limit-pair fields read as absent rather than disqualifying the record (P8.1)'
+);
+kntnt_extractor_assert( $p_parsed !== null && ! $p_parsed->is_pre_adaptation_stall(), 'Absence of the limit pair is not the pre-adaptation stall (P8.1)' );
+
+$p_stranded = $p_legacy;
+unset( $p_stranded['chunk_size'], $p_stranded['table_chunk_bytes'], $p_stranded['table_chunk_rows'] );
+$p_stranded_job = Extraction_Job::from_array( $p_stranded );
+kntnt_extractor_assert( $p_stranded_job !== null && $p_stranded_job->is_pre_adaptation_stall(), 'A diagnosed stall with the budget keys absent is still the pre-adaptation shape (P8.1)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

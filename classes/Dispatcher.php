@@ -127,8 +127,10 @@ final class Dispatcher {
 	 *
 	 * The counterpart to shrinking the chunk (ADR-0015), and the cheaper half: where
 	 * adaptation searches downward for a size the host survives, this simply asks the
-	 * host upward for room, once per tick, with no search and no persisted state. If
-	 * the ask is granted the whole search is skipped for a stall the clock caused.
+	 * host upward for room, once per tick, with no search. The measured pair is
+	 * persisted on the job at the first tick so a later stall reason still names
+	 * those numbers. If the ask is granted the whole search is skipped for a stall
+	 * the clock caused.
 	 *
 	 * Deliberately finite. Zero would remove the last bound inside PHP on a chunk that
 	 * genuinely hangs, and such a chunk holds the per-job tick lock until the process
@@ -163,21 +165,6 @@ final class Dispatcher {
 	 * @since 0.6.0
 	 */
 	private const int DEFAULT_MEMORY_LIMIT = 1073741824;
-
-	/**
-	 * The host's own limits, captured before this process first raised them.
-	 *
-	 * A raise is unconditional and happens on every tick, so by the time a stall is
-	 * diagnosed `ini_get()` reports what this process asked for rather than what the
-	 * site is configured with. Reporting only that would hide the very number the
-	 * operator needs. These hold the pre-raise reading so the stall reason can name
-	 * both, and stay null while nothing has been raised.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @var array{time: string, memory: string}|null
-	 */
-	private ?array $host_limits = null;
 
 	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
@@ -237,8 +224,9 @@ final class Dispatcher {
 		// Ask the host for room before packaging anything. This is the cheap half of the
 		// stall remedy: shrinking the chunk searches downward over many attempts, while
 		// this asks upward once and skips that search entirely when the clock or the
-		// memory ceiling was the whole problem (ADR-0015).
-		$this->raise_limits();
+		// memory ceiling was the whole problem (ADR-0015). The readings go onto the job
+		// at the first tick so a later stall reason names this pair, not a later process.
+		$limits = $this->raise_limits();
 
 		// Pre-check before taking the lock: a ready or unresumable terminal job is a
 		// no-op, so a duplicate or late loopback never rebuilds a done job. A
@@ -278,6 +266,18 @@ final class Dispatcher {
 				$current = $resumed;
 			} elseif ( $current->state !== Job_State::Queued && $current->state !== Job_State::Running ) {
 				return $current;
+			}
+
+			// Persist the first tick's pre-raise and post-raise pair once. A later tick
+			// still raises its own process, but must not overwrite the numbers a stall
+			// reason will report.
+			if ( ! $current->has_recorded_limits() ) {
+				$current = $current->with_host_limits(
+					$limits['host_memory_limit'],
+					$limits['host_max_execution_time'],
+					$limits['raised_memory_limit'],
+					$limits['raised_max_execution_time'],
+				);
 			}
 
 			// Package chunks until the job leaves running or the wall-clock budget is spent;
@@ -603,7 +603,10 @@ final class Dispatcher {
 	 * nothing behind at all (ADR-0013). So it names all three things a reader needs: how
 	 * many attempts died, exactly which chunk they died on, and the two host limits that
 	 * are almost always the cause — neither of which the tick can observe itself being
-	 * killed by, but both of which it can report. Everything in it is either the
+	 * killed by, but both of which it can report. The two pairs come from the job
+	 * record — the first tick's measurement — not from this process, so a stall
+	 * written hours later still describes the limits in force when the chunk died.
+	 * Everything in it is either the
 	 * caller's own selection or a runtime setting `GET /environment` already discloses
 	 * to the same capability, so it leaks nothing the opacity rule (ADR-0007) protects.
 	 *
@@ -619,10 +622,10 @@ final class Dispatcher {
 			__( 'The extraction stalled: %1$d consecutive attempts to package %2$s ended without advancing, so the run is being killed before a single chunk can finish. This host is configured with memory_limit %3$s and max_execution_time %4$s; the plugin asked for more and is running with memory_limit %5$s and max_execution_time %6$s. Where those two pairs are equal the host refused the request, and the only remedy left is to raise the limits in the host configuration. Where they differ the raise was granted and the chunk still died, so what killed it is the web server or the container rather than PHP, and neither a smaller chunk nor a larger PHP limit will help. Otherwise lower KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES, then KNTNT_EXTRACTOR_TABLE_CHUNK_ROWS (for a table) or KNTNT_EXTRACTOR_CHUNK_SIZE (for a file), and request the extraction again.', 'kntnt-extractor' ),
 			$job->attempts,
 			$this->stalled_chunk( $job ),
-			$this->host_limits['memory'] ?? (string) ini_get( 'memory_limit' ),
-			$this->host_limits['time'] ?? (string) ini_get( 'max_execution_time' ),
-			(string) ini_get( 'memory_limit' ),
-			(string) ini_get( 'max_execution_time' ),
+			$job->host_memory_limit ?? '',
+			$job->host_max_execution_time ?? '',
+			$job->raised_memory_limit ?? '',
+			$job->raised_max_execution_time ?? '',
 		);
 
 	}
@@ -920,22 +923,21 @@ final class Dispatcher {
 	 * the clock was the killer. None of that is a reason not to ask: a refused ask
 	 * leaves the run exactly where it was, and a granted one that still dies is itself
 	 * a finding — the kill came from above PHP or from the kernel, which is a diagnosis
-	 * the attempt counter alone can never reach. {@see stall_reason()} reports what was
-	 * asked for beside what the host actually granted, so the difference is visible.
+	 * the attempt counter alone can never reach. The measured pair is persisted on
+	 * the job at the first tick so {@see stall_reason()} can still name it after
+	 * a later process has raised its own limits.
 	 *
 	 * @since 0.6.0
 	 *
-	 * @return void
+	 * @return array{host_memory_limit: string, host_max_execution_time: string, raised_memory_limit: string, raised_max_execution_time: string} The pre-raise and post-raise readings.
 	 */
-	private function raise_limits(): void {
+	private function raise_limits(): array {
 
-		// Read the host's own settings once, before anything has been asked for, so the
-		// stall reason can still name them after a raise has overwritten what ini_get()
-		// reports. A second tick in the same process must not overwrite that reading.
-		$this->host_limits ??= [
-			'time' => (string) ini_get( 'max_execution_time' ),
-			'memory' => (string) ini_get( 'memory_limit' ),
-		];
+		// Read the host's own settings before anything has been asked for, so the
+		// first tick can persist them as the "configured with" half of the stall
+		// reason. A later tick still raises, but does not overwrite that record.
+		$host_max_execution_time = (string) ini_get( 'max_execution_time' );
+		$host_memory_limit = (string) ini_get( 'memory_limit' );
 
 		// Ask for execution time. Best-effort by nature: the directive is locked on many
 		// managed hosts, set_time_limit() may be disabled outright, and on Unix the timer
@@ -951,6 +953,13 @@ final class Dispatcher {
 		if ( $bytes > 0 && wp_convert_hr_to_bytes( (string) ini_get( 'memory_limit' ) ) < $bytes ) {
 			@ini_set( 'memory_limit', (string) $bytes ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.IniSet.memory_limit_Disallowed -- raising the ceiling for one packaging chunk is the documented remedy this endpoint exists to attempt; the outcome is read back and reported.
 		}
+
+		return [
+			'host_memory_limit' => $host_memory_limit,
+			'host_max_execution_time' => $host_max_execution_time,
+			'raised_memory_limit' => (string) ini_get( 'memory_limit' ),
+			'raised_max_execution_time' => (string) ini_get( 'max_execution_time' ),
+		];
 
 	}
 
