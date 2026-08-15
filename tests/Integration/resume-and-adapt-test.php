@@ -27,7 +27,8 @@
  *    re-driven from its persisted progress by a further tick. Garbage appended past
  *    `container_bytes` — the crash-mid-chunk shape — is truncated away, the
  *    committed prefix is kept, and the finished container reassembles without a
- *    duplicated segment.
+ *    duplicated segment. The saved record carries the schema-8 budget keys, so a
+ *    second failure of the same job is no longer a pre-adaptation stall.
  *  - AC2: a chunk begun repeatedly without finishing does not fail the job while
  *    its budget can still shrink. The file-part size is halved, the attempt
  *    counter is reset, and the job stays `running` and reaches `ready`.
@@ -341,6 +342,15 @@ $tick( $r_id, $r_secret );
 $r_resumed = $read_state( $work, $r_id ) ?? [];
 kntnt_extractor_assert( ( $r_resumed['state'] ?? null ) !== 'failed', 'A further tick re-drives a stall-failed job instead of no-opping (AC1)' );
 kntnt_extractor_assert( ( $r_resumed['attempts'] ?? null ) === 0, 'Resuming a failed job resets the spent attempt counter (AC1)' );
+kntnt_extractor_assert(
+	array_key_exists( 'chunk_size', $r_resumed )
+	&& array_key_exists( 'table_chunk_bytes', $r_resumed )
+	&& array_key_exists( 'table_chunk_rows', $r_resumed ),
+	'A resume stamps the schema-8 budget keys onto the saved record (AC1)'
+);
+$r_resumed_job = ( new Job_Store( new Config() ) )->find( $r_id );
+kntnt_extractor_assert( $r_resumed_job !== null && $r_resumed_job->budget_keys_present, 'The reloaded resume has the schema-8 budget keys (AC1)' );
+kntnt_extractor_assert( $r_resumed_job !== null && ! $r_resumed_job->with_failure( 'The extraction stalled: 3 consecutive attempts ended without advancing.' )->is_pre_adaptation_stall(), 'A second failure after resume is not a pre-adaptation stall (AC1)' );
 
 $drive_to_ready( $r_id, $r_secret );
 $r_ready = $get_extraction( $r_id )->get_data();

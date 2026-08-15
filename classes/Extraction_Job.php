@@ -227,7 +227,9 @@ final readonly class Extraction_Job {
 	 * died at the same offset enough times and the relevant budget can still shrink.
 	 * Attempts reset so the new size gets a fresh window; the budgets persist so a
 	 * later tick — or a resume after the job has left `running` — packages the smaller
-	 * part rather than rediscovering the same wall.
+	 * part rather than rediscovering the same wall. Writing the budgets also
+	 * stamps the schema-8 keys present, so a save cannot drop them from a
+	 * keys-absent record.
 	 *
 	 * @since 0.6.0
 	 *
@@ -236,7 +238,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
@@ -248,6 +250,9 @@ final readonly class Extraction_Job {
 	 * the budgets handed in here are already smaller than the ones it died on. The
 	 * failure reason is cleared because the job is no longer failed. An opaque throw, and
 	 * a stall this release already adapted, stay failed and never reach here.
+	 * This is also the moment the schema-8 budget keys are written onto a
+	 * record that never had them, so a save cannot omit them and a second
+	 * failure is not resumable.
 	 *
 	 * @since 0.6.0
 	 *
@@ -256,7 +261,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_resume( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
+		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time );
 
 	}
 
