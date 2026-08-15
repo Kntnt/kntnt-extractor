@@ -268,6 +268,31 @@ final readonly class Extraction_Job {
 	}
 
 	/**
+	 * Whether this record is the stranded stall a resume exists for (ADR-0015).
+	 *
+	 * That is a failure a release too old to adapt wrote: it diagnosed a stall — so
+	 * it carries a reason — and died at the first wall with its budgets never tried
+	 * any smaller. Every failure *this* release writes is one of the other three
+	 * shapes: an opaque throw (no reason), a stall it already shrank its way to the
+	 * floor over (adapted budgets), or a chunk whose bounds it could never shrink at
+	 * all, which is failed with the container already discarded.
+	 *
+	 * This is the one definition of that record shape, because two callers must
+	 * agree about it exactly: the {@see Dispatcher} re-drives it, and the TTL sweep
+	 * spares it while reclaiming every other failed record. A disagreement would
+	 * have the sweep delete the very container the resume is for.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return bool True when this is a pre-adaptation stall record.
+	 */
+	public function is_pre_adaptation_stall(): bool {
+
+		return $this->state === Job_State::Failed && $this->error !== null && ! $this->has_adapted_budgets();
+
+	}
+
+	/**
 	 * Serialises the job into the associative array persisted as JSON.
 	 *
 	 * The state crosses the boundary as its backed string value, and the schema

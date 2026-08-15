@@ -19,6 +19,11 @@
  *    the aged job untouched, a small one sweeps it, while a fresh job survives.
  *  - AC5: only the owner may consume or cancel; a capable non-owner is refused
  *    403 and deletes nothing, and an unknown id is a 404 before ownership.
+ *  - AC6: the same sweep bounds the one terminal residue there is. A failed job
+ *    keeps its record so a poll can still report the reason, and nothing else ever
+ *    reclaims it; the sweep now does, on the same two windows — except for the
+ *    stranded pre-adaptation stall a resume re-drives (ADR-0015), which it spares
+ *    however old, and reclaims as usual once that resume has adapted its budgets.
  *
  * @package Kntnt\Extractor
  * @since   0.1.0
@@ -299,8 +304,62 @@ kntnt_extractor_assert( $get_extraction( $aged_id )->get_status() === 404, 'A sw
 // The fresh job is left untouched by the same sweep.
 kntnt_extractor_assert( ! array_key_exists( $fresh_id, $expired_small_by_id ), 'The sweep does not expire a fresh, recently-updated job (AC4)' );
 kntnt_extractor_assert( is_file( $fresh_artifact ) && is_dir( $fresh_dir ), 'The fresh job survives the sweep with its artifact intact (AC4)' );
-remove_filter( 'kntnt_extractor_config_ttl', $force_ttl );
 $cancel( $fresh_id );
+
+// --- AC6: a failed record is bounded by the same windows, except the resume ---
+
+// A failure keeps its record so a poll can still report it with its reason, and
+// GET /extractions lists only non-terminal jobs — so before this, every failed run
+// left a directory under uploads that nothing but uninstall ever reclaimed. The
+// container is discarded at fail-time (ADR-0015), but job.json still holds the
+// whole selection, which is megabytes on a large one, and nothing bounded the count.
+
+// Rewrites a job's on-disk state file, so a record can be put in exactly the shape
+// a given release would have left behind.
+$restate = static function ( string $id, array $overrides, array $drop = [] ) use ( $work ): void {
+	$path = $work . '/' . $id . '/state.json';
+	$state = json_decode( (string) file_get_contents( $path ), true );
+	$state = is_array( $state ) ? array_merge( $state, $overrides ) : $overrides;
+	foreach ( $drop as $key ) {
+		unset( $state[ $key ] );
+	}
+	file_put_contents( $path, (string) wp_json_encode( $state ) );
+};
+
+// The three failure shapes, all aged far past any short TTL: a stall this release
+// adapted its way to the floor over (a reason and shrunken budgets), an opaque
+// throw (no reason at all), and the stranded pre-adaptation stall — a diagnosed
+// stall with no budget keys whatsoever, which is what 0.5.1 and earlier wrote.
+$aged_stamp = [ 'state' => 'failed', 'updated_at' => time() - 100000, 'progressed_at' => time() - 100000 ];
+$f_floor_id = $id_of( $post_extractions( $selection ) );
+$restate( $f_floor_id, $aged_stamp + [ 'error' => 'The extraction stalled at the floor.', 'chunk_size' => 1 ] );
+$f_opaque_id = $id_of( $post_extractions( $selection ) );
+$restate( $f_opaque_id, $aged_stamp + [ 'error' => null ] );
+$f_stranded_id = $id_of( $post_extractions( $selection ) );
+$restate( $f_stranded_id, $aged_stamp + [ 'error' => 'The extraction stalled: 3 consecutive attempts.' ], [ 'chunk_size', 'table_chunk_bytes', 'table_chunk_rows' ] );
+kntnt_extractor_assert( is_dir( $work . '/' . $f_floor_id ) && is_dir( $work . '/' . $f_opaque_id ) && is_dir( $work . '/' . $f_stranded_id ), 'All three failed records are on disk before the sweep (precondition)' );
+
+$expired_failed = [];
+foreach ( $sweeper->sweep() as $job ) {
+	$expired_failed[ $job->id ] = $job->state;
+}
+kntnt_extractor_assert( array_key_exists( $f_floor_id, $expired_failed ) && ! is_dir( $work . '/' . $f_floor_id ), 'The sweep reclaims a floor-failure this release wrote (AC6)' );
+kntnt_extractor_assert( array_key_exists( $f_opaque_id, $expired_failed ) && ! is_dir( $work . '/' . $f_opaque_id ), 'The sweep reclaims an opaque failure, which is never resumed either (AC6)' );
+kntnt_extractor_assert( $get_extraction( $f_floor_id )->get_status() === 404, 'A reclaimed failure is gone: a later poll is a 404, as for any purged job (AC6)' );
+
+// The one failure the sweep must never touch: its container and progress are the
+// input the resume path re-drives, and it is older than any TTL by construction.
+kntnt_extractor_assert( ! array_key_exists( $f_stranded_id, $expired_failed ), 'The sweep spares the stranded pre-adaptation stall — that record is the resume (AC6)' );
+kntnt_extractor_assert( is_dir( $work . '/' . $f_stranded_id ), 'The spared record keeps its working directory and container (AC6)' );
+
+// Once a resume has run, the record carries adapted budgets and is ordinary
+// residue like any other — the control that shows the exemption is the record
+// shape and not the state.
+$restate( $f_stranded_id, [ 'chunk_size' => 1 ] );
+$expired_after_resume = array_map( static fn( Extraction_Job $job ): string => $job->id, $sweeper->sweep() );
+kntnt_extractor_assert( in_array( $f_stranded_id, $expired_after_resume, true ) && ! is_dir( $work . '/' . $f_stranded_id ), 'The same record is reclaimed once a resume has adapted its budgets (AC6)' );
+
+remove_filter( 'kntnt_extractor_config_ttl', $force_ttl );
 
 // --- AC5: only the owner may consume or cancel ---
 

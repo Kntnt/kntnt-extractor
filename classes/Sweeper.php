@@ -15,10 +15,15 @@ namespace Kntnt\Extractor;
  *
  * A caller is meant to consume a ready artifact and have the server delete it
  * (ADR-0004); this sweep is the backstop for the caller that never confirms. It
- * walks the live job set and, for each non-terminal job whose heartbeat has been
- * silent longer than the TTL, deletes the artifact and the working directory and
- * records the job expired — the same irreversible cleanup consume and cancel reach
- * through {@see Job_Store::purge()}.
+ * walks the live job set and, for each job whose heartbeat has been silent longer
+ * than the TTL, deletes the artifact and the working directory and records the job
+ * expired — the same irreversible cleanup consume and cancel reach through
+ * {@see Job_Store::purge()}.
+ *
+ * That set is every non-terminal job plus the one terminal state that leaves
+ * anything behind: a failure keeps its record so a poll can still report it, and
+ * nothing else ever reclaimed it. The single exception is the stranded
+ * pre-adaptation stall a resume is for. {@see reclaimable()} draws that line.
  *
  * Measuring staleness from the job's heartbeat rather than its creation is
  * deliberate: a ready artifact's clock starts when it became ready, and a job still
@@ -127,7 +132,7 @@ final class Sweeper {
 	 */
 	public function sweep(): array {
 
-		// Reclaim every non-terminal job that has either gone silent longer than the TTL
+		// Reclaim every sweepable job that has either gone silent longer than the TTL
 		// or not progressed a chunk within the absolute ceiling: delete its artifact and
 		// working directory, and record it as expired. The ceiling is measured from the
 		// last progress (falling back to creation for a job that never progressed) and
@@ -138,7 +143,7 @@ final class Sweeper {
 		$now = time();
 		$expired = [];
 		foreach ( $this->store->all() as $job ) {
-			if ( $job->state->is_terminal() ) {
+			if ( ! $this->reclaimable( $job ) ) {
 				continue;
 			}
 			$silent = ( $now - $job->updated_at ) > $ttl;
@@ -164,6 +169,40 @@ final class Sweeper {
 		}
 
 		return $expired;
+
+	}
+
+	/**
+	 * Whether this sweep may reclaim the job at all, before either window is applied.
+	 *
+	 * A non-terminal job always qualifies — that is the never-consumed artifact this
+	 * sweep exists for. Of the terminal states, only `failed` leaves anything on disk:
+	 * consume, cancel, and this sweep all purge the working directory at the
+	 * transition, whereas a failure must keep its record so a poll can still report it
+	 * with its reason. That record is therefore the one terminal residue there is, and
+	 * without a window on it the store grows a directory per failed run forever —
+	 * invisible to `GET /extractions`, which lists only non-terminal jobs, and cleared
+	 * only by uninstall. Since 0.6.0 the failure discards its container at fail-time
+	 * ({@see Job_Store::reclaim_staging()}), so what is left is small, but a large
+	 * selection still makes `job.json` megabytes of it and nothing bounds the count.
+	 *
+	 * The one failure this must never touch is the stranded pre-adaptation stall
+	 * ({@see Extraction_Job::is_pre_adaptation_stall()}): its container and progress
+	 * are the input a resume re-drives (ADR-0015), and it is by definition older than
+	 * any TTL, having been left behind by a release that is being upgraded away from.
+	 * Sweeping it would delete the very thing the resume path was built to recover.
+	 * Once a resume runs, the record carries adapted budgets and this window applies
+	 * to it like any other.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $job The job to judge.
+	 * @return bool True when the TTL and lifetime windows should be applied to it.
+	 */
+	private function reclaimable( Extraction_Job $job ): bool {
+
+		return ! $job->state->is_terminal()
+			|| ( $job->state === Job_State::Failed && ! $job->is_pre_adaptation_stall() );
 
 	}
 

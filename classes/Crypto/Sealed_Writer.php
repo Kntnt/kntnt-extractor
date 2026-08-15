@@ -124,7 +124,7 @@ final class Sealed_Writer {
 	 *
 	 * @since 0.6.0
 	 */
-	private const string INDEX_SUFFIX = '.names';
+	public const string INDEX_SUFFIX = '.names';
 
 	/**
 	 * Handle to the index sidecar while the container is open, `null` otherwise.

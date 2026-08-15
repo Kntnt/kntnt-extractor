@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor;
 
+use Kntnt\Extractor\Crypto\Sealed_Writer;
 use RuntimeException;
 
 /**
@@ -500,6 +501,75 @@ final class Job_Store {
 	public function container_build_path( Extraction_Job $job ): string {
 
 		return $this->base_path() . '/' . $job->id . '/' . $job->artifact . '.building';
+
+	}
+
+	/**
+	 * Returns the path of the in-progress container's index sidecar.
+	 *
+	 * Derived from {@see container_build_path()} with the writer's own suffix so
+	 * the two files stay siblings and a relocated working directory moves both.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $job The job whose sidecar path to resolve.
+	 * @return string Absolute path to the index sidecar inside the job's state directory.
+	 */
+	public function container_index_path( Extraction_Job $job ): string {
+
+		return $this->container_build_path( $job ) . Sealed_Writer::INDEX_SUFFIX;
+
+	}
+
+	/**
+	 * Deletes a failed job's in-progress container and sidecar, keeping the record.
+	 *
+	 * A job this release fails is never resumable (ADR-0015), so the partial
+	 * container is residue the stranded-job sweep cannot see — `GET /extractions`
+	 * lists only non-terminal jobs. Reclaiming the large files at fail-time is
+	 * what empties the staging the next clone would otherwise select. The small
+	 * record stays so a poll still reports `failed` with its reason. A
+	 * pre-adaptation stall must not reach here: its container is the resume.
+	 *
+	 * Each path is realpath-checked to sit inside this job's own directory, the
+	 * same pin {@see delete_artifact()} uses, so a hand-edited token cannot
+	 * climb out. Both halves of that pin are needed: the id names the directory
+	 * and the artifact token names the file within it, and a null byte in either
+	 * would make `realpath()` raise rather than answer, turning a failure the
+	 * caller is recording into an uncaught throw.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $job The failed job whose staging to discard.
+	 * @return void
+	 */
+	public function reclaim_staging( Extraction_Job $job ): void {
+
+		// Refuse a malformed id so a hand-edited record cannot climb out of the store.
+		if ( preg_match( self::ID_PATTERN, $job->id ) !== 1 ) {
+			return;
+		}
+
+		// A null byte can never belong to a real filename and would make realpath raise
+		// a ValueError; treat such a token as nothing to remove, exactly as
+		// {@see delete_artifact()} does.
+		if ( str_contains( $job->artifact, "\0" ) ) {
+			return;
+		}
+
+		// Resolve the job directory; a vanished one is already reclaimed.
+		$job_dir = realpath( $this->base_path() . '/' . $job->id );
+		if ( $job_dir === false || ! is_dir( $job_dir ) ) {
+			return;
+		}
+
+		// Unlink the container and sidecar only when they sit inside this job.
+		foreach ( [ $this->container_build_path( $job ), $this->container_index_path( $job ) ] as $path ) {
+			$resolved = realpath( $path );
+			if ( $resolved !== false && str_starts_with( $resolved, $job_dir . '/' ) && is_file( $resolved ) ) {
+				unlink( $resolved ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own in-progress container or sidecar after a non-resumable failure.
+			}
+		}
 
 	}
 

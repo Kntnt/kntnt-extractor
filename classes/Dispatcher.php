@@ -342,9 +342,7 @@ final class Dispatcher {
 		if ( $job->attempts >= $this->max_stall_attempts() ) {
 			$adapted = $this->adapt( $job );
 			if ( $adapted === null ) {
-				$failed = $job->with_failure( $this->stall_reason( $job ) );
-				$this->store->save( $failed );
-				return $failed;
+				return $this->persist_failure( $job->with_failure( $this->stall_reason( $job ) ) );
 			}
 			$job = $adapted;
 			$this->store->save( $job );
@@ -366,9 +364,7 @@ final class Dispatcher {
 		try {
 			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
 		} catch ( Throwable ) {
-			$failed = $running->with_state( Job_State::Failed );
-			$this->store->save( $failed );
-			return $failed;
+			return $this->persist_failure( $running->with_state( Job_State::Failed ) );
 		}
 
 		// A complete step means the last chunk finalized and published the container, so
@@ -770,6 +766,12 @@ final class Dispatcher {
 	 * And re-entering `running` must not push the site past the concurrency ceiling,
 	 * because a failed job frees its slot and a new create may already have taken it.
 	 *
+	 * The first two live on the record itself, as {@see Extraction_Job::is_pre_adaptation_stall()},
+	 * because the TTL sweep must spare exactly the records this predicate admits and
+	 * would otherwise carry its own copy of the rule. The last two are the driver's
+	 * own to judge — one needs the builder, the other the live job set — so they stay
+	 * here.
+	 *
 	 * @since 0.6.0
 	 *
 	 * @param Extraction_Job $job The job to judge.
@@ -777,11 +779,36 @@ final class Dispatcher {
 	 */
 	private function is_resumable( Extraction_Job $job ): bool {
 
-		return $job->state === Job_State::Failed
-			&& $job->error !== null
-			&& ! $job->has_adapted_budgets()
+		return $job->is_pre_adaptation_stall()
 			&& $this->adapted_budgets( $job ) !== null
 			&& $this->store->has_free_slot();
+
+	}
+
+	/**
+	 * Persists a failed job and discards its in-progress container and sidecar.
+	 *
+	 * This method is reached only by a failure this release just recorded — a
+	 * floor stall, a structure-only or index stall that cannot shrink, or an
+	 * opaque throw. None of those are resumable, so the staging is residue.
+	 * A pre-adaptation record never enters here: it is planted on disk by an
+	 * older release and re-driven by {@see resume_failed()}, which does not
+	 * call this.
+	 *
+	 * The record is saved first so a poll still reports `failed` with its reason.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param Extraction_Job $failed The job already moved into `failed`.
+	 * @return Extraction_Job The same job, after the record and the reclaim.
+	 */
+	private function persist_failure( Extraction_Job $failed ): Extraction_Job {
+
+		// Save the failed record first, then drop staging a resume will never read.
+		$this->store->save( $failed );
+		$this->store->reclaim_staging( $failed );
+
+		return $failed;
 
 	}
 

@@ -186,6 +186,16 @@ $build_file_of = static function ( string $work, string $id ): string {
 	return '';
 };
 
+// Finds the in-progress container's index sidecar in a job directory.
+$sidecar_of = static function ( string $work, string $id ): string {
+	foreach ( glob( $work . '/' . $id . '/*' ) ?: [] as $candidate ) {
+		if ( is_file( $candidate ) && str_ends_with( $candidate, '.building.names' ) ) {
+			return $candidate;
+		}
+	}
+	return '';
+};
+
 // Resolves a ready job's published artifact to raw bytes.
 $artifact_bytes = static function ( array $poll ): string {
 	$url = is_string( $poll['download_url'] ?? null ) ? $poll['download_url'] : '';
@@ -366,6 +376,13 @@ $f_message = is_array( $f_failed ) && is_array( $f_failed['error'] ?? null ) ? (
 kntnt_extractor_assert( $f_message !== '' && str_contains( $f_message, $fixture_rel ), 'The floor-stall reason names the file the build died on (AC3)' );
 kntnt_extractor_assert( str_contains( $f_message, 'memory_limit' ) && str_contains( $f_message, 'max_execution_time' ), 'The floor-stall reason names the two host limits (AC3)' );
 
+// A floor-failure this release wrote is never resumable, so the partial
+// container is residue, not a resume input. The small record stays so this
+// poll could still report failed.
+kntnt_extractor_assert( $build_file_of( $work, $f_id ) === '', 'A floor-failed job discards its in-progress container (P3)' );
+kntnt_extractor_assert( $sidecar_of( $work, $f_id ) === '', 'A floor-failed job discards the container index sidecar too (P3)' );
+kntnt_extractor_assert( is_file( $work . '/' . $f_id . '/state.json' ), 'A floor-failed job keeps the small record a poll still reads (P3)' );
+
 // A further tick must not revive a floor-failed job — that is the infinite-retry
 // the floor exists to close.
 $tick( $f_id, $f_secret );
@@ -472,6 +489,50 @@ remove_filter( 'kntnt_extractor_config_max_active_jobs', $full, 20 );
 $tick( $c_id, $c_secret );
 kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['state'] ?? null ) !== 'failed', 'The same record resumes once the ceiling has room, so the refusal above was the ceiling (AC6)' );
 kntnt_extractor_assert( $rival_id !== '' && ( ( $read_state( $work, $rival_id ) ?? [] )['state'] ?? null ) !== null, 'The rival job that held the slot is untouched by the declined resume (AC6)' );
+
+// --- P3: a this-release stall that never adapts still discards staging ---
+
+// A structure-only chunk spends no bound, so adapt() returns null with every
+// budget still at zero. persist_failure is only reached by a failure this
+// release just wrote, so it must reclaim anyway — the keep-path keyed on
+// "diagnosed and unadapted" would leave residue GET /extractions cannot see.
+wp_set_current_user( $owner->ID );
+$so_response = $post_extractions(
+	[
+		'tables' => [ $wpdb->options ],
+		'tables_structure_only' => [ $wpdb->users ],
+		'public_key' => base64_encode( $public_key ),
+	]
+);
+$so_id = is_array( $so_response->get_data() ) ? (string) ( $so_response->get_data()['id'] ?? '' ) : '';
+$so_secret = (string) ( ( $read_state( $work, $so_id ) ?? [] )['tick_secret'] ?? '' );
+$tick( $so_id, $so_secret );
+kntnt_extractor_assert( $build_file_of( $work, $so_id ) !== '', 'The structure-only stall case has an in-progress container before the stall (P3)' );
+kntnt_extractor_assert( $sidecar_of( $work, $so_id ) !== '', 'The structure-only stall case has an index sidecar before the stall (P3)' );
+$so_state = $read_state( $work, $so_id ) ?? [];
+$so_state['attempts'] = 3;
+$write_state( $work, $so_id, $so_state );
+$tick( $so_id, $so_secret );
+$so_failed = $read_state( $work, $so_id ) ?? [];
+kntnt_extractor_assert( ( $so_failed['state'] ?? null ) === 'failed', 'A structure-only stall fails the job (P3)' );
+kntnt_extractor_assert( ( $so_failed['chunk_size'] ?? 0 ) === 0 && ( $so_failed['table_chunk_bytes'] ?? 0 ) === 0, 'The structure-only stall never adapted a budget (P3)' );
+kntnt_extractor_assert( $build_file_of( $work, $so_id ) === '', 'A this-release structure-only stall discards its container (P3)' );
+kntnt_extractor_assert( $sidecar_of( $work, $so_id ) === '', 'A this-release structure-only stall discards its index sidecar (P3)' );
+kntnt_extractor_assert( is_file( $work . '/' . $so_id . '/state.json' ), 'A this-release structure-only stall keeps the small record (P3)' );
+
+// The reclaim resolves the container through the record's own artifact token, so a
+// hand-edited token carrying a null byte would make realpath() raise inside the very
+// path that is recording a failure. It must be nothing to remove instead, exactly as
+// the artifact deletion treats it.
+$so_hostile = $read_state( $work, $so_id ) ?? [];
+$so_hostile['artifact'] = "kntnt\0extractor.sealed";
+$write_state( $work, $so_id, $so_hostile );
+$so_job = $store->find( $so_id );
+kntnt_extractor_assert( $so_job !== null, 'A record carrying a hostile artifact token still reads back (P3 precondition)' );
+if ( $so_job !== null ) {
+	$store->reclaim_staging( $so_job );
+}
+kntnt_extractor_assert( is_file( $work . '/' . $so_id . '/state.json' ), 'A null-byte artifact token is nothing to reclaim rather than a throw (P3)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
