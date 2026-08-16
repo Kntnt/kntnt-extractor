@@ -1,0 +1,52 @@
+# Runs the project's full verification gate — phpcs, phpstan, the WordPress
+# Playground integration suite, and the release-archive build test — on every
+# push and pull request, so a commit a release could be built from is never
+# unverified.
+name: Gate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: composer gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      # The gate's phpcs and phpstan steps run on this PHP; the integration
+      # suite runs its own WASM PHP inside WordPress Playground and is
+      # unaffected by this version.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+
+      - name: Cache Composer packages
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: composer-${{ runner.os }}-php8.4-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-php8.4-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # The integration suite fetches the pinned Playground CLI and a WordPress
+      # build through npx on first run, so this step needs network access.
+      - name: Run the gate
+        run: composer gate
