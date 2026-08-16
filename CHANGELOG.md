@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.6.0] – 2026-08-16
+
 ### Fixed
 
 - `POST /extractions/{id}/consume` and `DELETE /extractions/{id}` (cancel) deleted a job's artifact and working directory without taking the per-job tick lock every other purging actor (the internal tick driver, the TTL sweep) already took, even though `Job_Store::purge()`'s own docblock named consume, cancel, and the sweep as its three callers. A cancel landing mid-tick could delete the directory a live build was still writing into, and if the driver's artifact-publish rename won that race, a sealed artifact landed in the served downloads directory for a job whose record had just been deleted — reachable by no id and invisible to the sweep, which walks job records and had none left for it (ADR-0019). Both routes now take the same lock, with the same `try`/`finally` discipline the sweep already uses; a lock a live tick is holding answers `409 kntnt_extractor_locked` rather than a silent skip or a blocking wait, and the caller simply retries. `api_version` stays `7`.
@@ -151,7 +153,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.4.0
