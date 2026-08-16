@@ -96,9 +96,13 @@ final class Table_Dumper {
 	 * slice — the one at row offset zero — carries the structure block and the data
 	 * header ahead of its rows, every later slice carries `INSERT` statements alone, so
 	 * the slices concatenate into exactly the block a `mysqldump` reload expects. The
-	 * row budget is rounded up to a whole number of extended-`INSERT` batches, so while
-	 * it is what bounds the slice a boundary is always a statement boundary and the
-	 * concatenation is byte-identical however `$max_rows` is tuned.
+	 * row budget is rounded DOWN to a whole number of extended-`INSERT` batches while it
+	 * still has room for one, so a slice boundary stays a statement boundary and the
+	 * concatenation is byte-identical for any `$max_rows` at or above one batch
+	 * (`ROWS_PER_INSERT`, currently 100). Below that the budget is taken literally instead
+	 * of rounded away: the alignment is unreachable at that size regardless, and a bound
+	 * the stall adaptation walks downward in search of a size the host survives
+	 * (ADR-0015) has to mean what it says rather than floor at a hundred.
 	 *
 	 * `$max_bytes` is the second bound, and the one a host actually enforces. A table of
 	 * few very fat rows sits far under any row budget and still exceeds the request's
@@ -128,7 +132,7 @@ final class Table_Dumper {
 	 * @param string                  $table     The table to dump a slice of; must be an existing table name.
 	 * @param array<int, string>|null $cursor    Key tuple the previous slice ended on, or null for the first slice.
 	 * @param int                     $rows_done Rows of this table already rendered by earlier slices.
-	 * @param int                     $max_rows  Upper bound on rows in this slice, rounded up to whole `INSERT` batches.
+	 * @param int                     $max_rows  Upper bound on rows in this slice, rounded down to whole `INSERT` batches.
 	 * @param int                     $max_bytes Upper bound on the rendered rows' bytes in this slice; at least one row is always rendered.
 	 * @return array{0: string, 1: array<int, string>|null, 2: int, 3: bool} The slice's SQL, the
 	 *         cursor the next slice resumes after, the running row count, and whether the table
@@ -152,10 +156,20 @@ final class Table_Dumper {
 			throw new RuntimeException( 'A table primary key changed while the table was being dumped.' );
 		}
 
+		// Size the page to whole INSERT batches while the budget has room for one, so a
+		// slice boundary stays on a batch boundary and several slices concatenate to
+		// exactly what a single slice would have written. Round DOWN: a budget that is
+		// exceeded is not a bound, and this one is walked downward by the stall
+		// adaptation looking for a size the host survives (ADR-0015). Below one batch
+		// the alignment is unreachable anyway, so the budget is taken literally — which
+		// is what lets it shrink to a single row instead of stopping at a hundred.
+		$limit = $max_rows >= self::ROWS_PER_INSERT
+			? intdiv( $max_rows, self::ROWS_PER_INSERT ) * self::ROWS_PER_INSERT
+			: max( 1, $max_rows );
+
 		// Read the next page in the key's own order, render as much of it as the byte
 		// budget holds, and prefix the structure block and data header on the first
 		// slice only.
-		$limit = max( 1, (int) ceil( $max_rows / self::ROWS_PER_INSERT ) ) * self::ROWS_PER_INSERT;
 		$rows = $this->fetch_rows( $table, $key, $cursor, $rows_done, $limit );
 		[ $data, $rendered ] = $this->insert_statements( $table, $rows, $max_bytes );
 		$sql = ( $rows_done === 0 ? $this->structure_sql( $table ) . $this->data_header( $table ) : '' ) . $data;

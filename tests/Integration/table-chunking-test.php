@@ -482,6 +482,28 @@ kntnt_extractor_assert( $message !== '' && str_contains( $message, $single_table
 kntnt_extractor_assert( str_contains( $message, 'memory_limit' ) && str_contains( $message, 'max_execution_time' ), 'The failure reason names the two host limits that cause this stall (AC5)' );
 kntnt_extractor_assert( str_contains( $message, 'row ' . $floor_row ), 'The failure reason names the row the advanced slices had reached, so the chunk is reproducible (AC5)' );
 
+// --- AC5: the row budget the stall adaptation halves genuinely binds below one batch ---
+
+// A budget under one INSERT batch bounds the fetch to itself, not to 100 rows. Before
+// this fix every value from 1 to 100 rounded UP to a full batch and fetched exactly 100
+// regardless, so the halving above stopped changing the real fetch long before it
+// reached the floor ADR-0015 describes, and kept "adapting" without adapting anything.
+[ , , $bound_rows_done ] = $dumper->dump_chunk( $single_table, null, 0, 10, PHP_INT_MAX );
+kntnt_extractor_assert( $bound_rows_done === 10, 'AC5: a row budget below one INSERT batch bounds the fetch to itself, not to 100 (was: silently floored at 100)' );
+
+// A budget that is not a multiple of one batch is never exceeded. The rounding goes
+// DOWN, not up, so a slice never fetches more rows than the budget allows — the old
+// rounding would have fetched 200 rows here, 50 over the 150-row budget.
+[ , , $unrounded_rows_done ] = $dumper->dump_chunk( $single_table, null, 0, 150, PHP_INT_MAX );
+kntnt_extractor_assert( $unrounded_rows_done <= 150, 'AC5: a row budget that is not a multiple of one INSERT batch is never exceeded (was: rounded up past itself)' );
+
+// The floor is genuinely one row, not one hundred. A budget of 1 still renders exactly
+// one row and advances the cursor rather than stalling or coming back empty — the two
+// rules ("round down to the budget" and "always render at least one row") compose.
+[ , $floor_cursor, $floor_rows_done, $floor_complete ] = $dumper->dump_chunk( $single_table, null, 0, 1, PHP_INT_MAX );
+kntnt_extractor_assert( $floor_rows_done === 1, 'AC5: a row budget of one still renders exactly one row and advances the build (was: floored at 100)' );
+kntnt_extractor_assert( $floor_cursor !== null && $floor_complete === false, 'AC5: a row budget of one advances the cursor rather than stalling or returning an empty slice' );
+
 // --- AC6: a record written before this change still parses and still resumes ---
 
 wp_set_current_user( $owner->ID );
