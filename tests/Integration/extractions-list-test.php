@@ -25,6 +25,14 @@
  *    after the caller consumes a listed (ready) job it drops too — both terminal
  *    ends of a job's life leave the slot-management listing.
  *  - AC7: the REST API version reports 2 (the coordinated cutover bump).
+ *  - AC8: `state=all` additionally lists the caller's own terminal jobs, each
+ *    carrying only id, state, and the timestamps — never progress, never a
+ *    download_url — and the default (no `state`) is unaffected by the
+ *    parameter's mere existence; the ownership boundary holds under `state=all`
+ *    exactly as it does by default, for a live job and a terminal one alike
+ *    (ADR-0019).
+ *  - AC9: a malformed `state` value is a 400, decided by the route's own args
+ *    schema rather than reaching the callback.
  *
  * A job that must be listed carrying progress — and the ready job the consume path
  * needs — is driven one bounded chunk per tick through the internal tick endpoint
@@ -280,6 +288,59 @@ kntnt_extractor_assert( is_array( $ready_entry ) && ( $ready_entry['state'] ?? n
 kntnt_extractor_assert( is_array( $ready_entry ) && ! array_key_exists( 'download_url', $ready_entry ), 'Even a ready listed job carries no download_url (AC6)' );
 kntnt_extractor_assert( $consume( $ready_id )->get_status() === 200, 'The owner consumes the listed ready job (200) (AC6)' );
 kntnt_extractor_assert( ! in_array( $ready_id, $listed_ids( $get_extractions() ), true ), 'A consumed job drops from the listing (AC6)' );
+
+// --- AC8: state=all additionally lists the caller's own terminal jobs (ADR-0019) ---
+
+// Dispatches the collection GET /extractions?state=all through the live REST server.
+$get_extractions_all = static function (): WP_REST_Response {
+	$request = new WP_REST_Request( 'GET', '/kntnt-extractor/v1/extractions' );
+	$request->set_param( 'state', 'all' );
+	return rest_get_server()->dispatch( $request );
+};
+
+wp_set_current_user( $owner->ID );
+
+// The parameter's mere existence does not move the default: the failed and
+// expired jobs seeded for AC2 are still absent from an unparameterised listing.
+kntnt_extractor_assert( ! in_array( $terminal_id, $listed_ids( $get_extractions() ), true ) && ! in_array( $expired_id, $listed_ids( $get_extractions() ), true ), 'The default listing still omits terminal jobs once state=all exists (AC8 precondition)' );
+
+$all_listing = $get_extractions_all();
+kntnt_extractor_assert( $all_listing->get_status() === 200, 'state=all responds 200 (AC8)' );
+$all_ids = $listed_ids( $all_listing );
+kntnt_extractor_assert( in_array( $terminal_id, $all_ids, true ), 'state=all lists the caller\'s own failed job (AC8)' );
+kntnt_extractor_assert( in_array( $expired_id, $all_ids, true ), 'state=all lists the caller\'s own expired job (AC8)' );
+
+// A terminal entry carries exactly the exposure-question fields and nothing an
+// owner could act on: no progress (there is none to report), no download_url
+// (there is no artifact left to fetch).
+$terminal_entry = $entry_for( $all_listing, $terminal_id );
+kntnt_extractor_assert( is_array( $terminal_entry ) && ( $terminal_entry['state'] ?? null ) === 'failed', 'A listed terminal entry carries its state (AC8)' );
+kntnt_extractor_assert( is_array( $terminal_entry ) && is_int( $terminal_entry['created_at'] ?? null ) && is_int( $terminal_entry['updated_at'] ?? null ), 'A listed terminal entry carries its timestamps (AC8)' );
+kntnt_extractor_assert( is_array( $terminal_entry ) && ! array_key_exists( 'progress', $terminal_entry ), 'A listed terminal entry carries no progress (AC8)' );
+kntnt_extractor_assert( is_array( $terminal_entry ) && ! array_key_exists( 'download_url', $terminal_entry ), 'A listed terminal entry carries no download_url (AC8)' );
+kntnt_extractor_assert( is_array( $terminal_entry ) && array_keys( $terminal_entry ) === [ 'id', 'state', 'created_at', 'updated_at' ], 'A listed terminal entry carries exactly id, state, created_at, and updated_at (AC8)' );
+
+// state=all still never crosses the ownership boundary: the second admin's own
+// live job stays invisible to the owner under state=all too.
+kntnt_extractor_assert( ! in_array( $other_id, $listed_ids( $get_extractions_all() ), true ), 'state=all never lists another user\'s live job (AC8)' );
+
+// The direction this parameter could most plausibly widen by mistake: seed a
+// terminal job under the second admin and confirm state=all still excludes it
+// from the owner's own listing.
+wp_set_current_user( is_int( $other_admin ) ? $other_admin : 0 );
+$other_terminal_id = (string) ( $post_extractions( $selection() )->get_data()['id'] ?? '' );
+$other_terminal_job = $store->find( $other_terminal_id );
+kntnt_extractor_assert( $other_terminal_job !== null, 'The second admin\'s terminal-job fixture exists on disk (AC8 precondition)' );
+$store->save( $other_terminal_job->with_state( Job_State::Failed ) );
+wp_set_current_user( $owner->ID );
+kntnt_extractor_assert( ! in_array( $other_terminal_id, $listed_ids( $get_extractions_all() ), true ), 'state=all never lists another user\'s terminal job either (AC8)' );
+
+// --- AC9: a malformed state value is a 400, decided by the route's own args schema ---
+
+$bad_state_request = new WP_REST_Request( 'GET', '/kntnt-extractor/v1/extractions' );
+$bad_state_request->set_param( 'state', 'bogus' );
+$bad_state = rest_get_server()->dispatch( $bad_state_request );
+kntnt_extractor_assert( $bad_state->get_status() === 400, 'A malformed state value is a 400 (AC9)' );
 
 // --- AC7: the REST API version reports the current version ---
 

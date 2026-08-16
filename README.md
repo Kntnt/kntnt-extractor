@@ -92,6 +92,10 @@ A poll of a running or ready job carries `progress`:
 
 The four table and file counters advance only when a whole table or a whole file is finished, so a job working steadily through one large table reports the same counters for minutes at a time. `chunks_done` counts packaging chunks — one table slice, one structure-only table, or one file part — so it moves on every chunk the build seals. **Watch `chunks_done` for liveness and the other four for completion.** It has no total, because how many slices a table takes is not knowable before it is dumped; on a ready job it equals the number of segments the artifact holds.
 
+### Checking what of yours is still on the site
+
+`GET /extractions` normally lists only your own live jobs — queued, running, or ready — so a stranded job can be found and cancelled. Add `?state=all` and the same call additionally lists your own terminal jobs: `consumed`, `cancelled`, `failed`, and `expired`. It answers "is there sealed data of mine still on this site", the question that matters before or after a run: a terminal entry carries only its id, state, and timestamps — never `progress`, never a `download_url`, since there is nothing left to fetch for it. Another user's job is never listed, terminal or not; the owner scope is exactly as narrow with `state=all` as it is by default.
+
 ### Checking who you are authenticated as
 
 `GET /status` is unauthenticated and returns the REST contract's API version. Send credentials with it anyway and it also tells you who they resolved to:

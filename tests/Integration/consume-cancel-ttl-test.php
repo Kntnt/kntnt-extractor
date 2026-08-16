@@ -26,6 +26,16 @@
  *    schema-8 budget keys — which it spares however old, and reclaims as usual
  *    once that resume has adapted its budgets. A this-release stall that never
  *    shrank (reason present, keys at 0) is not that shape and is reclaimed.
+ *  - AC8: cancel and consume both take the job's per-job tick lock before purging
+ *    (ADR-0019). A lock held by a live tick refuses with 409 rather than a silent
+ *    skip or a wait, and deletes nothing; the same call succeeds once the lock is
+ *    released, which is the control proving the 409 was genuinely the lock.
+ *  - AC9: a served artifact whose job record is gone (orphaned by exactly the race
+ *    AC8 closes, or by a crash between an artifact's publish and its record
+ *    settling) is reclaimed by the sweep once it has aged past its grace period —
+ *    the TTL, reused rather than an invented constant — and is left untouched
+ *    while still inside it, which is the assertion that matters most: it is what
+ *    stops this fix from eating a live job's output.
  *
  * @package Kntnt\Extractor
  * @since   0.1.0
@@ -259,6 +269,86 @@ $c3q_id = $id_of( $post_extractions( $selection ) );
 $c3q_response = $cancel( $c3q_id );
 kntnt_extractor_assert( $c3q_response->get_status() === 200 && ( $c3q_response->get_data()['state'] ?? null ) === 'cancelled', 'Cancel cleans up a queued job too (AC3)' );
 kntnt_extractor_assert( ! is_dir( $work . '/' . $c3q_id ), 'Cancel deletes a queued job\'s working directory (AC3)' );
+
+// --- AC8: cancel and consume take the job's tick lock before purging (ADR-0019) ---
+
+// A tick's lock file is per-open-file-description, not per-process: a second
+// fopen() on the same path plus a non-blocking LOCK_EX genuinely fails within
+// this one PHP process, exactly as a real second actor's separate process would
+// fail against a live tick — so no second process is needed to demonstrate the
+// refusal.
+$lock_store = new Job_Store( new Config() );
+
+$c8_cancel_id = $id_of( $post_extractions( $selection ) );
+$c8_cancel_job = $lock_store->find( $c8_cancel_id );
+kntnt_extractor_assert( $c8_cancel_job !== null, 'The cancel-lock demonstration job exists on disk (precondition)' );
+$c8_cancel_lock = fopen( $lock_store->container_lock_path( $c8_cancel_job ), 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- holding the job's own tick lock in-process to demonstrate the refusal a live tick would cause.
+kntnt_extractor_assert( $c8_cancel_lock !== false && flock( $c8_cancel_lock, LOCK_EX | LOCK_NB ), 'The demonstration holds the job\'s tick lock in-process (precondition)' );
+$c8_cancel_locked_response = $cancel( $c8_cancel_id );
+kntnt_extractor_assert( $c8_cancel_locked_response->get_status() === 409, 'Cancel on a job whose tick lock is held is a 409, not a silent skip and not a wait (AC8)' );
+kntnt_extractor_assert( is_dir( $work . '/' . $c8_cancel_id ), 'A 409-refused cancel deletes nothing while the lock is held (AC8)' );
+
+// The control: releasing the lock lets the identical cancel succeed, which is
+// what proves the 409 above was genuinely caused by the held lock and not by
+// some other, coincidental refusal.
+fclose( $c8_cancel_lock ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the in-process demonstration lock.
+$c8_cancel_unlocked_response = $cancel( $c8_cancel_id );
+kntnt_extractor_assert( $c8_cancel_unlocked_response->get_status() === 200, 'The same cancel succeeds once the lock is released (AC8 control)' );
+kntnt_extractor_assert( ! is_dir( $work . '/' . $c8_cancel_id ), 'The retried cancel deletes the working directory once unlocked (AC8 control)' );
+
+// Consume takes the same lock; a ready job's is exercised the same way.
+$c8_consume_id = $id_of( $post_extractions( $selection ) );
+$drive_to_ready( $c8_consume_id );
+$c8_consume_job = $lock_store->find( $c8_consume_id );
+kntnt_extractor_assert( $c8_consume_job !== null && $c8_consume_job->state === Job_State::Ready, 'The consume-lock demonstration job is ready (precondition)' );
+$c8_consume_lock = fopen( $lock_store->container_lock_path( $c8_consume_job ), 'c' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- holding the job's own tick lock in-process to demonstrate the refusal a live tick would cause.
+kntnt_extractor_assert( $c8_consume_lock !== false && flock( $c8_consume_lock, LOCK_EX | LOCK_NB ), 'The demonstration holds the ready job\'s tick lock in-process (precondition)' );
+$c8_consume_locked_response = $consume( $c8_consume_id );
+kntnt_extractor_assert( $c8_consume_locked_response->get_status() === 409, 'Consume on a job whose tick lock is held is a 409 (AC8)' );
+fclose( $c8_consume_lock ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- releasing the in-process demonstration lock.
+kntnt_extractor_assert( $consume( $c8_consume_id )->get_status() === 200, 'The same consume succeeds once the lock is released (AC8 control)' );
+
+// --- AC9: an orphaned artifact is reclaimed past its grace period, spared inside it (ADR-0019) ---
+
+$orphan_ttl_value = 50000;
+$force_orphan_ttl = static function () use ( &$orphan_ttl_value ): int {
+	return $orphan_ttl_value;
+};
+add_filter( 'kntnt_extractor_config_ttl', $force_orphan_ttl );
+$orphan_sweeper = new Sweeper( new Job_Store( new Config() ), new Config() );
+
+// Publish a real artifact by driving a job to ready, then delete only its own
+// working directory directly on disk — never through purge() — leaving the
+// artifact behind with no job record naming it at all: the exact shape a cancel
+// or consume landing mid-tick without this plan's lock (or any other crash
+// between a publish and its record settling) can leave, and the shape
+// {@see Job_Store::orphaned_artifacts()} must find.
+$orphan_id = $id_of( $post_extractions( $selection ) );
+$drive_to_ready( $orphan_id );
+$orphan_artifact = $downloads . '/' . $state_field( $work, $orphan_id, 'artifact' );
+kntnt_extractor_assert( is_file( $orphan_artifact ), 'The orphan-reclamation job is ready with an artifact on disk (precondition)' );
+$rmrf( $work . '/' . $orphan_id );
+kntnt_extractor_assert( ! is_dir( $work . '/' . $orphan_id ) && is_file( $orphan_artifact ), 'The artifact survives with no job record naming it (precondition)' );
+
+// Backdated past the grace period (the TTL), the sweep reclaims it.
+touch( $orphan_artifact, time() - 100000 );
+$orphan_sweeper->sweep();
+kntnt_extractor_assert( ! is_file( $orphan_artifact ), 'An orphaned artifact past its grace period is reclaimed by the sweep (AC9)' );
+
+// A second orphan, left with a fresh mtime, is inside the same grace period and
+// must survive the identical sweep call — the assertion that stops this fix
+// from eating a live job's output, and the one that matters most.
+$fresh_orphan_id = $id_of( $post_extractions( $selection ) );
+$drive_to_ready( $fresh_orphan_id );
+$fresh_orphan_artifact = $downloads . '/' . $state_field( $work, $fresh_orphan_id, 'artifact' );
+$rmrf( $work . '/' . $fresh_orphan_id );
+kntnt_extractor_assert( ! is_dir( $work . '/' . $fresh_orphan_id ) && is_file( $fresh_orphan_artifact ), 'The fresh-orphan artifact survives with no job record naming it (precondition)' );
+touch( $fresh_orphan_artifact, time() );
+$orphan_sweeper->sweep();
+kntnt_extractor_assert( is_file( $fresh_orphan_artifact ), 'An orphaned artifact inside its grace period is NOT reclaimed (AC9)' );
+
+remove_filter( 'kntnt_extractor_config_ttl', $force_orphan_ttl );
+@unlink( $fresh_orphan_artifact );
 
 // --- AC4: the TTL sweep removes a never-consumed artifact, marks it expired ---
 

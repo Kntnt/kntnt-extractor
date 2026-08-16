@@ -39,6 +39,10 @@ _Avoid_: status
 The extraction job's own persisted state, held as two files in its working directory rather than one: the *selection file* carries the requested tables and files — and, when a `strict: false` create dropped vanished paths, those skipped names — and is written once, and the *state file* carries everything a tick changes and is what every save rewrites. The split is on what is unbounded, not on what is immutable — a selection runs to tens of thousands of paths and a save happens twice per packaged chunk, so keeping the two apart is what makes a save's cost independent of how much was selected.
 _Avoid_: job file, job.json
 
+**Orphaned artifact**:
+A sealed artifact in the served downloads directory that no job record claims — the residue of a cancel or consume that once raced a live tick without holding its lock, or of a crash between an artifact's publish and its own job record settling (ADR-0019). Has no id to be addressed by and no owner to scope a caller's request to, so it is never a listing's job and is reclaimed only by the sweep, after the same grace period (the TTL) a never-consumed but still-recorded artifact is judged by.
+_Avoid_: leftover file, dangling artifact
+
 **Skipped file**:
 A file named in a `strict: false` submission that no longer exists on disk at job creation. Dropped from the selection rather than failing the job, recorded on the job record, and reported on the create and poll responses so the caller can see what was omitted. A missing table is never skipped: silence there is data loss. A path that resolves outside the installation root is not vanished either, and still 404s.
 _Avoid_: ignored file, optional file

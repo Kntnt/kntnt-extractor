@@ -99,6 +99,11 @@ kntnt_extractor_assert( is_array( $honours ) && in_array( 'strict', $honours, tr
 // so a caller can check for it the same way.
 kntnt_extractor_assert( is_array( $honours ) && in_array( 'disclosure', $honours, true ), 'GET /status reports honours naming disclosure' );
 
+// `state` — GET /extractions' optional filter that additionally admits the
+// caller's own terminal jobs (ADR-0019), announced here rather than through a
+// version bump since the parameter is absent-by-default and additive.
+kntnt_extractor_assert( is_array( $honours ) && in_array( 'state', $honours, true ), 'GET /status reports honours naming state' );
+
 // A user login that is itself an email address round-trips verbatim, since that
 // is the shape the primary consumer's credential convention has to split.
 $email_login = wp_insert_user( [ 'user_login' => 'status@example.com', 'user_pass' => wp_generate_password(), 'user_email' => 'status@example.com', 'role' => 'subscriber' ] );
