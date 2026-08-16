@@ -136,7 +136,7 @@ Found a bug or want to request a feature? Please [open an issue](https://github.
 
 ## Development
 
-Clone the repository and install PHP dependencies with `composer install`. The coding standard this project follows is materialised under `agents.d/coding-standard/` — read `general.md` plus `php.md` and `wordpress.md` before changing any code. The sealed extraction artifact's byte format is specified normatively in [`docs/container-format.md`](docs/container-format.md); read it before changing `classes/Crypto/Sealed_Writer.php` or anything that reads its output.
+Clone the repository and install PHP dependencies with `composer install`. The coding standard this project follows is materialised under `agents.d/coding-standard/` — read `general.md` plus `php.md` and `wordpress.md` before changing any code. The sealed extraction artifact's byte format is specified normatively in [`docs/container-format.md`](docs/container-format.md); read it before changing `classes/Crypto/Sealed_Writer.php` or anything that reads its output. Cutting a release follows [`docs/release-procedure.md`](docs/release-procedure.md), including the two pre-tag guards it exists to record.
 
 ## How you can contribute
 
