@@ -129,7 +129,13 @@ final class Status_Controller {
 	 * parameter that additionally admits the caller's own terminal jobs
 	 * (ADR-0019): additive by the same reasoning as `strict`, since the parameter
 	 * is absent-by-default and every existing client's unparameterised request is
-	 * unaffected by its existence.
+	 * unaffected by its existence. `unknown_resource_names` is `POST /extractions`
+	 * naming every offender in `data.tables` and `data.files` on a
+	 * `404 kntnt_extractor_unknown_resource` rather than refusing without saying
+	 * what was missing: additive `data` members on an error an old client already
+	 * handles, and the one behaviour on this list a caller must currently infer
+	 * from `api_version` to know whether the names will be there — which is the
+	 * inference ADR-0017 exists to remove.
 	 *
 	 * @since 0.6.0
 	 */
@@ -140,6 +146,7 @@ final class Status_Controller {
 		'skipped_files',
 		'state',
 		'strict',
+		'unknown_resource_names',
 	];
 
 	/**
