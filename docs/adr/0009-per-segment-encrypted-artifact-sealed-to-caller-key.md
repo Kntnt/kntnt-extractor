@@ -13,3 +13,5 @@ Because the artifact is sealed to the caller, and only the caller's private key 
 - A leaked or intercepted artifact is useless without the caller's ephemeral private key, which existed only in that run's memory; the sealed index means even the list of extracted resources stays private.
 - The server keeps its own separate, unencrypted job state for resume and serving bookkeeping (segment offsets, the caller's public key, the manifest of what to serve); this state holds no key that can open the artifact.
 - The client does marginally more than with a server-returned symmetric key: it generates a key pair, sends the public key, and unseals each segment's key before decrypting — a few extra `sodium` calls in an already-decrypting client.
+
+The byte layout this decision produces, the reading algorithm, and the reassembly rule are specified normatively in [`docs/container-format.md`](../container-format.md); this record stays the rationale for the shape, and that document is the reference for the shape itself.

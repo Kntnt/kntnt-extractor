@@ -55,6 +55,11 @@ use RuntimeException;
  * file path may hold, independent of character encoding, with no delimiter it could
  * collide with.
  *
+ * `docs/container-format.md` is the normative statement of this format — the byte
+ * layout above, the reading algorithm, reassembly, and the confidentiality and
+ * integrity guarantees it carries. On any disagreement between that document and
+ * this block, the document governs.
+ *
  * ## The index sidecar
  *
  * The index payload is accumulated on disk beside the in-progress container rather

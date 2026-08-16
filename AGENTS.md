@@ -10,6 +10,7 @@ in the moment.
 
 ## References
 - `docs/adr/` — the settled architectural decisions with rationale; never re-open one as an oversight
+- `docs/container-format.md` — the normative specification of the sealed container's byte format; read before changing anything in `classes/Crypto/Sealed_Writer.php` or reasoning about what a reader (`kntnt-wp-skills`) must do
 - `CONTEXT.md` — the project glossary; use its terms in code, docs, and dialogue
 - `agents.d/coding-standard/general.md` — read before writing or changing any code
 - `agents.d/coding-standard/php.md` — read before writing or changing PHP
