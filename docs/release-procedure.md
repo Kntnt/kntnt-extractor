@@ -57,7 +57,20 @@ No tooling in this repository automates any of these three steps; they are hand 
 
 (Mechanical, given §4–§6 are settled.) Tag the release commit `vX.Y.Z` — every existing tag in this repository follows that form (`v0.1.0` through `v0.5.1`), matching the release links `CHANGELOG.md` already writes (e.g. `CHANGELOG.md:154`). Push the tag. Create the GitHub release from it, with `dist/kntnt-extractor.zip` (§6) attached under exactly that filename — the update checker's `REQUIRE_RELEASE_ASSETS` selection (§2) will not find it under any other name — and release notes drawn from the `CHANGELOG.md` entry just closed (§5).
 
-**Who runs this step, and by what mechanism (`gh release create`, the GitHub web UI, or otherwise), is not established anywhere in this repository** — see §9.
+**Who runs this step, and how** (settled 2026-08-16, previously open under §9): the maintainer runs it by hand from a local clone, with the GitHub CLI. There is deliberately no release workflow — `.github/workflows/` holds only `gate.yml`, and this project releases infrequently and by decision rather than continuously, so the two judgement calls this procedure actually turns on (§3 step 3 and §4) have no automated form anyway.
+
+The commands, in order, on the tagged commit:
+
+```
+bash build-release-zip.sh
+git tag vX.Y.Z
+git push origin main --follow-tags
+gh release create vX.Y.Z dist/kntnt-extractor.zip --title vX.Y.Z --notes-file <notes>
+```
+
+Naming the built artefact as the asset path is what closes the failure mode in §2: `build-release-zip.sh` writes `dist/kntnt-extractor.zip` and nothing else, so the asset arrives under the one name the update checker will accept. Attaching a file selected by hand — dragged into the web UI, or renamed in passing — is how a release becomes invisible to every existing install with no error anywhere. If you publish any other way, verify afterwards that the release's asset list contains exactly `kntnt-extractor.zip`.
+
+The maintainer's own tooling has a `/release` command that performs this whole sequence, including the changelog resolution in §5 and the version bump in §4. That tooling is not part of this repository and nothing here depends on it; the commands above are the procedure, and the tooling is one way of running them.
 
 ## 8. The coordinated case
 
@@ -67,10 +80,23 @@ Concretely, for the change that last moved `API_VERSION` (6 → 7, ADR-0018): `k
 
 The ordering that must hold, therefore: decide whether §4 moves `API_VERSION`; if it does, do not install this plugin's release into any environment that will run an extraction until the corresponding `kntnt-wp-skills` release, with its ceiling raised and its own compatibility fix landed, is also installed there.
 
-## 9. Open questions for the maintainer
+**How the production site receives the update** (settled 2026-08-16, previously open under §9): by hand, by the maintainer, through wp-admin — never by auto-update, and never by anyone at the client. This is not a preference; it is what makes the ordering above enforceable. An auto-updating production site chooses its own moment, which would mean a server carrying a new `API_VERSION` could meet a client that has not been updated yet, and the coordinated ordering would stop being something anyone controls.
 
-These could not be established from the repository and are recorded here rather than guessed at:
+The install sequence, in order:
 
-- **Who publishes the GitHub release, and how.** No workflow file, script, or document in this repository names an actor or a command for §7. `.github/workflows/` contains only `gate.yml`; there is no release workflow. `README.md` and `ADR-0005` both assume a GitHub release exists once published, but neither says who creates it.
-- **The "Cross-repo release order" document does not exist in this repository.** Both `CHANGELOG.md:41` and `docs/adr/0018-*.md:32` point to `plans/README.md` → "Cross-repo release order" for the coordinated-release sequencing. There is no `plans/` directory anywhere in this repository's history (`git log --all -- plans/` is empty) and nothing named `plans/README.md` is tracked. Either that document lives only in `kntnt-wp-skills`, or it was never committed here, or the reference is stale. §8 above is built from what ADR-0018 and `docs/container-format.md` §10 state directly, which is all this repository can currently support. The likely explanation: the `plans/` directory exists on disk in the maintainer's own working tree but is untracked, so it is invisible to a clone, to CI, and to this repository's history — which turns this from a mystery into a decision the maintainer still needs to make: track `plans/` so the reference resolves, or inline what `CHANGELOG.md:41` and ADR-0018 actually need from it directly into the documents that cite it.
-- **How a production site actually receives the update.** `README.md` documents that the self-hosted update checker makes an update show on the Plugins screen (`README.md:28`), but nothing in this repository says whether production auto-updates, whether someone clicks "Update Now" manually, or who is responsible for doing so and when, relative to the coordinated ordering in §8.
+1. Confirm no extraction is in flight: `GET /extractions` must list nothing. An install mid-extraction replaces the code a live build is running.
+2. Upload `kntnt-extractor.zip` from the GitHub release through wp-admin's plugin upload.
+3. Verify with `GET /status` that the reported plugin version and `api_version` are the released ones.
+4. Only then update the client, and only then run an extraction.
+
+The bundled update checker (`README.md:28`) makes the new release *visible* on the Plugins screen; it is not the mechanism by which this site is updated, and nothing in this procedure should be read as delegating the decision to it.
+
+## 9. Questions this document could not answer from the repository
+
+When this document was first written, three steps a real release needs could not be established from anything in the repository, and were recorded here rather than guessed at. All three were settled by the maintainer on 2026-08-16 and are now written into the sections they belong to. They are kept here, with their answers, so a reader who wonders whether a step was decided or merely forgotten can tell the difference.
+
+- **Who publishes the GitHub release, and how** — answered in §7. The maintainer, by hand, with the GitHub CLI, from a local clone. No release workflow, deliberately.
+- **Where "Cross-repo release order" lives** — answered by tracking it. Both `CHANGELOG.md:41` and `docs/adr/0018-*.md:32` point at `plans/README.md` → "Cross-repo release order". At the time this section was written, `plans/` existed on disk in the maintainer's working tree but was untracked *and* unignored, so the references resolved only there — invisible to a clone, to CI, and to any agent in a worktree, and one `git add -A` away from being committed by accident. The directory is now tracked, so both references resolve. The alternative that was considered and not taken was inlining the ordering into this document and repointing the two citations: it would have made this repository self-contained on the one thing that is cited, but would still have lost the records that exist nowhere else — plan 010's execution record for the 429 decision, and the rejected-findings section that exists so nothing gets re-audited.
+- **How a production site actually receives the update** — answered in §8. By hand, through wp-admin, by the maintainer, after `GET /extractions` is confirmed empty. Not by auto-update.
+
+Nothing under this heading is open. A future step this document cannot establish belongs here, in the same form: the question, what the repository does and does not say about it, and — once answered — where the answer now lives.
