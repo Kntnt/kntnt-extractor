@@ -311,52 +311,80 @@ final class Sealed_Writer {
 			throw new Invalid_Public_Key( 'A sealed container requires a 32-byte X25519 public key.' );
 		}
 
+		// Reopen the existing container for in-place update before trusting anything about
+		// it — an fstat() on the open handle re-walks no path component and cannot race a
+		// separate fopen() the way a stat-then-open pair can, closing the
+		// time-of-check-to-time-of-use gap the two calls used to leave open. A failure
+		// here is "the file cannot be opened", a fault distinct from "the file is shorter
+		// than its anchor" below, and the two throw different messages so a caller can
+		// tell them apart.
+		$header_length = strlen( self::MAGIC ) + 1;
+		$handle = fopen( $this->destination_path, 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming a streaming encrypt-as-you-go write; WP_Filesystem has no incremental-append API.
+		if ( $handle === false ) {
+			throw new RuntimeException( 'Unable to reopen the in-progress sealed container.' );
+		}
+
 		// Fail closed on an anchor that cannot describe a real in-progress container:
 		// it must at least cover the format header, and the file on disk must already be
 		// that long. A shorter file means the anchor and the container disagree, and
 		// extending it with zeros would corrupt the sealed result — so it is rejected
 		// rather than coerced.
-		$header_length = strlen( self::MAGIC ) + 1;
-		$size = is_file( $this->destination_path ) ? filesize( $this->destination_path ) : false;
+		$stat = fstat( $handle );
+		$size = $stat !== false ? $stat['size'] : false;
 		if ( $committed_bytes < $header_length || $size === false || $size < $committed_bytes ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a rejected anchor; see open().
 			throw new RuntimeException( 'The in-progress sealed container is shorter than its committed offset.' );
 		}
 
-		// Hold the sidecar to the same standard: a missing one means the committed names
-		// are gone, and a short one means it disagrees with the anchor. Either way the
-		// index this build would publish is not the one it has sealed, so refuse rather
-		// than continue and name only the segments still to come.
-		$index_size = is_file( $this->index_path() ) ? filesize( $this->index_path() ) : false;
-		if ( $committed_index_bytes < 0 || $index_size === false || $index_size < $committed_index_bytes ) {
-			throw new RuntimeException( 'The in-progress sealed container index is missing or shorter than its committed offset.' );
-		}
-
-		// Reopen the existing container for in-place update and verify it still begins
-		// with this format's header before trusting the anchor, then drop anything past
-		// the committed offset a crashed tick may have left and position at the end so
-		// the next segment appends cleanly.
-		$handle = fopen( $this->destination_path, 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming a streaming encrypt-as-you-go write; WP_Filesystem has no incremental-append API.
-		if ( $handle === false ) {
-			throw new RuntimeException( 'Unable to reopen the in-progress sealed container.' );
-		}
+		// Verify the reopened file still begins with this format's header before trusting
+		// the anchor any further, then drop anything past the committed offset a crashed
+		// tick may have left and position at the end so the next segment appends cleanly.
 		$header = (string) fread( $handle, $header_length ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading the container's own format header to validate the resume anchor.
 		if ( $header !== self::MAGIC . chr( self::FORMAT_VERSION ) ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a rejected header; see open().
 			throw new RuntimeException( 'The in-progress sealed container is missing its format header.' );
 		}
-		if ( ftruncate( $handle, $committed_bytes ) === false || fseek( $handle, $committed_bytes ) === -1 ) {
+
+		// Discard a crashed tick's unacknowledged tail — but only when there is one. The
+		// check above has already proved the file is at least as long as the anchor, so
+		// an equal length means nothing to roll back, and truncating anyway would spend a
+		// synchronous metadata round trip on a file that grows past a gigabyte, once per
+		// chunk, to change nothing. The seek is unconditional: the handle must be
+		// positioned to append whether or not anything was discarded.
+		if ( $size > $committed_bytes && ftruncate( $handle, $committed_bytes ) === false ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a failed rollback; see open().
+			throw new RuntimeException( 'Unable to position the in-progress sealed container for appending.' );
+		}
+		if ( fseek( $handle, $committed_bytes ) === -1 ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the handle after a failed reopen; see open().
 			throw new RuntimeException( 'Unable to position the in-progress sealed container for appending.' );
 		}
 
 		// Roll the sidecar back to its own anchor in the same way, so a name a crashed
 		// tick appended for a segment the truncation above just discarded goes with it.
+		// Opening it before stat'ing it closes the same TOCTOU gap the container's anchor
+		// check just closed, and again separates "cannot open" from "shorter than its
+		// anchor" into two distinguishable faults.
 		$index_handle = fopen( $this->index_path(), 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- resuming the container's own index sidecar; see the class docblock.
-		if ( $index_handle === false || ftruncate( $index_handle, $committed_index_bytes ) === false || fseek( $index_handle, $committed_index_bytes ) === -1 ) {
+		if ( $index_handle === false ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar could not be opened; see open().
+			throw new RuntimeException( 'Unable to reopen the in-progress sealed container index.' );
+		}
+		$index_stat = fstat( $index_handle );
+		$index_size = $index_stat !== false ? $index_stat['size'] : false;
+		if ( $committed_index_bytes < 0 || $index_size === false || $index_size < $committed_index_bytes ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar's anchor was rejected; see open().
+			fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the sidecar handle after its anchor was rejected.
+			throw new RuntimeException( 'The in-progress sealed container index is shorter than its committed offset.' );
+		}
+		if ( $index_size > $committed_index_bytes && ftruncate( $index_handle, $committed_index_bytes ) === false ) {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar could not be positioned; see open().
-			if ( $index_handle !== false ) {
-				fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the sidecar handle after a failed truncate or seek.
-			}
+			fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the sidecar handle after a failed rollback.
+			throw new RuntimeException( 'Unable to position the in-progress sealed container index for appending.' );
+		}
+		if ( fseek( $index_handle, $committed_index_bytes ) === -1 ) {
+			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the container after the sidecar could not be positioned; see open().
+			fclose( $index_handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the sidecar handle after a failed seek.
 			throw new RuntimeException( 'Unable to position the in-progress sealed container index for appending.' );
 		}
 
