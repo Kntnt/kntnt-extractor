@@ -98,6 +98,10 @@ The four table and file counters advance only when a whole table or a whole file
 
 `authenticated_as` is the WordPress `user_login` — often an email address, since that is what many sites' logins are. If those two members are missing from the response, your credentials did not reach WordPress or did not name an existing user, and no capability grant will fix that.
 
+### Discovering what this build honours
+
+`api_version` answers one question — may a client proceed with this artifact contract at all — and answers it before you have credentials, because a wrong-version server should be refused on the cheapest possible call. It does not answer whether a particular behaviour, such as `strict: false` on `POST /extractions`, exists in this build: a behaviour can ship without moving `api_version`, so the version number alone cannot tell you. Send credentials with `GET /status` and the response also carries `honours`, a sorted list of the caller-visible behaviour names this build implements. A name absent from the list is a behaviour this build does not have; check for it before depending on it, in either direction, since production can run a release older than the client expects.
+
 ### When a request is refused
 
 Each refusal names its own cause, so the remedy is never a guess:

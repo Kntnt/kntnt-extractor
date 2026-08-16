@@ -13,6 +13,12 @@
  * capability holdings — the direct answer that replaces inferring identity from
  * the pattern of errors other endpoints return.
  *
+ * It also pins the `honours` split ADR-0017 settles: the anonymous body still
+ * carries nothing but `api_version`, and an authenticated caller receives a
+ * sorted, duplicate-free list of behaviour names distinct from the existing
+ * `capabilities` member, which keeps reporting the caller's own two WordPress
+ * capabilities unchanged.
+ *
  * @package Kntnt\Extractor
  * @since   0.1.0
  */
@@ -43,8 +49,9 @@ $response = $get_status();
 kntnt_extractor_assert( $response->get_status() === 200, 'GET /status responds 200 without authentication' );
 
 // The anonymous body is exactly the API-version contract and nothing more — the
-// identity members must never appear for a caller who supplied no credentials.
-kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 6 ], 'GET /status returns { api_version: 6 } and nothing more to an anonymous caller' );
+// identity members and the honoured-capability list (ADR-0017) must never
+// appear for a caller who supplied no credentials.
+kntnt_extractor_assert( $response->get_data() === [ 'api_version' => 6 ], 'GET /status returns { api_version: 6 } and nothing more to an anonymous caller — no honours member either' );
 
 // The namespace is advertised in WordPress's REST index.
 $index = $server->dispatch( new WP_REST_Request( 'GET', '/' ) )->get_data();
@@ -67,6 +74,24 @@ kntnt_extractor_assert(
 	is_array( $authenticated ) && ( $authenticated['capabilities'] ?? null ) === [ 'kntnt_extractor_operate' => true, 'manage_options' => true ],
 	'GET /status reports an administrator holding both capabilities',
 );
+
+// The authenticated response also carries `honours` (ADR-0017): a list of
+// strings, distinct from `capabilities`, naming what this build implements
+// rather than what the caller may do.
+$honours = $authenticated['honours'] ?? null;
+kntnt_extractor_assert( is_array( $honours ) && $honours !== [] && array_is_list( $honours ), 'GET /status reports honours as a non-empty list of strings' );
+kntnt_extractor_assert( is_array( $honours ) && array_reduce( $honours, static fn( bool $carry, mixed $name ): bool => $carry && is_string( $name ), true ), 'GET /status reports honours as a list of strings' );
+
+// The list is sorted and free of duplicates — absence is the only signal a
+// caller has, so a stray duplicate or an unsorted entry would be noise.
+kntnt_extractor_assert( is_array( $honours ) && $honours === array_unique( $honours ), 'GET /status reports honours free of duplicates' );
+$sorted_honours = $honours;
+sort( $sorted_honours, SORT_STRING );
+kntnt_extractor_assert( is_array( $honours ) && $honours === $sorted_honours, 'GET /status reports honours sorted' );
+
+// `strict` — the behaviour that motivated the whole split, since no version
+// number distinguishes a build that honours it from one that does not.
+kntnt_extractor_assert( is_array( $honours ) && in_array( 'strict', $honours, true ), 'GET /status reports honours naming strict' );
 
 // A user login that is itself an email address round-trips verbatim, since that
 // is the shape the primary consumer's credential convention has to split.

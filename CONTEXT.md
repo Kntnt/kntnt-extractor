@@ -57,8 +57,12 @@ The short-lived, single-use link an extraction job's artifact is fetched through
 ### Operations
 
 **API version**:
-The REST contract's own version number, distinct from the plugin's release version. Increments only when a caller-visible behaviour changes — including a subtler, purely behavioural change, not only a change to endpoints or arguments — never for a fix that leaves the contract as callers already understood it.
-_Avoid_: plugin version (as a synonym)
+The REST contract's own version number, distinct from the plugin's release version. Bounds the artifact contract only — the sealed container's framing, segments per resource, the sealed index, and reassembly order — never a general "any caller-visible change" counter (ADR-0017, amending ADR-0005). A behavioural change that is not a change of shape, such as `strict` on `POST /extractions`, ships without moving it; a caller learns what a build actually does from `honours` instead.
+_Avoid_: plugin version (as a synonym); a general behaviour-change counter
+
+**Honours**:
+The sorted list of caller-visible behaviour names a build implements, reported on `GET /status` to an authenticated caller only, distinct from the anonymous `api_version` handshake and from the existing `capabilities` member — which stays the caller's own WordPress capabilities (ADR-0017). Absence is the only signal: a name not in the list is not implemented, and there is no boolean map. Answers "what does this build do?", a question the API version cannot answer because a behaviour can ship additively without moving it.
+_Avoid_: features, capabilities (as a synonym — that name is taken)
 
 **No-cache guarantee**:
 The plugin's unconditional promise that no response under `kntnt-extractor/v1` may be retained by any cache, stated once at `rest_post_dispatch` and applied regardless of status code or authentication state. It exists because a refusal that resolved to no user looks anonymous to WordPress and therefore cacheable, and one such refusal held in a page cache is replayed to every later caller, correct credentials included.

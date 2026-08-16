@@ -31,6 +31,13 @@ use WP_REST_Server;
  * (ADR-0012). The unauthenticated handshake is unchanged and stays reachable
  * without credentials, since every client depends on it.
  *
+ * A third, distinct question — "what does this build actually do?" — is
+ * answered the same way, and only there: an authenticated caller additionally
+ * receives `honours`, the list of caller-visible behaviours this build
+ * implements. `api_version` cannot answer that question, because a behaviour
+ * can ship additively without moving it (ADR-0005, ADR-0017); this list exists
+ * because inferring behaviour from the version has already failed once.
+ *
  * @since 0.1.0
  */
 final class Status_Controller {
@@ -87,6 +94,26 @@ final class Status_Controller {
 	public const int API_VERSION = 6;
 
 	/**
+	 * Caller-visible behaviours a build may or may not honour, reported to an
+	 * authenticated caller as `honours` so it can gate on a name instead of
+	 * inferring the answer from `api_version` (docs/adr/0017).
+	 *
+	 * Every entry here shipped without moving {@see API_VERSION}: each is additive,
+	 * and an old client that has never heard of the name is unaffected by its
+	 * presence. `strict` is the one that forced this list to exist — `POST
+	 * /extractions` has accepted it since before this build, and no version number
+	 * distinguishes a build that honours it from one that does not.
+	 *
+	 * @since 0.6.0
+	 */
+	private const array HONOURED_BEHAVIOURS = [
+		'attempts',
+		'chunks_done',
+		'skipped_files',
+		'strict',
+	];
+
+	/**
 	 * Registers the status route. Hooked on `rest_api_init`.
 	 *
 	 * @since 0.1.0
@@ -108,35 +135,48 @@ final class Status_Controller {
 	}
 
 	/**
-	 * Returns the API version, plus the caller's identity when there is one.
+	 * Returns the API version, plus the caller's identity and honoured
+	 * behaviours when there is one.
 	 *
 	 * An anonymous caller receives exactly the historical handshake and nothing
 	 * more — `{ "api_version": <int> }` — so the contract every existing client
 	 * reads is untouched. A request whose credentials resolved to a WordPress user
-	 * receives two further members: `authenticated_as`, the user's `user_login`,
-	 * and `capabilities`, a map of each of the plugin's two composing capabilities
-	 * to whether that user holds it. That is the whole identity question answered
-	 * in one unauthenticated-by-default call (ADR-0012), so a caller meeting a
-	 * refusal elsewhere can tell "my credentials never arrived" from "they arrived
-	 * as somebody who may not do this" without probing other endpoints.
+	 * receives three further members: `authenticated_as`, the user's
+	 * `user_login`; `capabilities`, a map of each of the plugin's two composing
+	 * capabilities to whether that user holds it; and `honours`, the sorted list
+	 * of caller-visible behaviour names this build implements (docs/adr/0017).
+	 * The identity pair answers "who am I here?" (ADR-0012); `honours` answers
+	 * the separate question "what does this build do?", which no version number
+	 * can — a caller meeting a refusal elsewhere can tell "my credentials never
+	 * arrived" from "they arrived as somebody who may not do this" without
+	 * probing other endpoints, and a caller planning a request can tell whether
+	 * a behaviour it wants exists without probing that endpoint either.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return WP_REST_Response The API version, and the caller's login and
-	 *                          capabilities when a user is authenticated.
+	 * @return WP_REST_Response The API version, and the caller's login,
+	 *                          capabilities, and honoured behaviours when a user
+	 *                          is authenticated.
 	 */
 	public function get_status(): WP_REST_Response {
 
-		// The version handshake is the entire contract for an anonymous caller.
+		// The version handshake is the entire contract for an anonymous caller. It
+		// answers "may I proceed with this artifact contract at all", and that
+		// question must be answerable before any credential resolves, so it stays
+		// outside the gate below (docs/adr/0017).
 		$status = [ 'api_version' => self::API_VERSION ];
 
-		// Answer the identity question outright for an authenticated caller.
+		// Answer the identity question, and — a distinct question with a distinct
+		// answer — what this build actually does, for an authenticated caller only.
+		// `honours` is a build fingerprint, not part of the version-refusal
+		// handshake, so it is disclosed only once credentials have resolved.
 		if ( is_user_logged_in() ) {
 			$status['authenticated_as'] = wp_get_current_user()->user_login;
 			$status['capabilities'] = [
 				Authorizer::OPERATE_CAPABILITY => current_user_can( Authorizer::OPERATE_CAPABILITY ),
 				Authorizer::MANAGE_CAPABILITY => current_user_can( Authorizer::MANAGE_CAPABILITY ),
 			];
+			$status['honours'] = self::HONOURED_BEHAVIOURS;
 		}
 
 		return new WP_REST_Response( $status );
