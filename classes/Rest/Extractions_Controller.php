@@ -52,7 +52,11 @@ use WP_REST_Server;
  * record, since the audit log is filed only when a job reaches ready, never here.
  * Both bind to the owner: existence is decided before ownership, so a capable
  * non-owner is refused 403 without ever learning a job's state, and an unknown id is
- * a 404.
+ * a 404. Both also take the job's per-job tick lock before deleting anything
+ * ({@see Job_Store::lock()}), the same lock the internal tick driver and the TTL
+ * sweep already take, so a live build is never deleted out from under itself; a lock
+ * that cannot be taken is a 409 naming the reason, never a silent skip and never a
+ * wait (ADR-0019).
  *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
@@ -535,7 +539,7 @@ final class Extractions_Controller {
 	 * @param WP_REST_Request $request The incoming consume request, carrying the id.
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state: consumed }`; a 404 for an
 	 *                                   unknown job, a 403 for a non-owner, or a 409 when
-	 *                                   the job is not ready.
+	 *                                   the job is not ready or its tick lock is held.
 	 */
 	public function consume( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -551,9 +555,23 @@ final class Extractions_Controller {
 			return $this->error( 409, 'kntnt_extractor_not_ready', __( 'Only a ready extraction job can be consumed.', 'kntnt-extractor' ) );
 		}
 
-		// Delete the artifact and the working directory, then report the job consumed;
-		// the ready-time audit record is a separate file this never touches (ADR-0006).
-		$this->store->purge( $job );
+		// Take the same per-job tick lock a live tick holds ({@see Sweeper}) before
+		// purging: this deletion reaches the artifact and the working directory a
+		// driver may still be writing into, not merely a resource other callers race
+		// for, so it must take the lock exactly as the tick and the sweep already do
+		// rather than trust that a ready job's builder is always finished. A ready job
+		// can only ever race a tick in the narrow window between that tick publishing
+		// the artifact and releasing its own lock, so this should not normally fail —
+		// but when it does, a 409 is the honest answer and the caller can simply retry.
+		$lock = $this->store->lock( $job );
+		if ( $lock === null ) {
+			return $this->error( 409, 'kntnt_extractor_locked', __( 'This extraction job is being built; retry the request.', 'kntnt-extractor' ) );
+		}
+		try {
+			$this->store->purge( $job );
+		} finally {
+			$this->store->unlock( $lock );
+		}
 
 		return new WP_REST_Response(
 			[
@@ -578,7 +596,8 @@ final class Extractions_Controller {
 	 *
 	 * @param WP_REST_Request $request The incoming cancel request, carrying the id.
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state: cancelled }`; a 404 for an
-	 *                                   unknown job, or a 403 for a non-owner.
+	 *                                   unknown job, a 403 for a non-owner, or a 409 when
+	 *                                   its tick lock is held.
 	 */
 	public function cancel( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -588,9 +607,25 @@ final class Extractions_Controller {
 			return $job;
 		}
 
-		// Delete the artifact and the working directory whatever state the job is in,
-		// then report it cancelled; no ready transition occurs, so no audit is written.
-		$this->store->purge( $job );
+		// Take the job's tick lock before purging, exactly as consume and the sweep do:
+		// unlike consume, cancel reaches a job in ANY state it owns — queued or running
+		// included — so it is the caller most likely to race a live tick still packaging
+		// that job's container. Purging without this lock is the defect this plan fixes:
+		// a cancel landing mid-tick could delete the directory a driver is writing into,
+		// and if the driver's publish then wins the race, a sealed artifact lands in the
+		// served directory for a job whose record has just been deleted, orphaned from
+		// that moment on. Refusing with 409 rather than blocking keeps this call
+		// non-blocking like every other lock acquisition in the plugin; the caller
+		// simply retries.
+		$lock = $this->store->lock( $job );
+		if ( $lock === null ) {
+			return $this->error( 409, 'kntnt_extractor_locked', __( 'This extraction job is being built; retry the request.', 'kntnt-extractor' ) );
+		}
+		try {
+			$this->store->purge( $job );
+		} finally {
+			$this->store->unlock( $lock );
+		}
 
 		return new WP_REST_Response(
 			[
