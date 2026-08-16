@@ -372,6 +372,95 @@ foreach ( $r_container['records'] as $i => $record ) {
 }
 kntnt_extractor_assert( $r_reassembled === $fixture_bytes, 'The resumed file reassembles to the original bytes despite the mid-build interruption (AC3)' );
 
+// --- Boundary assertions on read_part()'s bounded-read guard (plan 005) ---
+//
+// These two fixtures sit on either side of the fix: a zero-byte file takes
+// the `$offset < $size` false branch and must still complete as one empty
+// segment, and a file whose length is an exact multiple of the forced chunk
+// size must complete in exactly that many parts — the last `fread()` call
+// legitimately reaches end-of-file with a full final part, and the guard
+// must not mistake the part *after* that (never attempted, because
+// `$offset < $size` is now false) for a failed read.
+
+$empty_fixture_abs = wp_upload_dir()['basedir'] . '/kntnt-extractor-fixture-empty-' . bin2hex( random_bytes( 4 ) ) . '.bin';
+file_put_contents( $empty_fixture_abs, '' );
+$empty_fixture_rel = ltrim( substr( wp_normalize_path( (string) realpath( $empty_fixture_abs ) ), strlen( $root ) ), '/' );
+
+// A fixture sized to exactly two part-budgets under the forced chunk size, in
+// a pattern distinct from the other fixtures so a mis-ordered or duplicated
+// part is detectable on reassembly.
+$exact_fixture_bytes = substr( str_repeat( '0123456789', (int) ceil( ( 2 * $chunk_size ) / 10 ) ), 0, 2 * $chunk_size );
+$exact_fixture_abs = wp_upload_dir()['basedir'] . '/kntnt-extractor-fixture-exact-' . bin2hex( random_bytes( 4 ) ) . '.bin';
+file_put_contents( $exact_fixture_abs, $exact_fixture_bytes );
+$exact_fixture_rel = ltrim( substr( wp_normalize_path( (string) realpath( $exact_fixture_abs ) ), strlen( $root ) ), '/' );
+$exact_expected_parts = (int) ( strlen( $exact_fixture_bytes ) / $chunk_size );
+
+$boundary_selection = [
+	'tables' => [],
+	'files' => [ $empty_fixture_rel, $exact_fixture_rel ],
+	'public_key' => base64_encode( $public_key ),
+];
+
+wp_set_current_user( $owner->ID );
+$b_response = $post_extractions( $boundary_selection );
+$b_created = $b_response->get_data();
+$b_id = is_array( $b_created ) && is_string( $b_created['id'] ?? null ) ? $b_created['id'] : '';
+$b_state = $read_state( $work, $b_id );
+$b_secret = is_array( $b_state ) && is_string( $b_state['tick_secret'] ?? null ) ? $b_state['tick_secret'] : '';
+
+$drive_to_ready( $b_id, $b_secret );
+$b_ready = $get_extraction( $b_id )->get_data();
+kntnt_extractor_assert( is_array( $b_ready ) && ( $b_ready['state'] ?? null ) === 'ready', 'A selection with a zero-byte file and an exact-multiple-sized file completes (plan 005)' );
+
+$b_url = is_array( $b_ready ) && is_string( $b_ready['download_url'] ?? null ) ? $b_ready['download_url'] : '';
+$b_path = $b_url !== '' ? $basedir . substr( $b_url, strlen( $baseurl ) ) : '';
+$b_raw = $b_path !== '' && is_file( $b_path ) ? (string) file_get_contents( $b_path ) : '';
+$b_container = $parse( $b_raw );
+$b_names = $open_index( $b_container['sealed_index'], $keypair );
+
+// The zero-byte file must appear as exactly one segment, decrypting to the
+// empty string. This is the assertion a guard placed on the wrong side of
+// the `$offset < $size` test would break: it would either fail the whole
+// build (guard fires on the file's only, in-range read) or, if the guard
+// only fired on truly out-of-range reads, would leave this untouched — so a
+// regression here means the guard moved to the wrong side of that test.
+$empty_indexes = is_array( $b_names ) ? array_keys( $b_names, $empty_fixture_rel, true ) : [];
+kntnt_extractor_assert( count( $empty_indexes ) === 1, 'The zero-byte file is packaged as exactly one segment (plan 005)' );
+$empty_plain = $empty_indexes !== [] && isset( $b_container['records'][ $empty_indexes[0] ] ) ? $open_segment( $b_container['records'][ $empty_indexes[0] ], $keypair ) : false;
+kntnt_extractor_assert( $empty_plain === '', 'The zero-byte file recovers as an empty entry in the sealed artifact (plan 005)' );
+
+// The exact-multiple file must land in precisely the number of parts its
+// size implies over the forced chunk budget — not one more, which would be
+// the signature of a spurious empty final part.
+$exact_indexes = is_array( $b_names ) ? array_keys( $b_names, $exact_fixture_rel, true ) : [];
+kntnt_extractor_assert( count( $exact_indexes ) === $exact_expected_parts, 'A file sized to an exact multiple of the part budget completes without a spurious extra part (plan 005)' );
+
+$exact_reassembled = '';
+foreach ( $exact_indexes as $index ) {
+	$plain = $open_segment( $b_container['records'][ $index ], $keypair );
+	$exact_reassembled .= is_string( $plain ) ? $plain : '';
+}
+kntnt_extractor_assert( $exact_reassembled === $exact_fixture_bytes, 'The exact-multiple file reassembles to its original bytes (plan 005)' );
+
+// --- Assertion 3 (best-effort, not included): a bounded read failing below the end ---
+//
+// Plan 005 also asks, best-effort, for a case where fread() returns false or
+// '' below a file's end, asserting the job reaches failed and no artifact is
+// published. This harness runs on WordPress Playground's in-memory WASM
+// filesystem, which has no mechanism to make a bounded, in-range fread() on
+// a real, unmodified, open file return false or '' on demand: there is no
+// disk to fail, no permission model to violate mid-read, no device to detach
+// under an open handle. Corrupting the target file between the open and the
+// read would trip the pinned-identity check a few lines above instead (a
+// different guard, already covered elsewhere), and writing state into a job
+// file directly would exercise no production code at all — so no assertion
+// claiming to cover this path is included here. This is a real, stated
+// coverage gap (see the plan's "Known coverage limitation"), not an
+// oversight.
+
+@unlink( $empty_fixture_abs );
+@unlink( $exact_fixture_abs );
+
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
 remove_filter( 'kntnt_extractor_config_chunk_size', $force_chunk );

@@ -296,8 +296,8 @@ final class Artifact_Builder {
 	 * @return array{0: string, 1: int, 2: bool, 3: int, 4: int} The part bytes, the offset
 	 *         after it, whether the file is now fully packaged, and the pinned size and mtime.
 	 *
-	 * @throws RuntimeException When the path resolves outside the root, cannot be read, or
-	 *                          changed since its first part was sealed.
+	 * @throws RuntimeException When the path resolves outside the root, cannot be opened,
+	 *                          seeked, or read, or changed since its first part was sealed.
 	 */
 	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime, int $max_bytes ): array {
 
@@ -330,7 +330,26 @@ final class Artifact_Builder {
 			fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing after a failed seek; see the fopen above.
 			throw new RuntimeException( 'Unable to seek a requested file for packaging.' );
 		}
-		$part = $offset < $size ? (string) fread( $handle, max( 1, $max_bytes ) ) : ''; // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading one bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
+
+		// Read one bounded part, or nothing at all once the offset has reached the end —
+		// which is how a zero-byte file still yields exactly one empty part and completes.
+		$part = '';
+		if ( $offset < $size ) {
+			$read = fread( $handle, max( 1, $max_bytes ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- reading one bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
+
+			// A bounded read below the end that yields nothing is never a legitimate
+			// outcome, and treating it as one is worse than it looks: the part seals
+			// empty, the offset does not move, and the chunk still counts as progress —
+			// which clears the stall counter and refreshes both the heartbeat and the
+			// last-progress stamp. All three bounds that would stop a wedged build are
+			// reset together, so the job would seal empty segments forever while holding
+			// the concurrency slot. Fail instead.
+			if ( $read === false || $read === '' ) {
+				fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the read handle after a failed part read; see the fopen above.
+				throw new RuntimeException( 'Unable to read a part of a requested file for packaging.' );
+			}
+			$part = $read;
+		}
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the read handle after one bounded part; see the fopen above.
 
 		// Report the offset after this part and whether it reached the file's end, so the
