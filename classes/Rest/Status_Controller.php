@@ -125,7 +125,11 @@ final class Status_Controller {
 	 * always carries (ADR-0018) is new surface a client can check for before
 	 * depending on it, exactly like every other name here, even though the
 	 * allow-list it reports on shipped under a coordinated {@see API_VERSION}
-	 * bump rather than silently.
+	 * bump rather than silently. `state` is `GET /extractions`' optional query
+	 * parameter that additionally admits the caller's own terminal jobs
+	 * (ADR-0019): additive by the same reasoning as `strict`, since the parameter
+	 * is absent-by-default and every existing client's unparameterised request is
+	 * unaffected by its existence.
 	 *
 	 * @since 0.6.0
 	 */
@@ -134,6 +138,7 @@ final class Status_Controller {
 		'chunks_done',
 		'disclosure',
 		'skipped_files',
+		'state',
 		'strict',
 	];
 

@@ -107,8 +107,12 @@ final class Extractions_Controller {
 	 * both-capabilities gate. The create route's permission callback runs the whole
 	 * existence-and-key validation before the capability check, which is what lets a
 	 * 404 or 400 precede the 403 (ADR-0003); the list route only needs the capability
-	 * gate itself. The id-addressed routes capture a 32-hex id straight from the path,
-	 * so a malformed id never matches and never reaches the store. Poll and cancel
+	 * gate itself, plus the optional `state` argument's own schema — an enum of
+	 * exactly `all`, checked by a `validate_callback` rather than trusted as a free
+	 * string, so anything else is refused with `400 rest_invalid_param` before the
+	 * callback ever runs (ADR-0019). The id-addressed routes capture a 32-hex id
+	 * straight from the path, so a malformed id never matches and never reaches the
+	 * store. Poll and cancel
 	 * share one route path — a `GET` reads the job, a `DELETE` cancels it — behind the
 	 * same capability gate, with the per-job ownership binding layered on inside each
 	 * callback.
@@ -132,6 +136,14 @@ final class Extractions_Controller {
 					'methods' => WP_REST_Server::READABLE,
 					'callback' => $this->list_jobs( ... ),
 					'permission_callback' => $this->authorizer->authorize( ... ),
+					'args' => [
+						'state' => [
+							'type' => 'string',
+							'required' => false,
+							'validate_callback' => static fn( mixed $value ): bool => $value === 'all',
+							'description' => __( 'Set to "all" to additionally list the caller\'s own terminal jobs.', 'kntnt-extractor' ),
+						],
+					],
 				],
 			],
 		);
@@ -263,7 +275,7 @@ final class Extractions_Controller {
 	}
 
 	/**
-	 * Lists the caller's own non-terminal jobs for stranded-slot recovery.
+	 * Lists the caller's own jobs: non-terminal by default, or including terminal ones.
 	 *
 	 * The collection surface the cutover health check enumerates its live jobs
 	 * through, so a job stranded by a crashed earlier run — queued, running, or ready,
@@ -271,36 +283,64 @@ final class Extractions_Controller {
 	 * (ADR-0004) — can be found and cancelled rather than blocking the next create for
 	 * up to the sweep window. The route's permission callback has already run the
 	 * both-capabilities gate (ADR-0002), so this only applies the owner scoping and the
-	 * non-terminal filter: {@see Job_Store::all()} is narrowed to the caller's own jobs
-	 * whose state is not terminal, so a caller never sees another user's job and a
-	 * finished one is omitted — terminal jobs are the audit log's concern (ADR-0006),
-	 * not this slot-management listing's.
+	 * state filter: {@see Job_Store::all()} is narrowed to the caller's own jobs, and a
+	 * caller never sees another user's job whatever its state.
 	 *
-	 * Each entry carries the same id, state, and timestamps a create and poll report,
-	 * plus `progress` on exactly the jobs that have advanced — running or ready, in the
-	 * poll's four-counter shape and missing-key optionality. It never carries a
-	 * `download_url`: fetching an artifact stays the per-job {@see poll()} contract's
-	 * job, so this listing discloses no delivery path. The caller with no live jobs
-	 * gets an empty array.
+	 * With no `state` parameter the filter is exactly what it always was — non-terminal
+	 * only — so every existing client's request returns byte-identical output (ADR-0019).
+	 * `state=all` additionally admits the caller's own terminal jobs, answering "is there
+	 * anything of mine still on this site" for the one case the default was built to
+	 * exclude: a failed, cancelled, expired, or consumed job leaves no other trace at
+	 * this surface, and consume/cancel/the sweep purge the working directory the moment
+	 * a job ends, so the answer this gives is "does a record of it still exist", not
+	 * "is there still an artifact to fetch" — there never is one for a terminal entry.
+	 *
+	 * A non-terminal entry carries the same id, state, and timestamps a create and poll
+	 * report, plus `progress` on exactly the jobs that have advanced — running or ready,
+	 * in the poll's four-counter shape and missing-key optionality. A terminal entry
+	 * (only ever present under `state=all`) carries just id, state, and the timestamps:
+	 * enough to answer the exposure question and nothing that could be mistaken for an
+	 * invitation to act on it. Neither shape ever carries a `download_url`: fetching an
+	 * artifact stays the per-job {@see poll()} contract's job, and every terminal job's
+	 * artifact is gone by the time it can appear here anyway. The caller with no
+	 * matching jobs gets an empty array.
 	 *
 	 * @since 0.2.0
 	 *
+	 * @param WP_REST_Request $request The incoming list request, carrying the optional `state` argument.
 	 * @return WP_REST_Response A 200 with `{ jobs: [ { id, state, created_at, updated_at, progress? } ] }`.
 	 */
-	public function list_jobs(): WP_REST_Response {
+	public function list_jobs( WP_REST_Request $request ): WP_REST_Response {
 
-		// Scope the enumeration to the caller's own live jobs: skip another user's job
-		// and any job that has reached a terminal state.
+		// Scope the enumeration to the caller's own jobs, always skipping another
+		// user's; state=all is the one thing that widens which of the caller's own
+		// jobs are admitted, never whose jobs are.
 		$owner = get_current_user_id();
+		$include_terminal = $request->get_param( 'state' ) === 'all';
 		$jobs = [];
 		foreach ( $this->store->all() as $job ) {
-			if ( $job->owner !== $owner || $job->state->is_terminal() ) {
+			if ( $job->owner !== $owner ) {
 				continue;
 			}
 
-			// Report the fields every listed job carries, then append progress only where
-			// the job has advanced — the same optionality and four-counter shape the poll
-			// uses, and never a download_url.
+			// A terminal job is reported only under state=all, and only with the
+			// minimal shape the exposure question needs — never progress, never a
+			// download_url, since neither exists for it any more.
+			if ( $job->state->is_terminal() ) {
+				if ( $include_terminal ) {
+					$jobs[] = [
+						'id' => $job->id,
+						'state' => $job->state->value,
+						'created_at' => $job->created_at,
+						'updated_at' => $job->updated_at,
+					];
+				}
+				continue;
+			}
+
+			// Report the fields every listed non-terminal job carries, then append
+			// progress only where the job has advanced — the same optionality and
+			// four-counter shape the poll uses, and never a download_url.
 			$entry = [
 				'id' => $job->id,
 				'state' => $job->state->value,
