@@ -206,7 +206,7 @@ final class Artifact_Builder {
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
 			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $budgets->table_rows, $budgets->table_bytes );
-			$writer->add_segment( $table, $this->stream_of( $slice ) );
+			$writer->add_segment( $table, $slice );
 			++$segment_count;
 			if ( $table_complete ) {
 				++$tables_done;
@@ -218,13 +218,13 @@ final class Artifact_Builder {
 			}
 		} elseif ( $structure_done < count( $job->structure_only ) ) {
 			$table = $job->structure_only[ $structure_done ];
-			$writer->add_segment( $table, $this->stream_of( $this->dumper->dump_structure( $table ) ) );
+			$writer->add_segment( $table, $this->dumper->dump_structure( $table ) );
 			++$segment_count;
 			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
 			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $budgets->file_bytes );
-			$writer->add_segment( $file, $this->stream_of( $part ) );
+			$writer->add_segment( $file, $part );
 			++$segment_count;
 			if ( $file_done ) {
 				++$file_index;
@@ -420,33 +420,6 @@ final class Artifact_Builder {
 		}
 
 		return $abs;
-
-	}
-
-	/**
-	 * Wraps a byte string in a rewound in-memory stream for the sealed writer.
-	 *
-	 * A `php://temp` stream keeps the segment in memory for small chunks and spills to a
-	 * temp file only if it grows large, matching the writer's one-segment working set.
-	 *
-	 * @since 0.1.0
-	 *
-	 * @param string $data The segment's plaintext — a table dump or a bounded file part.
-	 * @return resource A rewound readable stream over the data.
-	 *
-	 * @throws RuntimeException When the in-memory stream cannot be opened.
-	 */
-	private function stream_of( string $data ) {
-
-		// Buffer the bounded chunk in memory and rewind it for the streaming writer.
-		$stream = fopen( 'php://temp', 'r+b' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- an in-memory buffer handed to the streaming sealed writer, not a filesystem write.
-		if ( $stream === false ) {
-			throw new RuntimeException( 'Unable to open an in-memory stream for a segment.' );
-		}
-		fwrite( $stream, $data ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fwrite -- writing to the in-memory buffer above.
-		rewind( $stream );
-
-		return $stream;
 
 	}
 

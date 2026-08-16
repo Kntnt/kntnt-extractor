@@ -423,23 +423,23 @@ final class Sealed_Writer {
 	/**
 	 * Encrypts one segment and appends it to the container.
 	 *
-	 * The segment is drawn from the stream, encrypted under a fresh random
-	 * symmetric key, and that key is sealed to the caller's public key; the
-	 * plaintext key and the plaintext itself are then zeroed. The stream is
-	 * assumed already bounded by the caller (a table dump or a chunk of a file),
-	 * so it is read in full.
+	 * The segment is encrypted under a fresh random symmetric key, and that key
+	 * is sealed to the caller's public key; the plaintext key and the plaintext
+	 * itself are then zeroed. The caller already holds the segment as a bounded
+	 * string (a table dump or a chunk of a file), so it is taken directly rather
+	 * than through any intermediate stream.
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string   $name   Identifier recorded (sealed) in the index — a table
-	 *                         name or an installation-root-relative file path.
-	 * @param resource $stream Readable stream supplying the segment's plaintext.
+	 * @param string $name      Identifier recorded (sealed) in the index — a
+	 *                          table name or an installation-root-relative file
+	 *                          path.
+	 * @param string $plaintext The segment's bounded plaintext.
 	 * @return void
 	 *
-	 * @throws LogicException  When called before {@see open()}.
-	 * @throws RuntimeException When the stream cannot be read.
+	 * @throws LogicException When called before {@see open()}.
 	 */
-	public function add_segment( string $name, $stream ): void {
+	public function add_segment( string $name, string $plaintext ): void {
 
 		// Require an open container: this guards the open→add→finalize order and
 		// narrows the handles and key away from null for the operations below.
@@ -448,12 +448,6 @@ final class Sealed_Writer {
 		$public_key = $this->public_key;
 		if ( $handle === null || $index_handle === null || $public_key === null ) {
 			throw new LogicException( 'Sealed_Writer::open() must be called before add_segment().' );
-		}
-
-		// Read the whole (already bounded) segment from the caller's stream.
-		$plaintext = stream_get_contents( $stream );
-		if ( $plaintext === false ) {
-			throw new RuntimeException( 'Unable to read a segment stream.' );
 		}
 
 		// Encrypt under a fresh random symmetric key and seal that key to the

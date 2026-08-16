@@ -52,14 +52,6 @@ $segments = [
 	'duplicate-payload-b' => 'THE-SAME-BYTES',
 ];
 
-// Builds a readable in-memory stream from a string, the shape add_segment() reads.
-$make_stream = static function ( string $data ) {
-	$stream = fopen( 'php://temp', 'r+b' );
-	fwrite( $stream, $data );
-	rewind( $stream );
-	return $stream;
-};
-
 // Reads a length-prefixed 64-bit-LE field at $offset, advancing it.
 $read_length = static function ( string $raw, int &$offset ): int {
 	$value = unpack( 'P', substr( $raw, $offset, 8 ) )[1];
@@ -133,7 +125,7 @@ $path = tempnam( sys_get_temp_dir(), 'kntnt-sealed-' );
 $writer = new Sealed_Writer( $path );
 $writer->open( $public_key );
 foreach ( $segments as $name => $data ) {
-	$writer->add_segment( $name, $make_stream( $data ) );
+	$writer->add_segment( $name, $data );
 }
 $writer->finalize();
 $raw = (string) file_get_contents( $path );
@@ -214,10 +206,11 @@ kntnt_extractor_assert( $wipe_started_nonzero && $wipe_cleared, 'The plaintext s
 // lingered in freed memory: the exact regression AC2 exists to prevent. Since
 // the values cannot be inspected after the fact, bind the criterion to the
 // source instead — require that the fresh symmetric key (drawn from
-// sodium_crypto_secretbox_keygen) and the segment plaintext (read from the
-// stream) are each passed to wipe(). This is deliberately coupled to the
-// inlined write path (ADR-0009 keeps all crypto in this one seam); a refactor
-// that relocates the wipe should re-prove AC2 here rather than pass in silence.
+// sodium_crypto_secretbox_keygen) and the segment plaintext (now a plain
+// string parameter, no longer read from an intermediate stream) are each
+// passed to wipe(). This is deliberately coupled to the inlined write path
+// (ADR-0009 keeps all crypto in this one seam); a refactor that relocates the
+// wipe should re-prove AC2 here rather than pass in silence.
 $add_segment = new ReflectionMethod( Sealed_Writer::class, 'add_segment' );
 $add_segment_lines = file( $add_segment->getFileName() );
 $add_segment_source = implode( '', array_slice(
@@ -226,9 +219,9 @@ $add_segment_source = implode( '', array_slice(
 	$add_segment->getEndLine() - $add_segment->getStartLine() + 1,
 ) );
 $key_var = preg_match( '/(\$\w+)\s*=\s*sodium_crypto_secretbox_keygen\s*\(/', $add_segment_source, $key_match ) === 1 ? $key_match[1] : null;
-$plaintext_var = preg_match( '/(\$\w+)\s*=\s*stream_get_contents\s*\(/', $add_segment_source, $plaintext_match ) === 1 ? $plaintext_match[1] : null;
+$plaintext_var = '$' . $add_segment->getParameters()[1]->getName();
 $key_is_wiped = $key_var !== null && preg_match( '/\$this->wipe\(\s*' . preg_quote( $key_var, '/' ) . '\s*\)/', $add_segment_source ) === 1;
-$plaintext_is_wiped = $plaintext_var !== null && preg_match( '/\$this->wipe\(\s*' . preg_quote( $plaintext_var, '/' ) . '\s*\)/', $add_segment_source ) === 1;
+$plaintext_is_wiped = preg_match( '/\$this->wipe\(\s*' . preg_quote( $plaintext_var, '/' ) . '\s*\)/', $add_segment_source ) === 1;
 kntnt_extractor_assert( $key_is_wiped && $plaintext_is_wiped, 'add_segment() wipes both the fresh symmetric key and the segment plaintext (AC2 bound to the write path, not just the helper)' );
 
 // The index is sealed: no segment name appears in the clear anywhere in the
@@ -355,7 +348,7 @@ $is_logic_error = static function ( callable $fn ): bool {
 		return true;
 	}
 };
-kntnt_extractor_assert( $is_logic_error( static fn() => ( new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-order-' ) ) )->add_segment( 'x', $make_stream( 'x' ) ) ), 'add_segment() before open() throws a LogicException' );
+kntnt_extractor_assert( $is_logic_error( static fn() => ( new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-order-' ) ) )->add_segment( 'x', 'x' ) ), 'add_segment() before open() throws a LogicException' );
 kntnt_extractor_assert( $is_logic_error( static fn() => ( new Sealed_Writer( tempnam( sys_get_temp_dir(), 'kntnt-order-' ) ) )->finalize() ), 'finalize() before open() throws a LogicException' );
 
 // Reopening an already-open container is a lifecycle violation, not a silent
@@ -377,11 +370,11 @@ kntnt_extractor_assert( $is_logic_error( static function () use ( $public_key ):
 $plan004_path = tempnam( sys_get_temp_dir(), 'kntnt-sidecar-' );
 $plan004_writer = new Sealed_Writer( $plan004_path );
 $plan004_writer->open( $public_key );
-$plan004_writer->add_segment( 'plan004-first', $make_stream( 'first segment plaintext' ) );
+$plan004_writer->add_segment( 'plan004-first', 'first segment plaintext' );
 [ $plan004_committed_bytes, $plan004_committed_index_bytes ] = $plan004_writer->suspend();
 $plan004_writer->resume( $public_key, $plan004_committed_bytes, $plan004_committed_index_bytes );
 $plan004_last_payload = 'last segment plaintext, round-tripped after a simulated crash';
-$plan004_writer->add_segment( 'plan004-last', $make_stream( $plan004_last_payload ) );
+$plan004_writer->add_segment( 'plan004-last', $plan004_last_payload );
 $plan004_writer->finalize();
 
 // The sidecar is the caller's to discard once the container is published, not
@@ -400,7 +393,7 @@ $plan004_recovered = null;
 try {
 	$plan004_resumed_writer = new Sealed_Writer( $plan004_path );
 	$plan004_resumed_writer->resume( $public_key, $plan004_committed_bytes, $plan004_committed_index_bytes );
-	$plan004_resumed_writer->add_segment( 'plan004-last', $make_stream( $plan004_last_payload ) );
+	$plan004_resumed_writer->add_segment( 'plan004-last', $plan004_last_payload );
 	$plan004_resumed_writer->finalize();
 
 	// Parse the re-finalized container and recover the re-sealed last segment.
@@ -427,3 +420,49 @@ try {
 	$plan004_idempotent_ok = false;
 }
 kntnt_extractor_assert( $plan004_idempotent_ok, 'discard_index() is idempotent — calling it again once the sidecar is already gone does not throw (plan 004)' );
+
+// Plan 006: add_segment() now takes the segment's plaintext directly as a
+// string rather than through an intermediate php://temp stream, so a segment
+// above the stream's ~2 MB in-memory spill ceiling no longer has any reason to
+// touch disk on its way in. Prove the round trip still holds above that
+// ceiling — before this change every chunk this large went through a real
+// spilled file — and below the 8 MiB default file-part chunk size.
+$large_plaintext = random_bytes( 3 * 1024 * 1024 );
+$large_path = tempnam( sys_get_temp_dir(), 'kntnt-large-' );
+$large_writer = new Sealed_Writer( $large_path );
+$large_writer->open( $public_key );
+$large_writer->add_segment( 'large-segment', $large_plaintext );
+$large_writer->finalize();
+$large_container = $parse( (string) file_get_contents( $large_path ) );
+$large_recovered = $open_segment( $large_container['records'][0], $keypair );
+kntnt_extractor_assert( $large_recovered === $large_plaintext, 'A segment above the php://temp in-memory spill threshold (3 MiB) round-trips byte-identical (plan 006)' );
+
+// A zero-length segment — the path an empty file takes — must still seal and
+// recover as zero-length now that the parameter is a plain string rather than
+// an empty stream.
+$empty_path = tempnam( sys_get_temp_dir(), 'kntnt-empty-' );
+$empty_writer = new Sealed_Writer( $empty_path );
+$empty_writer->open( $public_key );
+$empty_writer->add_segment( 'empty-segment', '' );
+$empty_writer->finalize();
+$empty_container = $parse( (string) file_get_contents( $empty_path ) );
+$empty_recovered = $open_segment( $empty_container['records'][0], $keypair );
+kntnt_extractor_assert( $empty_recovered === '', 'A zero-length segment seals and recovers as zero-length (plan 006)' );
+
+// Best-effort attempt at a "no spill" assertion was tried here and dropped.
+// A snapshot-and-diff of scandir(sys_get_temp_dir()) around a >2 MB
+// add_segment() call was run BOTH against this fix AND, as a control, against
+// a temporarily-restored pre-fix build that still routes the segment through
+// php://temp (which is known to spill above 2 MB). Both runs reported zero
+// new directory entries: PHP's temp-stream spill uses an anonymous temp file
+// (created and immediately unlinked, the POSIX tmpfile() pattern) inside this
+// WASM Playground harness, so it never appears in a directory listing whether
+// or not it exists. The control run proves the assertion cannot discriminate
+// fixed from broken here, so shipping it would be a permanently-green,
+// non-discriminating assertion rather than a real regression guard — the
+// flaky-in-spirit outcome the plan asks not to ship. The property itself
+// — that a >2 MB segment no longer goes through php://temp at all — is
+// instead covered structurally: `grep -rc 'php://temp' classes/` (Done
+// criteria) and the round-trip assertion above, which exercises the same
+// >2 MB payload through the new string-only add_segment() and would fail if
+// the write path still needed any stream.
