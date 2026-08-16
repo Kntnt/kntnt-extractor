@@ -72,9 +72,12 @@ use RuntimeException;
  * container is: {@see suspend()} reports its committed length, {@see resume()}
  * truncates back to that length, and the two roll back together, so a tick killed
  * between appending a segment and persisting its progress leaves neither file
- * ahead of the other. It lives in the job's own deny-hardened state directory, is
- * never published, and is removed at finalize once the names are sealed into the
- * container for good.
+ * ahead of the other. It lives in the job's own deny-hardened state directory and
+ * is never published. {@see finalize()} seals its names into the container's
+ * trailer but leaves the sidecar itself on disk; it is discarded, via
+ * {@see discard_index()}, only once the caller has published the finished
+ * container, so a crash in between still leaves a resumable build rather than a
+ * finished container with no way back to it.
  *
  * @since 0.1.0
  */
@@ -478,8 +481,13 @@ final class Sealed_Writer {
 	 * Seals the index, writes the trailer, and closes the container.
 	 *
 	 * After this call the writer holds no value able to open the artifact: the
-	 * handles are closed, the public key is dropped, the index sidecar is removed,
-	 * and every segment's symmetric key was already zeroed in {@see add_segment()}.
+	 * handles are closed and the public key is dropped, and every segment's
+	 * symmetric key was already zeroed in {@see add_segment()}. The index sidecar
+	 * survives this call — it is the caller's to remove, via {@see discard_index()},
+	 * once the finished container has been published. A crash between the two would
+	 * otherwise strand a container that is complete on disk but whose sidecar is
+	 * gone, and {@see resume()} fails closed on a missing sidecar rather than risk
+	 * publishing an index that omits segments already sealed.
 	 *
 	 * @since 0.1.0
 	 *
@@ -517,15 +525,15 @@ final class Sealed_Writer {
 		$sealed_index = sodium_crypto_box_seal( $index, $public_key );
 		$this->write( $handle, $sealed_index . pack( 'P', strlen( $sealed_index ) ) );
 
-		// Close the container, drop every reference, and remove the sidecar now that
-		// the names it held are sealed into the container for good, so no value able to
-		// open the artifact and no plaintext name list survives this call. A failed
-		// close can mean buffered trailer bytes never reached disk — a truncated
-		// artifact — so it is escalated, but only once the references are already gone.
+		// Close the container and drop every reference the writer held on it, leaving
+		// the sidecar in place: it is pure working state now that its names are sealed
+		// into the container, but it is the caller's to discard once the container is
+		// published, not this method's. A failed close can mean buffered trailer bytes
+		// never reached disk — a truncated artifact — so it is escalated, but only once
+		// the references are already gone.
 		$closed = fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- streaming encrypt-as-you-go write; see open().
 		$this->handle = null;
 		$this->public_key = null;
-		$this->discard_index();
 		if ( $closed === false ) {
 			throw new RuntimeException( 'Unable to close the sealed container after writing its trailer.' );
 		}
@@ -549,18 +557,24 @@ final class Sealed_Writer {
 	}
 
 	/**
-	 * Removes the index sidecar once its names are sealed into the container.
+	 * Removes the index sidecar once the container it belongs to has been published.
 	 *
-	 * Best-effort: by the time this runs the trailer is written and the sidecar is
-	 * pure residue, so a failure to unlink it cannot affect the artifact and must not
-	 * mask the close error {@see finalize()} may be about to raise. The job directory
-	 * is removed whole on consume, cancel, or sweep in any case.
+	 * The sidecar is working state, not part of the artifact: {@see finalize()} seals
+	 * its names into the container's trailer and leaves the sidecar on disk so a crash
+	 * before the caller publishes the finished container can still {@see resume()} and
+	 * retry rather than strand a complete container behind a missing sidecar. Once the
+	 * caller has moved the container into place it can never be resumed again, so the
+	 * sidecar is safe to discard — the caller does so by calling this method. Safe to
+	 * call when the sidecar is already gone: it is best-effort, since by the time it
+	 * runs the sidecar is pure residue and a failure to unlink it cannot affect the
+	 * published artifact. The job directory is removed whole on consume, cancel, or
+	 * sweep in any case.
 	 *
 	 * @since 0.6.0
 	 *
 	 * @return void
 	 */
-	private function discard_index(): void {
+	public function discard_index(): void {
 
 		if ( is_file( $this->index_path() ) ) {
 			unlink( $this->index_path() ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own index sidecar once its names are sealed into the container.

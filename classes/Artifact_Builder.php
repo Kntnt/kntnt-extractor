@@ -235,8 +235,15 @@ final class Artifact_Builder {
 				$file_offset = $next_offset;
 			}
 		} else {
+
+			// Finalize and publish before discarding the sidecar: it is what a resume
+			// needs to roll a crashed tick back to, so it stays on disk until the
+			// container it belongs to has actually been moved into the served directory
+			// and can no longer be resumed. Discarding it any earlier would strand a
+			// finished-but-unpublished container behind a resume that fails closed.
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
+			$writer->discard_index();
 			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
 
@@ -248,8 +255,12 @@ final class Artifact_Builder {
 		// a published container is never resumed; its segment count, which the poll does
 		// read, is exact either way.
 		if ( $tables_done >= count( $job->tables ) && $structure_done >= count( $job->structure_only ) && $file_index >= count( $job->files ) ) {
+
+			// Finalize, publish, then discard the sidecar — see the identical sequence
+			// in the branch above for why the ordering matters.
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
+			$writer->discard_index();
 			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
 		[ $container_bytes, $index_bytes ] = $writer->suspend();

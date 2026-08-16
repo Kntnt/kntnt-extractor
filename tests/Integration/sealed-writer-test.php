@@ -366,3 +366,64 @@ kntnt_extractor_assert( $is_logic_error( static function () use ( $public_key ):
 	$reopened->open( $public_key );
 	$reopened->open( $public_key );
 } ), 'A second open() before finalize() throws a LogicException (no handle leak)' );
+
+// Plan 004: the index sidecar outlives finalize() and is the caller's to
+// discard once the container is published, so a crash in the window between
+// the two is still recoverable through the ordinary resume() path.
+//
+// Build a small container with two segments, suspending between them so the
+// second segment has a real "committed offset from before the last segment"
+// to resume from — the anchor a crashed tick's next tick would use.
+$plan004_path = tempnam( sys_get_temp_dir(), 'kntnt-sidecar-' );
+$plan004_writer = new Sealed_Writer( $plan004_path );
+$plan004_writer->open( $public_key );
+$plan004_writer->add_segment( 'plan004-first', $make_stream( 'first segment plaintext' ) );
+[ $plan004_committed_bytes, $plan004_committed_index_bytes ] = $plan004_writer->suspend();
+$plan004_writer->resume( $public_key, $plan004_committed_bytes, $plan004_committed_index_bytes );
+$plan004_last_payload = 'last segment plaintext, round-tripped after a simulated crash';
+$plan004_writer->add_segment( 'plan004-last', $make_stream( $plan004_last_payload ) );
+$plan004_writer->finalize();
+
+// The sidecar is the caller's to discard once the container is published, not
+// finalize()'s: it must still be on disk right after finalize() returns.
+kntnt_extractor_assert( is_file( $plan004_path . Sealed_Writer::INDEX_SUFFIX ), 'The index sidecar survives finalize() — it is the caller\'s to discard once the container is published (plan 004)' );
+
+// Simulate the crash window this plan closes: the worker dies after finalize()
+// sealed the trailer but before the caller published the container, so the
+// next tick sees a build file that still exists and resumes from the offsets
+// committed before the final segment. Before this fix, finalize() had already
+// deleted the sidecar in this exact window, so this resume() would throw
+// "the in-progress sealed container index is missing" instead of recovering —
+// caught here so that regression reports as a clean "not ok" rather than
+// taking the whole suite process down with an uncaught RuntimeException.
+$plan004_recovered = null;
+try {
+	$plan004_resumed_writer = new Sealed_Writer( $plan004_path );
+	$plan004_resumed_writer->resume( $public_key, $plan004_committed_bytes, $plan004_committed_index_bytes );
+	$plan004_resumed_writer->add_segment( 'plan004-last', $make_stream( $plan004_last_payload ) );
+	$plan004_resumed_writer->finalize();
+
+	// Parse the re-finalized container and recover the re-sealed last segment.
+	$plan004_raw = (string) file_get_contents( $plan004_path );
+	$plan004_container = $parse( $plan004_raw );
+	$plan004_last_record = $plan004_container['records'][ count( $plan004_container['records'] ) - 1 ];
+	$plan004_recovered = $open_segment( $plan004_last_record, $keypair );
+} catch ( \Throwable ) {
+	$plan004_recovered = null;
+}
+kntnt_extractor_assert(
+	$plan004_recovered === $plan004_last_payload,
+	'A finalized-but-unpublished container recovers via resume() and round-trips its last segment — before this fix, resume() threw on the missing sidecar in this exact crash window (plan 004)'
+);
+
+// discard_index() is idempotent: calling it a second time, once the sidecar is
+// already gone, must not throw — the caller calls it once per completion
+// branch and the sidecar may already be absent on a re-driven job.
+$plan004_idempotent_ok = true;
+try {
+	$plan004_resumed_writer->discard_index();
+	$plan004_resumed_writer->discard_index();
+} catch ( \Throwable ) {
+	$plan004_idempotent_ok = false;
+}
+kntnt_extractor_assert( $plan004_idempotent_ok, 'discard_index() is idempotent — calling it again once the sidecar is already gone does not throw (plan 004)' );
