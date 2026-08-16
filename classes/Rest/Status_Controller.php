@@ -89,9 +89,27 @@ final class Status_Controller {
 	 * the poll response is caller-visible, so it ships under a bump like any other
 	 * change to it.
 	 *
+	 * Raised to 7 for the `GET /environment` define-disclosure allow-list
+	 * (ADR-0018): which `wp-config` defines report a value, rather than the
+	 * previous deny-list's six, is now governed by a curated allow-list plus a
+	 * heuristic backstop, and every `defines` record gains a `disclosure`
+	 * member. Read against [0017](../../docs/adr/0017-api-version-bounds-the-artifact-contract-honours-reports-what-a-build-does.md),
+	 * this is not a change of artifact shape and would ordinarily be a `honours`
+	 * entry instead. It bumps anyway, as a deliberate compatibility interlock
+	 * ADR-0018 argues for explicitly: the consuming client currently classifies a
+	 * `null`-valued define by name alone and ports an unrecognised one into the
+	 * local `wp-config.php` as `define('X', null)`, which then reports
+	 * `defined('X') === true` and silently defeats that plugin's own fallback.
+	 * Against the wider allow-list, defines that were never null before now are,
+	 * and the client's exclusion list does not yet know to treat that as
+	 * withheld rather than legitimate. `honours` only ever adds a name an old
+	 * client is free to keep ignoring; this changes what null already means to
+	 * logic the client has already shipped, without asking it first — exactly
+	 * what the verified ceiling exists to gate.
+	 *
 	 * @since 0.1.0
 	 */
-	public const int API_VERSION = 6;
+	public const int API_VERSION = 7;
 
 	/**
 	 * Caller-visible behaviours a build may or may not honour, reported to an
@@ -102,13 +120,19 @@ final class Status_Controller {
 	 * and an old client that has never heard of the name is unaffected by its
 	 * presence. `strict` is the one that forced this list to exist — `POST
 	 * /extractions` has accepted it since before this build, and no version number
-	 * distinguishes a build that honours it from one that does not.
+	 * distinguishes a build that honours it from one that does not. `disclosure`
+	 * is the one exception to "additive": the per-record member `GET /environment`
+	 * always carries (ADR-0018) is new surface a client can check for before
+	 * depending on it, exactly like every other name here, even though the
+	 * allow-list it reports on shipped under a coordinated {@see API_VERSION}
+	 * bump rather than silently.
 	 *
 	 * @since 0.6.0
 	 */
 	private const array HONOURED_BEHAVIOURS = [
 		'attempts',
 		'chunks_done',
+		'disclosure',
 		'skipped_files',
 		'strict',
 	];

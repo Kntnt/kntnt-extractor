@@ -56,6 +56,14 @@ Authenticate with an [application password](https://make.wordpress.org/core/2020
 - `.env` and `.env.*`, anywhere in the tree.
 - Directly in the installation root only: `*.sql`, `*.sql.gz`, `*.sql.zip`, `*.pem`, `*.key`, `id_rsa*`.
 
+### `GET /environment`
+
+Returns generic runtime and configuration facts a migration or staging caller needs — PHP version, the database engine's flavour/version/collation, WordPress URLs/paths/prefix/core version, the active-plugins option, the drop-ins present, and every `define()` name found in `wp-config.php`. Define **names** are always listed; a define's **value** is disclosed only from a small, curated allow-list of layout and behaviour facts (`DB_NAME`, `WP_CONTENT_DIR`, `WP_DEBUG`, and similar) plus a heuristic backstop that withholds anything shaped like a credential (a name containing `KEY`, `SECRET`, `TOKEN`, `PASS`, `SALT`, `NONCE`, `AUTH`, `CREDENTIAL`, `PRIVATE`, `LICEN`, or `API`), applied after the allow-list and never overridden by it. Everything else — SMTP passwords, API keys, licence keys, secondary database credentials, and any other third-party secret a site happens to define in `wp-config.php` — stays on the server by default, the same way `DB_PASSWORD` and the auth keys and salts always have.
+
+Each entry in `defines` carries a third member, `disclosure`, naming why: `included` (the value is disclosed), `secret` (withheld — the name is shaped like a credential), or `not_allow_listed` (withheld — the name simply isn't on the curated list). It is present on every entry, disclosed ones included, so a caller never has to guess whether `null` means "withheld" or "this define's real value is null" — see `docs/define-disclosure.md` for the full protocol.
+
+To opt a specific unlisted define in on your own site, set `KNTNT_EXTRACTOR_DISCLOSABLE_DEFINES` in `wp-config.php` (or the `kntnt_extractor_config_disclosable_defines` filter) to a list of its name(s). This is a per-site, explicit decision — there is no way to disclose everything at once.
+
 ### Large tables and files
 
 Nothing is packaged whole. A selected table is dumped in bounded slices of rows and a selected file is read in bounded parts, one chunk per background tick, so a table or a file far larger than a single PHP request could carry still completes — it simply takes more ticks. Each chunk is sealed on its own and recorded in the artifact's sealed index under the table's name or the file's installation-root-relative path, which means a resource larger than one chunk appears in the index several times.
@@ -90,7 +98,7 @@ The four table and file counters advance only when a whole table or a whole file
 
 ```json
 {
-  "api_version": 6,
+  "api_version": 7,
   "authenticated_as": "your-wp-user-login",
   "capabilities": { "kntnt_extractor_operate": true, "manage_options": true }
 }

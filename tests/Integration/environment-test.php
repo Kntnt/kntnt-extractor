@@ -1,18 +1,21 @@
 <?php
 /**
  * Integration test: GET /environment returns read-only site & runtime facts,
- * gated by the shared Authorizer, with the secret define family redacted.
+ * gated by the shared Authorizer, with a define's value disclosed only from an
+ * allow-list plus a heuristic backstop, and never its name.
  *
  * This harness exercises the endpoint end to end against the live REST stack:
  * the both-capabilities gate (AC2 — 401 for an anonymous caller and 403 for a
  * single-capability one, per ADR-0012), the response shape (AC1 — php/database/wordpress/active_plugins/
  * dropins/defines), the secret-define redaction (AC3 — a seeded DB_PASSWORD and
- * salt/nonce family emitted by name with value null, never their value), and the
- * relative content/uploads paths (AC4 — no absolute server path). The real
- * php_version and database.{server,version} magnitudes cannot be asserted here —
- * Playground runs on SQLite and cannot report a MySQL server version — so those
- * live in the DDEV harness (tests/Integration/DDEV/environment-test.php),
- * exactly as tables-size-test.php notes for SHOW TABLE STATUS.
+ * salt/nonce family emitted by name with value null, never their value), the
+ * relative content/uploads paths (AC4 — no absolute server path), and the
+ * allow-list, heuristic backstop, escape hatch, and per-record `disclosure`
+ * discriminator ADR-0018 adds (AC6). The real php_version and
+ * database.{server,version} magnitudes cannot be asserted here — Playground runs
+ * on SQLite and cannot report a MySQL server version — so those live in the DDEV
+ * harness (tests/Integration/DDEV/environment-test.php), exactly as
+ * tables-size-test.php notes for SHOW TABLE STATUS.
  *
  * @package Kntnt\Extractor
  * @since   0.2.0
@@ -56,10 +59,10 @@ kntnt_extractor_assert( $get_environment()->get_status() === 403, 'AC2: manage_o
 // --- Arrange a seeded define fixture and a non-default uploads layout ---------
 
 // Point the controller at a fixture wp-config.php whose source names the secret
-// families (so redaction can be proven) plus a resolvable non-secret define. The
-// controller only reads NAMES from this source and resolves values live via
-// constant(); it never evaluates the fixture, so the seeded secret literals below
-// exist purely to prove they are NOT echoed back.
+// families, two allow-listed facts, and the allow-list/heuristic/regression
+// fixtures below. The controller only reads NAMES from this source and resolves
+// values live via constant(); it never evaluates the fixture, so every seeded
+// literal below exists purely to prove whether it is, or is not, echoed back.
 $fixture = wp_upload_dir()['basedir'] . '/kntnt-env-wp-config-fixture.php';
 wp_mkdir_p( dirname( $fixture ) );
 file_put_contents( $fixture, <<<'PHP'
@@ -73,17 +76,16 @@ define( 'NONCE_SALT', 'seeded-nonce-salt' );
 define( 'NONCE_KEY', 'seeded-nonce-key' );
 define( 'KNTNT_TEST_CUSTOM_SALT', 'seeded-custom-salt-literal' );
 define( 'NONCE_KNTNT_TEST', 'seeded-nonce-prefix-literal' );
-define( 'KNTNT_ENV_TEST_DEFINE', 'resolved-value' );
 define( 'ABSPATH', '/must/never/be/read-from-source' );
-define( 'KNTNT_ENV_TEST_ABS_PATH', '/must/never/be/read-from-source' );
+define( 'WP_CONTENT_DIR', '/must/never/be/read-from-source' );
+define( 'AUTOMATIC_UPDATER_DISABLED', '/must/never/be/read-from-source' );
+define( 'ACME_SMTP_PASSWORD', '/must/never/be/read-from-source' );
+define( 'ACME_WIDGET_ENDPOINT', '/must/never/be/read-from-source' );
+define( 'ACME_SERVICE_TOKEN', '/must/never/be/read-from-source' );
+define( 'KNTNT_PAPAPI_KEY', '/must/never/be/read-from-source' );
 PHP );
 $point_config = static fn(): string => $fixture;
 add_filter( 'kntnt_extractor_config_wp_config_path', $point_config );
-
-// Define the non-secret constant at runtime so its live value is resolvable.
-if ( ! defined( 'KNTNT_ENV_TEST_DEFINE' ) ) {
-	define( 'KNTNT_ENV_TEST_DEFINE', 'resolved-value' );
-}
 
 // Define the non-canonical secret-family members live with distinctive literals,
 // so the response proving their value is null also proves the controller never
@@ -95,13 +97,31 @@ if ( ! defined( 'NONCE_KNTNT_TEST' ) ) {
 	define( 'NONCE_KNTNT_TEST', 'live-nonce-prefix-value' );
 }
 
-// Define a path-valued non-secret constant at runtime, under the install root, so
-// the response can prove absolute paths are relativised (AC4). ABSPATH is already
-// a real constant resolving to the absolute install root; the controller must
-// relativise it too rather than echo the server path.
-if ( ! defined( 'KNTNT_ENV_TEST_ABS_PATH' ) ) {
-	define( 'KNTNT_ENV_TEST_ABS_PATH', ABSPATH . 'wp-content/uploads' );
+// Define AUTOMATIC_UPDATER_DISABLED live only if core has not already, so AC6's
+// "an allow-listed define resolves to its live value" assertion can compare
+// against whatever that live value actually is, real or seeded.
+if ( ! defined( 'AUTOMATIC_UPDATER_DISABLED' ) ) {
+	define( 'AUTOMATIC_UPDATER_DISABLED', true );
 }
+
+// Define the allow-list/heuristic/escape-hatch/regression fixtures live, each
+// with a distinctive literal so the leak check below can prove none of them is
+// ever echoed while withheld (AC6). ACME_WIDGET_ENDPOINT looks like nothing a
+// heuristic would flag — an innocuous fact, not a credential — yet it is still
+// withheld by default, because the allow-list is what discloses, not the
+// absence of a scary-looking name.
+define( 'ACME_SMTP_PASSWORD', 'seeded-acme-smtp-password-literal' );
+define( 'ACME_WIDGET_ENDPOINT', 'seeded-acme-widget-endpoint-literal' );
+define( 'ACME_SERVICE_TOKEN', 'seeded-acme-service-token-literal' );
+
+// KNTNT_PAPAPI_KEY names the real incident this plan exists to close: a
+// 40-character third-party API key that left a client site through this
+// endpoint under the old deny-list and sat in cleartext on an operator's
+// laptop for three days. Matched neither by an exact secret name, `*_SALT`,
+// nor `NONCE_*`, the deny-list never touched it; the allow-list withholds it by
+// default, and the heuristic backstop (`KEY`, `API`) would withhold it even had
+// it been added to the allow-list by mistake.
+define( 'KNTNT_PAPAPI_KEY', 'seeded-kntnt-papapi-key-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6' );
 
 // Move the uploads base to a non-default location so the relative uploads_dir is
 // exercised against a real override rather than only the default layout.
@@ -163,20 +183,22 @@ $dropins = $data['dropins'] ?? null;
 $dropins_ok = is_array( $dropins ) && array_is_list( $dropins ) && array_all( $dropins, static fn( $d ): bool => is_string( $d ) );
 kntnt_extractor_assert( $dropins_ok, 'AC1: dropins is a list of present drop-in filenames' );
 
-// AC1: defines is a list of { name, value } records.
+// AC1: defines is a list of { name, value, disclosure } records.
 $defines = $data['defines'] ?? null;
 $defines_ok = is_array( $defines ) && array_is_list( $defines ) && $defines !== [];
 $by_name = [];
+$disclosure_by_name = [];
 if ( is_array( $defines ) ) {
 	foreach ( $defines as $define ) {
-		if ( is_array( $define ) && is_string( $define['name'] ?? null ) && array_key_exists( 'value', $define ) ) {
+		if ( is_array( $define ) && is_string( $define['name'] ?? null ) && array_key_exists( 'value', $define ) && is_string( $define['disclosure'] ?? null ) ) {
 			$by_name[ $define['name'] ] = $define['value'];
+			$disclosure_by_name[ $define['name'] ] = $define['disclosure'];
 		} else {
 			$defines_ok = false;
 		}
 	}
 }
-kntnt_extractor_assert( $defines_ok, 'AC1: defines is a non-empty list of { name, value } records' );
+kntnt_extractor_assert( $defines_ok, 'AC1: defines is a non-empty list of { name, value, disclosure } records' );
 
 // AC3: every secret in the redaction family appears by name with value null, and
 // its seeded literal never appears anywhere in the serialised body.
@@ -184,27 +206,43 @@ kntnt_extractor_assert( $defines_ok, 'AC1: defines is a non-empty list of { name
 // NONCE_* — a pattern rule, not a name list. KNTNT_TEST_CUSTOM_SALT (suffix) and
 // NONCE_KNTNT_TEST (prefix) are non-canonical members that must be redacted too:
 // a regression to a hardcoded list of the seven canonical names would let these
-// through, so they stand guard over the pattern behaviour.
+// through, so they stand guard over the pattern behaviour. Under the allow-list
+// every one of the nine is withheld for lacking allow-list membership AND for
+// matching the heuristic backstop, so the discriminator reads `secret` for all
+// of them (AC6 covers the `not_allow_listed` case separately).
 $secret_names = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY', 'AUTH_SALT', 'NONCE_SALT', 'NONCE_KEY', 'KNTNT_TEST_CUSTOM_SALT', 'NONCE_KNTNT_TEST' ];
 $all_redacted = true;
 foreach ( $secret_names as $name ) {
-	if ( ! array_key_exists( $name, $by_name ) || $by_name[ $name ] !== null ) {
+	if ( ! array_key_exists( $name, $by_name ) || $by_name[ $name ] !== null || ( $disclosure_by_name[ $name ] ?? null ) !== 'secret' ) {
 		$all_redacted = false;
 	}
 }
-kntnt_extractor_assert( $all_redacted, 'AC3: every secret-family define — including a *_SALT-suffix and a NONCE_-prefix member — is present by name with value null' );
+kntnt_extractor_assert( $all_redacted, 'AC3: every secret-family define — including a *_SALT-suffix and a NONCE_-prefix member — is present by name with value null and disclosure secret' );
 $body = (string) wp_json_encode( $data );
-$literals = [ 'super-secret-db-password', 'seeded-auth-key', 'seeded-secure-auth-key', 'seeded-logged-in-key', 'seeded-auth-salt', 'seeded-nonce-salt', 'seeded-nonce-key', 'seeded-custom-salt-literal', 'seeded-nonce-prefix-literal', 'live-custom-salt-value', 'live-nonce-prefix-value' ];
+$literals = [
+	'super-secret-db-password',
+	'seeded-auth-key',
+	'seeded-secure-auth-key',
+	'seeded-logged-in-key',
+	'seeded-auth-salt',
+	'seeded-nonce-salt',
+	'seeded-nonce-key',
+	'seeded-custom-salt-literal',
+	'seeded-nonce-prefix-literal',
+	'live-custom-salt-value',
+	'live-nonce-prefix-value',
+	'seeded-acme-smtp-password-literal',
+	'seeded-acme-widget-endpoint-literal',
+	'seeded-acme-service-token-literal',
+	'seeded-kntnt-papapi-key-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6',
+];
 $leaked = false;
 foreach ( $literals as $literal ) {
 	if ( str_contains( $body, $literal ) ) {
 		$leaked = true;
 	}
 }
-kntnt_extractor_assert( ! $leaked, 'AC3: no seeded secret literal appears anywhere in the response body' );
-
-// A non-secret define resolves to its live value.
-kntnt_extractor_assert( ( $by_name['KNTNT_ENV_TEST_DEFINE'] ?? null ) === 'resolved-value', 'AC3: a non-secret define resolves to its live constant() value' );
+kntnt_extractor_assert( ! $leaked, 'AC3/AC6: no seeded secret or unlisted literal appears anywhere in the response body' );
 
 // AC4: no defines value discloses an absolute server path. ABSPATH ships in every
 // stock wp-config.php and always resolves to the absolute install root; a path-
@@ -218,7 +256,135 @@ foreach ( $by_name as $define_value ) {
 }
 kntnt_extractor_assert( $no_absolute_define, 'AC4: no defines value starts with an absolute path or discloses the install root' );
 kntnt_extractor_assert( array_key_exists( 'ABSPATH', $by_name ) && $by_name['ABSPATH'] === '', 'AC4: ABSPATH is relativised to the empty root-relative path, not the absolute root' );
-kntnt_extractor_assert( ( $by_name['KNTNT_ENV_TEST_ABS_PATH'] ?? null ) === 'wp-content/uploads', 'AC4: a path-valued define under the root is relativised to the root-relative path' );
+
+// AC4: a path-valued define that IS on the allow-list is relativised the same
+// way as content_dir — proven against WP_CONTENT_DIR's own live value rather
+// than an unlisted fixture, since the allow-list is what makes it visible at
+// all. This replaces the pre-allow-list assertion that depended on an unlisted
+// name (KNTNT_ENV_TEST_ABS_PATH) resolving, which the allow-list now redacts.
+kntnt_extractor_assert( ( $by_name['WP_CONTENT_DIR'] ?? null ) === ( $wp['content_dir'] ?? null ), 'AC4: WP_CONTENT_DIR, an allow-listed path-valued define, is relativised exactly as wordpress.content_dir' );
+
+// AC6: an allow-listed, non-path define resolves to its live value — compared
+// against the live constant directly, so the assertion holds whether this
+// install already defines AUTOMATIC_UPDATER_DISABLED or the guard above just
+// seeded it. This replaces the pre-allow-list assertion that depended on an
+// unlisted name (KNTNT_ENV_TEST_DEFINE) resolving, which the allow-list now
+// redacts.
+kntnt_extractor_assert(
+	array_key_exists( 'AUTOMATIC_UPDATER_DISABLED', $by_name ) && $by_name['AUTOMATIC_UPDATER_DISABLED'] === constant( 'AUTOMATIC_UPDATER_DISABLED' ),
+	'AC6: an allow-listed define (AUTOMATIC_UPDATER_DISABLED) resolves to its live constant() value',
+);
+kntnt_extractor_assert( ( $disclosure_by_name['AUTOMATIC_UPDATER_DISABLED'] ?? null ) === 'included', 'AC6: an allow-listed, non-redacted define reports disclosure included' );
+kntnt_extractor_assert( ( $disclosure_by_name['WP_CONTENT_DIR'] ?? null ) === 'included', 'AC6: WP_CONTENT_DIR reports disclosure included' );
+
+// AC6: an unlisted, innocuous-looking define is redacted just like a
+// secret-shaped one — the name is present, the value is not. Neither seeded
+// literal appears anywhere in the body (covered by the leak check above);
+// ACME_WIDGET_ENDPOINT in particular matches no heuristic substring, so this is
+// the allow-list's default-deny doing the work alone, not the backstop.
+kntnt_extractor_assert(
+	array_key_exists( 'ACME_SMTP_PASSWORD', $by_name ) && $by_name['ACME_SMTP_PASSWORD'] === null
+		&& array_key_exists( 'ACME_WIDGET_ENDPOINT', $by_name ) && $by_name['ACME_WIDGET_ENDPOINT'] === null,
+	'AC6: an unlisted, innocuous-looking define is redacted — name present, value absent',
+);
+
+// AC6: the heuristic backstop fires for an unlisted name shaped like a secret.
+// None of the 62 curated allow-list names matches a redaction substring today
+// (verified by construction), so this is demonstrated against unlisted names
+// rather than an allow-listed one — ACME_SERVICE_TOKEN (`TOKEN`) alongside
+// ACME_SMTP_PASSWORD (`PASS`) above.
+kntnt_extractor_assert( array_key_exists( 'ACME_SERVICE_TOKEN', $by_name ) && $by_name['ACME_SERVICE_TOKEN'] === null, 'AC6: the heuristic backstop redacts an unlisted TOKEN-shaped define' );
+
+// AC6: the discriminator distinguishes WHY a value was withheld. A define
+// withheld only for being unlisted reports not_allow_listed; a define withheld
+// because it looks like a secret reports secret — the two reasons the enum
+// exists to keep apart.
+kntnt_extractor_assert( ( $disclosure_by_name['ACME_WIDGET_ENDPOINT'] ?? null ) === 'not_allow_listed', 'AC6: an unlisted, non-secret-shaped define reports disclosure not_allow_listed' );
+kntnt_extractor_assert( ( $disclosure_by_name['ACME_SMTP_PASSWORD'] ?? null ) === 'secret', 'AC6: an unlisted, PASS-shaped define reports disclosure secret' );
+kntnt_extractor_assert( ( $disclosure_by_name['ACME_SERVICE_TOKEN'] ?? null ) === 'secret', 'AC6: an unlisted, TOKEN-shaped define reports disclosure secret' );
+
+// AC6: the regression this whole plan exists to close. KNTNT_PAPAPI_KEY is
+// shaped exactly like the real third-party API key that left a client site
+// under the old deny-list, sat in a scratchpad for three days, and was never
+// on any exact-name, *_SALT, or NONCE_* pattern the deny-list matched. The
+// heuristic backstop (KEY, API) now withholds it by default.
+kntnt_extractor_assert(
+	array_key_exists( 'KNTNT_PAPAPI_KEY', $by_name ) && $by_name['KNTNT_PAPAPI_KEY'] === null && ( $disclosure_by_name['KNTNT_PAPAPI_KEY'] ?? null ) === 'secret',
+	'AC6 (regression): a define shaped like the real KNTNT_PAPAPI_KEY incident is redacted with disclosure secret',
+);
+
+// AC6: `disclosure` is present on every record without exception — the
+// load-bearing constraint the consuming client depends on. If it appeared only
+// on withheld records, "member absent" would silently become a third state
+// meaning "old server".
+$disclosure_present_everywhere = is_array( $defines ) && array_all(
+	$defines,
+	static fn( $define ): bool => is_array( $define ) && array_key_exists( 'disclosure', $define ),
+);
+kntnt_extractor_assert( $disclosure_present_everywhere, 'AC6: every defines record carries a disclosure member, including included ones' );
+
+// AC6: the discriminator is one of exactly three values, and it agrees with
+// value — included permits a non-null value, while secret and not_allow_listed
+// both force value to null.
+$valid_reasons = [ 'included', 'secret', 'not_allow_listed' ];
+$discriminator_agrees = is_array( $defines ) && array_all(
+	$defines,
+	static function ( $define ) use ( $valid_reasons ): bool {
+		if ( ! is_array( $define ) || ! in_array( $define['disclosure'] ?? null, $valid_reasons, true ) ) {
+			return false;
+		}
+		return $define['disclosure'] === 'included' || $define['value'] === null;
+	},
+);
+kntnt_extractor_assert( $discriminator_agrees, 'AC6: every disclosure is one of exactly three values, and secret/not_allow_listed always pair with a null value' );
+
+// --- AC6: the escape hatch discloses one operator-named extra define ---------
+
+// ACME_WIDGET_ENDPOINT is confirmed redacted above (not_allow_listed). Naming
+// it through the Config seam's disclosable_defines knob must disclose exactly
+// that one define's value and change nothing else, and the filter must be
+// removed before this file ends — the bootstrap requires every test file into
+// one PHP process in alphabetical order, and a leaked filter would change a
+// later file's behaviour.
+$allow_endpoint = static fn(): array => [ 'ACME_WIDGET_ENDPOINT' ];
+add_filter( 'kntnt_extractor_config_disclosable_defines', $allow_endpoint );
+$escape_hatch_data = $get_environment()->get_data();
+$escape_hatch_data = is_array( $escape_hatch_data ) ? $escape_hatch_data : [];
+$escape_hatch_defines = $escape_hatch_data['defines'] ?? null;
+$escape_hatch_by_name = [];
+$escape_hatch_disclosure_by_name = [];
+if ( is_array( $escape_hatch_defines ) ) {
+	foreach ( $escape_hatch_defines as $define ) {
+		if ( is_array( $define ) && is_string( $define['name'] ?? null ) ) {
+			$escape_hatch_by_name[ $define['name'] ] = $define['value'] ?? null;
+			$escape_hatch_disclosure_by_name[ $define['name'] ] = $define['disclosure'] ?? null;
+		}
+	}
+}
+kntnt_extractor_assert( ( $escape_hatch_by_name['ACME_WIDGET_ENDPOINT'] ?? null ) === 'seeded-acme-widget-endpoint-literal', 'AC6: the escape hatch discloses the one named define\'s real value' );
+kntnt_extractor_assert( ( $escape_hatch_disclosure_by_name['ACME_WIDGET_ENDPOINT'] ?? null ) === 'included', 'AC6: the escape-hatch-disclosed define reports disclosure included' );
+kntnt_extractor_assert( ( $escape_hatch_by_name['ACME_SMTP_PASSWORD'] ?? null ) === null && ( $escape_hatch_disclosure_by_name['ACME_SMTP_PASSWORD'] ?? null ) === 'secret', 'AC6: the escape hatch changes nothing else — a secret-shaped name is still redacted' );
+kntnt_extractor_assert( ( $escape_hatch_by_name['ACME_SERVICE_TOKEN'] ?? null ) === null, 'AC6: the escape hatch changes nothing else — an unrelated unlisted name is still redacted' );
+remove_filter( 'kntnt_extractor_config_disclosable_defines', $allow_endpoint );
+
+// AC6: a non-list disclosable_defines value cannot open the gate to "everything"
+// — a string is not a list, so it must be ignored rather than trusted, and
+// ACME_SMTP_PASSWORD (still not allow-listed under this malformed knob) must
+// stay redacted exactly as the baseline response already proved.
+$wildcard_attempt = static fn(): string => '*';
+add_filter( 'kntnt_extractor_config_disclosable_defines', $wildcard_attempt );
+$wildcard_data = $get_environment()->get_data();
+$wildcard_data = is_array( $wildcard_data ) ? $wildcard_data : [];
+$wildcard_by_name = [];
+if ( is_array( $wildcard_data['defines'] ?? null ) ) {
+	foreach ( $wildcard_data['defines'] as $define ) {
+		if ( is_array( $define ) && is_string( $define['name'] ?? null ) ) {
+			$wildcard_by_name[ $define['name'] ] = $define['value'] ?? null;
+		}
+	}
+}
+kntnt_extractor_assert( ( $wildcard_by_name['ACME_SMTP_PASSWORD'] ?? null ) === null && ( $wildcard_by_name['ACME_WIDGET_ENDPOINT'] ?? null ) === null, 'AC6: a non-list disclosable_defines value is ignored, not treated as "everything"' );
+remove_filter( 'kntnt_extractor_config_disclosable_defines', $wildcard_attempt );
 
 // AC5: the flavour classifier is the rule itself, pinned against fixed banners of
 // both engines — the Playground/SQLite backend never exercises a real MySQL or

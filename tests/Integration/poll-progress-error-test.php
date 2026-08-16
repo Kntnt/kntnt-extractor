@@ -225,7 +225,7 @@ remove_filter( 'kntnt_extractor_config_chunk_size', $small_chunk );
 // trio (GET /environment and its siblings). So assert the current reported
 // version rather than a frozen 1.
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 6, 'GET /status reports the current api_version (AC6)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 7, 'GET /status reports the current api_version (AC6)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

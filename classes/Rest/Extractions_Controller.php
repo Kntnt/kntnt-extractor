@@ -731,7 +731,8 @@ final class Extractions_Controller {
 	 * selection (and reports them as `skipped_files`) but still 404s a missing
 	 * table, a traversal, a null-byte path, or a selection that is empty once
 	 * the vanished files are gone. Old clients that omit the member keep the
-	 * behaviour they already understood, which is why this stays at api_version 6.
+	 * behaviour they already understood, which is why `strict` itself required
+	 * no version bump on its own.
 	 *
 	 * The structure-only selection (issue #16) is additive and independently
 	 * omittable: an absent or null `tables_structure_only` behaves as `[]`, so a

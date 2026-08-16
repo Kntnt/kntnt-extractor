@@ -347,11 +347,16 @@ kntnt_extractor_assert(
 	'A null-byte path is still 404 under strict: false (AC4)'
 );
 
-// --- AC5: the API version stays 6 ---
+// --- AC5: strict:false itself did not move the API version ---
+//
+// The version now reads 7 because an unrelated, later change — the
+// define-disclosure allow-list (ADR-0018) — bumped it; strict:false is still
+// additive and would not have bumped it on its own, so this pins the current
+// reported version rather than a frozen number.
 
-kntnt_extractor_assert( Status_Controller::API_VERSION === 6, 'The REST contract stays at api_version 6 (AC5)' );
+kntnt_extractor_assert( Status_Controller::API_VERSION === 7, 'The REST contract reports the current api_version (AC5)' );
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 6, 'GET /status still reports api_version 6 (AC5)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 7, 'GET /status reports the current api_version (AC5)' );
 
 $rmrf( $work );
 $rmrf( $work . '-downloads' );

@@ -21,35 +21,153 @@ use WP_REST_Server;
  * Returns the site's generic runtime and configuration facts — PHP version, the
  * database engine's flavour/version/collation, WordPress URLs/paths/prefix/core
  * version, the active-plugins option, the drop-ins present, and the install's
- * resolved non-secret `wp-config` defines. These are the facts a migration or
- * staging caller needs that no other surface can supply: the live PHP and DB
- * versions appear in no file and no table dump, and the defines can otherwise be
- * recovered only by shipping the whole `wp-config.php` — secrets and all — off
- * the server. Resolving the defines here, with the secret family redacted to
- * `null`, keeps the database password and salts on the server (the reason this
- * endpoint exists) while staying strictly generic: it exposes only facts about
- * the install, never any caller-specific categorisation (ADR-0003). Access is
- * the plugin's single two-capability gate, applied through the shared
- * {@see Authorizer} (ADR-0002); the endpoint carries no caller-supplied resource,
- * is read-only, and has no side effects.
+ * `wp-config` defines. These are the facts a migration or staging caller needs
+ * that no other surface can supply: the live PHP and DB versions appear in no
+ * file and no table dump, and the defines can otherwise be recovered only by
+ * shipping the whole `wp-config.php` — secrets and all — off the server. Every
+ * define name found in the source is always reported; a value discloses only
+ * when {@see self::is_disclosable_define()} allows it, which keeps the database
+ * password, the core secret family, and any third-party credential the site
+ * happens to define on the server (the reason this endpoint exists) while
+ * staying strictly generic: it exposes only facts about the install, never any
+ * caller-specific categorisation (ADR-0003). See `docs/define-disclosure.md` for
+ * the normative protocol a caller reads this against. Access is the plugin's
+ * single two-capability gate, applied through the shared {@see Authorizer}
+ * (ADR-0002); the endpoint carries no caller-supplied resource, is read-only,
+ * and has no side effects.
  *
  * @since 0.2.0
  */
 final class Environment_Controller {
 
 	/**
-	 * The exact define names whose value is a secret and is never read.
+	 * The define names whose value is safe to disclose to an authorized caller.
 	 *
-	 * The suffix `*_SALT` and the prefix `NONCE_*` families are matched
-	 * separately in {@see self::is_secret_define()}; this list is the fixed-name
-	 * remainder. Mirrors `kntnt-wp-skills`'s `is_secret_define()`, giving defence
-	 * in depth at both ends of the boundary.
+	 * These are the layout and behaviour facts a migration or staging caller
+	 * genuinely needs — install paths and URLs, the non-secret database
+	 * connection facts (`DB_NAME`, `DB_USER`, `DB_HOST`, `DB_CHARSET`,
+	 * `DB_COLLATE`; deliberately not `DB_PASSWORD`), multisite topology, and the
+	 * behavioural toggles core reads from `wp-config.php`. Membership is policy,
+	 * not contract: it may change without moving {@see \Kntnt\Extractor\Rest\Status_Controller::API_VERSION},
+	 * per the protocol in `docs/define-disclosure.md`. Every name here is still
+	 * subject to {@see self::REDACTION_SUBSTRINGS} — the allow-list is not itself
+	 * the last word.
 	 *
-	 * @since 0.2.0
+	 * @since 0.6.0
 	 *
 	 * @var list<string>
 	 */
-	private const array SECRET_DEFINE_NAMES = [ 'DB_PASSWORD', 'AUTH_KEY', 'SECURE_AUTH_KEY', 'LOGGED_IN_KEY' ];
+	private const array DISCLOSABLE_DEFINE_NAMES = [
+		'ABSPATH',
+		'ADMIN_COOKIE_PATH',
+		'AUTOMATIC_UPDATER_DISABLED',
+		'AUTOSAVE_INTERVAL',
+		'BLOG_ID_CURRENT_SITE',
+		'COMPRESS_CSS',
+		'COMPRESS_SCRIPTS',
+		'CONCATENATE_SCRIPTS',
+		'COOKIE_DOMAIN',
+		'COOKIEPATH',
+		'DB_CHARSET',
+		'DB_COLLATE',
+		'DB_HOST',
+		'DB_NAME',
+		'DB_USER',
+		'DISABLE_WP_CRON',
+		'DISALLOW_FILE_EDIT',
+		'DISALLOW_FILE_MODS',
+		'DOMAIN_CURRENT_SITE',
+		'EMPTY_TRASH_DAYS',
+		'FORCE_SSL_ADMIN',
+		'FORCE_SSL_LOGIN',
+		'FS_METHOD',
+		'IMAGE_EDIT_OVERWRITE',
+		'MEDIA_TRASH',
+		'MULTISITE',
+		'NOBLOGREDIRECT',
+		'PATH_CURRENT_SITE',
+		'PLUGINS_COOKIE_PATH',
+		'RELOCATE',
+		'SAVEQUERIES',
+		'SCRIPT_DEBUG',
+		'SITE_ID_CURRENT_SITE',
+		'SITECOOKIEPATH',
+		'STYLESHEETPATH',
+		'SUBDOMAIN_INSTALL',
+		'TEMPLATEPATH',
+		'UPLOADS',
+		'WP_ACCESSIBLE_HOSTS',
+		'WP_ALLOW_MULTISITE',
+		'WP_AUTO_UPDATE_CORE',
+		'WP_CACHE',
+		'WP_CONTENT_DIR',
+		'WP_CONTENT_URL',
+		'WP_CRON_LOCK_TIMEOUT',
+		'WP_DEBUG',
+		'WP_DEBUG_DISPLAY',
+		'WP_DEBUG_LOG',
+		'WP_DEFAULT_THEME',
+		'WP_ENVIRONMENT_TYPE',
+		'WP_HOME',
+		'WP_LANG_DIR',
+		'WP_MAX_MEMORY_LIMIT',
+		'WP_MEMORY_LIMIT',
+		'WP_PLUGIN_DIR',
+		'WP_PLUGIN_URL',
+		'WP_POST_REVISIONS',
+		'WP_PROXY_HOST',
+		'WP_PROXY_PORT',
+		'WP_SITEURL',
+		'WP_TEMP_DIR',
+		'WPLANG',
+	];
+
+	/**
+	 * Substrings that force redaction regardless of the allow-list.
+	 *
+	 * The backstop for a future core or third-party define nobody has added to
+	 * {@see self::DISCLOSABLE_DEFINE_NAMES}: `wp-config.php` is conventionally
+	 * where a site puts SMTP passwords, JWT signing secrets, API keys, licence
+	 * keys, and secondary database credentials, and a deny-list of secrets fails
+	 * open on every name nobody anticipated. Matched case-insensitively against
+	 * the whole name, so it also catches an allow-listed name that should never
+	 * have been added.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @var list<string>
+	 */
+	private const array REDACTION_SUBSTRINGS = [
+		'API',
+		'AUTH',
+		'CREDENTIAL',
+		'KEY',
+		'LICEN',
+		'NONCE',
+		'PASS',
+		'PRIVATE',
+		'SALT',
+		'SECRET',
+		'TOKEN',
+	];
+
+	/**
+	 * The closed set of reasons a define record's `disclosure` member reports.
+	 *
+	 * Backs the per-record discriminator so the three wire values are stated once
+	 * in code, keyed by a symbolic name, rather than as string literals scattered
+	 * through {@see self::defines()}. See `docs/define-disclosure.md` for the
+	 * normative protocol.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @var array{INCLUDED: string, NOT_ALLOW_LISTED: string, SECRET: string}
+	 */
+	private const array DISCLOSURE_REASONS = [
+		'INCLUDED' => 'included',
+		'NOT_ALLOW_LISTED' => 'not_allow_listed',
+		'SECRET' => 'secret',
+	];
 
 	/**
 	 * Wires the controller to the shared authorization gate and the Config seam.
@@ -93,8 +211,9 @@ final class Environment_Controller {
 	 * Returns the environment facts to an authorized caller.
 	 *
 	 * Every path is reported relative to the installation root, so no absolute
-	 * server path is disclosed (least disclosure); every define in the secret
-	 * family is reported by name with a `null` value, its value never read.
+	 * server path is disclosed (least disclosure); every define not allowed by
+	 * {@see self::is_disclosable_define()} is reported by name with a `null`
+	 * value and a `disclosure` reason, its value never read.
 	 *
 	 * @since 0.2.0
 	 *
@@ -290,18 +409,22 @@ final class Environment_Controller {
 	}
 
 	/**
-	 * Resolves each `wp-config` define to a `{ name, value }` record.
+	 * Resolves each `wp-config` define to a `{ name, value, disclosure }` record.
 	 *
 	 * Names come from a light regex over the located `wp-config.php` source — the
 	 * same "find `define('NAME'`" approach the caller used to run itself — and each
 	 * value is resolved live via `constant()`, never from the raw unevaluated
-	 * source expression. A name in the secret family is emitted with `value: null`
-	 * and its value is never read, so the database password, keys, salts, and
-	 * nonces never cross the boundary even for this authorized caller.
+	 * source expression, and only when {@see self::is_disclosable_define()} allows
+	 * it. `disclosure` is always present and is one of {@see self::DISCLOSURE_REASONS}:
+	 * it says why a value is or is not there, so a value withheld by policy is
+	 * never confused with a value that is genuinely `null` (see
+	 * `docs/define-disclosure.md`). Names are never withheld — only values are
+	 * gated — so a caller always learns what `wp-config.php` defines, even when it
+	 * learns nothing about a given define's value.
 	 *
 	 * @since 0.2.0
 	 *
-	 * @return list<array{name:string, value:string|int|float|bool|null}>
+	 * @return list<array{name:string, value:string|int|float|bool|null, disclosure:string}>
 	 */
 	private function defines(): array {
 
@@ -316,19 +439,33 @@ final class Environment_Controller {
 		preg_match_all( '/\bdefine\s*\(\s*[\'"]([A-Za-z_][A-Za-z0-9_]*)[\'"]/', $source, $matches );
 		$names = array_values( array_unique( $matches[1] ) );
 
-		// Resolve each name to its live value, redacting the secret family to null
-		// and never reading its constant. A non-scalar value collapses to null,
-		// keeping the contract to scalar-or-null.
+		// Resolve the operator's extra disclosable names once, so the same union
+		// with the fixed allow-list governs every name below.
+		$extra_disclosable = $this->disclosable_defines();
+
+		// Resolve each name to its live value only when disclosure policy allows
+		// it, and always report why. A non-scalar value collapses to null, keeping
+		// the contract to scalar-or-null; `disclosure` still reads `included`
+		// there, because it reports the policy decision, not whether resolution
+		// happened to find a live value.
 		$defines = [];
 		foreach ( $names as $name ) {
 			$value = null;
-			if ( ! $this->is_secret_define( $name ) && defined( $name ) ) {
-				$resolved = constant( $name );
-				$value = is_scalar( $resolved ) ? $this->relativise_define_value( $resolved ) : null;
+			if ( $this->is_disclosable_define( $name, $extra_disclosable ) ) {
+				$disclosure = self::DISCLOSURE_REASONS['INCLUDED'];
+				if ( defined( $name ) ) {
+					$resolved = constant( $name );
+					$value = is_scalar( $resolved ) ? $this->relativise_define_value( $resolved ) : null;
+				}
+			} else {
+				$disclosure = $this->matches_redaction_substring( $name )
+					? self::DISCLOSURE_REASONS['SECRET']
+					: self::DISCLOSURE_REASONS['NOT_ALLOW_LISTED'];
 			}
 			$defines[] = [
 				'name' => $name,
 				'value' => $value,
+				'disclosure' => $disclosure,
 			];
 		}
 
@@ -372,20 +509,90 @@ final class Environment_Controller {
 	}
 
 	/**
-	 * Decides whether a define name belongs to the redaction family.
+	 * Decides whether a define name's value is safe to disclose.
 	 *
-	 * The family is fixed and caller-independent: the four exact key names, any
-	 * name ending `_SALT`, and any name beginning `NONCE_`.
+	 * Inverted from the deny-list this replaces: a deny-list of secrets fails
+	 * open on every name nobody thought to add to it, and `wp-config.php` is
+	 * conventionally where a site's third-party credentials — SMTP passwords,
+	 * signing secrets, API keys, licence keys — live alongside WordPress core's
+	 * own. An allow-list fails closed instead: a name discloses only when it is
+	 * one of the layout/behaviour facts {@see self::DISCLOSABLE_DEFINE_NAMES}
+	 * names or one an operator has explicitly opted in via `$extra_disclosable`
+	 * (see {@see self::disclosable_defines()}), **and** it matches none of
+	 * {@see self::REDACTION_SUBSTRINGS} — the backstop that catches a future core
+	 * or third-party define nobody has curated yet, applied after the allow-list
+	 * check, never before it, so it can veto an allow-listed name but an
+	 * allow-listed name can never bypass it.
 	 *
-	 * @since 0.2.0
+	 * @since 0.6.0
+	 *
+	 * @param string             $name The define name to classify.
+	 * @param array<int, string> $extra_disclosable The operator's extra allow-listed names, from {@see self::disclosable_defines()}.
+	 * @return bool True when the name's value may be disclosed.
+	 */
+	private function is_disclosable_define( string $name, array $extra_disclosable ): bool {
+
+		$allow_listed = in_array( $name, self::DISCLOSABLE_DEFINE_NAMES, true ) || in_array( $name, $extra_disclosable, true );
+
+		return $allow_listed && ! $this->matches_redaction_substring( $name );
+
+	}
+
+	/**
+	 * Decides whether a define name looks like it names a secret.
+	 *
+	 * Case-insensitive substring match against {@see self::REDACTION_SUBSTRINGS}.
+	 * Deliberately loose — a false positive only withholds a value that a future
+	 * allow-list update or the escape hatch can still surface; a false negative
+	 * would leak a credential.
+	 *
+	 * @since 0.6.0
 	 *
 	 * @param string $name The define name to classify.
-	 * @return bool True when the name's value is a secret and must be redacted.
+	 * @return bool True when the name matches a redaction substring.
 	 */
-	private function is_secret_define( string $name ): bool {
-		return in_array( $name, self::SECRET_DEFINE_NAMES, true )
-			|| str_ends_with( $name, '_SALT' )
-			|| str_starts_with( $name, 'NONCE_' );
+	private function matches_redaction_substring( string $name ): bool {
+
+		foreach ( self::REDACTION_SUBSTRINGS as $substring ) {
+			if ( stripos( $name, $substring ) !== false ) {
+				return true;
+			}
+		}
+
+		return false;
+
+	}
+
+	/**
+	 * Resolves the operator-configured extra disclosable define names.
+	 *
+	 * Read through the `disclosable_defines` Config knob — the constant
+	 * `KNTNT_EXTRACTOR_DISCLOSABLE_DEFINES` or the
+	 * `kntnt_extractor_config_disclosable_defines` filter — exactly as
+	 * {@see self::wp_config_path()} resolves `wp_config_path`. Per-site and
+	 * explicit: naming a define here is a deliberate operator decision, never a
+	 * default. A value that is not itself a list — a string, a boolean, an
+	 * associative array — is ignored rather than trusted, so there is no way to
+	 * spell "everything": the knob can only ever widen disclosure by a finite,
+	 * named set of extra defines, each still subject to
+	 * {@see self::matches_redaction_substring()}.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return list<string> The extra define names this site has opted to disclose.
+	 */
+	private function disclosable_defines(): array {
+
+		// A non-list configured value is untrusted input from a filter or a
+		// misconfigured constant; fail closed to the empty list rather than let it
+		// widen disclosure in a way this method cannot account for.
+		$configured = $this->config->get( 'disclosable_defines', [] );
+		if ( ! is_array( $configured ) || ! array_is_list( $configured ) ) {
+			return [];
+		}
+
+		return array_values( array_filter( $configured, 'is_string' ) );
+
 	}
 
 	/**

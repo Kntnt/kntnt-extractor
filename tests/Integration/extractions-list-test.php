@@ -281,10 +281,10 @@ kntnt_extractor_assert( is_array( $ready_entry ) && ! array_key_exists( 'downloa
 kntnt_extractor_assert( $consume( $ready_id )->get_status() === 200, 'The owner consumes the listed ready job (200) (AC6)' );
 kntnt_extractor_assert( ! in_array( $ready_id, $listed_ids( $get_extractions() ), true ), 'A consumed job drops from the listing (AC6)' );
 
-// --- AC7: the REST API version reports 2 (the coordinated cutover bump) ---
+// --- AC7: the REST API version reports the current version ---
 
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
-kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 6, 'GET /status reports api_version 6 (AC7)' );
+kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 7, 'GET /status reports the current api_version (AC7)' );
 
 // Leave the suite state clean for later files, including the served downloads sibling.
 remove_filter( 'pre_http_request', $intercept, 10 );

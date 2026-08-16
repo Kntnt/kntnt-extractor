@@ -57,7 +57,7 @@ The short-lived, single-use link an extraction job's artifact is fetched through
 ### Operations
 
 **API version**:
-The REST contract's own version number, distinct from the plugin's release version. Bounds the artifact contract only — the sealed container's framing, segments per resource, the sealed index, and reassembly order — never a general "any caller-visible change" counter (ADR-0017, amending ADR-0005). A behavioural change that is not a change of shape, such as `strict` on `POST /extractions`, ships without moving it; a caller learns what a build actually does from `honours` instead.
+The REST contract's own version number, distinct from the plugin's release version. Bounds the artifact contract — the sealed container's framing, segments per resource, the sealed index, and reassembly order — and moves on one further, narrower ground: a change that would make an already-shipped client's own existing behaviour unsafe against the new server, in a way that client cannot detect and did not opt into (ADR-0018, amending ADR-0017, amending ADR-0005). Never a general "any caller-visible change" counter: a behavioural change an old client can safely keep ignoring, such as `strict` on `POST /extractions`, ships as a `honours` entry alone, with no bump. The `disclosure` field the define-disclosure allow-list adds is also named in `honours`, like any other caller-visible surface — but the allow-list itself bumped the version too, because an old client does not ignore an unrecognised `null` define value, it acts on it (ports it into a local file), so the second ground applied on top.
 _Avoid_: plugin version (as a synonym); a general behaviour-change counter
 
 **Honours**:

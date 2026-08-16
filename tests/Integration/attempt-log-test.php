@@ -278,12 +278,12 @@ foreach ( $after_entries as $entry ) {
 	);
 }
 
-// --- AC5: the REST contract stays at api_version 6 -----------------------------
+// --- AC5: the REST contract reports the current api_version --------------------
 
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/' . Status_Controller::REST_NAMESPACE . '/status' ) )->get_data();
 kntnt_extractor_assert(
-	is_array( $status ) && ( $status['api_version'] ?? null ) === 6,
-	'GET /status reports api_version 6 (AC5)',
+	is_array( $status ) && ( $status['api_version'] ?? null ) === 7,
+	'GET /status reports the current api_version (AC5)',
 );
 
 remove_filter( 'kntnt_extractor_config_work_dir', $force_work );
