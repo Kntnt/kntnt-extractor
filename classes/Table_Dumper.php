@@ -331,6 +331,9 @@ final class Table_Dumper {
 	 * @param int                     $offset Rows already read, the keyless walk's position.
 	 * @param int                     $limit  Rows to read at most.
 	 * @return array<int, array<mixed>> The page's rows, column => value.
+	 *
+	 * @throws RuntimeException When the read fails, so a page that came back empty
+	 *                          because of a failure is never read as the end of the table.
 	 */
 	private function fetch_rows( string $table, array $key, ?array $cursor, int $offset, int $limit ): array {
 
@@ -352,9 +355,20 @@ final class Table_Dumper {
 		$query = "SELECT * FROM `{$table}`{$where}{$window}";
 
 		// Read the page as an associative array so column order follows the table's own
-		// definition, the order the column-less INSERT relies on. A failed read yields no
-		// rows, which the caller reads as the end of the table.
-		return $wpdb->get_results( $query, ARRAY_A ) ?? []; // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- dumping a table's own rows; see the composition above for why the statement is assembled, and nothing here is cacheable.
+		// definition, the order the column-less INSERT relies on.
+		$rows = $wpdb->get_results( $query, ARRAY_A ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching, WordPress.DB.PreparedSQL.NotPrepared -- dumping a table's own rows; see the composition above for why the statement is assembled, and nothing here is cacheable.
+
+		// A read that failed and a page that is genuinely empty are indistinguishable in
+		// the return value, so the error flag is what separates them. Reading a failed
+		// read as the end of the table is what would publish a silently truncated dump
+		// that imports without a single error — the one outcome this class exists to
+		// prevent. wpdb clears the flag at the start of every query, so it describes
+		// this read alone.
+		if ( $wpdb->last_error !== '' ) {
+			throw new RuntimeException( 'Unable to read a page of rows while dumping a table.' );
+		}
+
+		return is_array( $rows ) ? $rows : [];
 
 	}
 
