@@ -22,6 +22,9 @@ use RuntimeException;
  * working directory lives, how it is hardened, how a job id maps to a directory,
  * and how the one-non-terminal-job rule is evaluated. Callers create a job, find
  * one by id, or ask how many are still active, and never touch a path themselves.
+ * It also enumerates the one thing that is never a job: a served artifact whose
+ * record has been purged out from under it, so {@see Sweeper} can reclaim it
+ * (ADR-0019).
  *
  * The working directory defaults to a dedicated folder under `wp_upload_dir()` —
  * the one location WordPress guarantees is writable and persistent — with one
@@ -126,6 +129,38 @@ final class Job_Store {
 	 * @since 0.1.0
 	 */
 	private const string ID_PATTERN = '/^[a-f0-9]{32}$/';
+
+	/**
+	 * The shape an artifact's own filename must match.
+	 *
+	 * Minted by {@see create()} as 16 random bytes rendered hex plus a fixed
+	 * `.sealed` suffix. {@see orphaned_artifacts()} matches every served-downloads
+	 * entry against this pattern before treating it as a candidate at all, so the
+	 * directory's own hardening file (`index.html`) and anything else that is not
+	 * shaped like an artifact this store minted can never be reported as one,
+	 * regardless of what else the enumeration finds.
+	 *
+	 * @since 0.6.0
+	 */
+	private const string ARTIFACT_PATTERN = '/^[a-f0-9]{32}\.sealed$/';
+
+	/**
+	 * Served-downloads entries one orphan scan examines at most.
+	 *
+	 * {@see orphaned_artifacts()} walks the served downloads directory to find an
+	 * artifact no job record claims; this bounds that walk so a directory that has
+	 * accumulated many entries cannot make one sweep cycle's disk work unbounded.
+	 * The walk always restarts from the beginning of the directory rather than
+	 * resuming where a previous call stopped, and `readdir()`'s order is not a
+	 * documented, stable one — so on a directory holding more entries than this
+	 * bound, an entry past it may go unexamined on this cycle, and nothing here
+	 * guarantees a later cycle reaches it either. The bound trades that risk for a
+	 * call that always returns promptly; it is a defensive cap on one call's disk
+	 * work, not a claim that reclamation itself is complete.
+	 *
+	 * @since 0.6.0
+	 */
+	private const int ORPHAN_SCAN_LIMIT = 2000;
 
 	/**
 	 * How many extra times {@see find()} re-reads a present-but-unparseable state file.
@@ -570,6 +605,113 @@ final class Job_Store {
 			if ( $resolved !== false && str_starts_with( $resolved, $job_dir . '/' ) && is_file( $resolved ) ) {
 				unlink( $resolved ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own in-progress container or sidecar after a non-resumable failure.
 			}
+		}
+
+	}
+
+	/**
+	 * Enumerates served artifacts that no job record claims.
+	 *
+	 * A job's `artifact` filename is minted at {@see create()}, before the job ever
+	 * runs, so for as long as any record of the job exists on disk that filename is
+	 * claimed whatever state the job is in — queued, running, ready, or terminal.
+	 * A file in the served downloads directory that no live record claims can
+	 * therefore only be residue: the artifact-deletion half of a cancel or consume
+	 * that landed mid-tick without the lock every purging caller now takes, or a
+	 * crash in the narrow window between {@see Artifact_Builder::publish()}'s
+	 * rename and the record settling. Such a file has no owner and can never again
+	 * be reached through a job id, so this enumeration is the one seam that can
+	 * find it at all; {@see Sweeper} is what reclaims what it finds, after its own
+	 * grace period (ADR-0019).
+	 *
+	 * Every candidate is pinned exactly as {@see delete_artifact()} pins an
+	 * artifact it already knows the name of: a null byte is rejected outright, the
+	 * entry must match the shape {@see create()} mints ({@see ARTIFACT_PATTERN})
+	 * before it is even resolved, and the resolved path must sit strictly inside
+	 * the resolved downloads directory — so a symlink planted inside the directory,
+	 * or an entry shaped like anything else (including this directory's own
+	 * `index.html`), is never followed or reported. The walk itself is bounded to
+	 * {@see ORPHAN_SCAN_LIMIT} entries, so a directory that has accumulated many
+	 * files cannot make one call's disk work unbounded.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @return array<int, string> Resolved absolute paths of orphaned artifacts.
+	 */
+	public function orphaned_artifacts(): array {
+
+		// Nothing to enumerate before the served directory has ever been created.
+		$downloads = realpath( $this->downloads_path() );
+		if ( $downloads === false ) {
+			return [];
+		}
+
+		// Every artifact filename a live job record still claims, whatever state
+		// that job is in; a file this set names is not an orphan.
+		$claimed = [];
+		foreach ( $this->all() as $job ) {
+			$claimed[ $job->artifact ] = true;
+		}
+
+		// Walk the directory once, bounded, collecting only a real file that is
+		// shaped like an artifact, resolves strictly inside the downloads
+		// directory, and is not claimed by a live job.
+		$handle = opendir( $downloads ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_opendir -- reading the plugin's own served downloads directory, not a filesystem write.
+		if ( $handle === false ) {
+			return [];
+		}
+		$orphans = [];
+		$examined = 0;
+		while ( $examined < self::ORPHAN_SCAN_LIMIT ) {
+			$entry = readdir( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_readdir -- reading the plugin's own served downloads directory, not a filesystem write.
+			if ( $entry === false ) {
+				break;
+			}
+			++$examined;
+			if ( str_contains( $entry, "\0" ) || preg_match( self::ARTIFACT_PATTERN, $entry ) !== 1 || isset( $claimed[ $entry ] ) ) {
+				continue;
+			}
+			$resolved = realpath( $downloads . '/' . $entry );
+			if ( $resolved !== false && str_starts_with( $resolved, $downloads . '/' ) && is_file( $resolved ) ) {
+				$orphans[] = $resolved;
+			}
+		}
+		closedir( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_closedir -- releasing the directory handle opened above.
+
+		return $orphans;
+
+	}
+
+	/**
+	 * Removes one orphaned artifact, re-checking it still sits inside the downloads directory.
+	 *
+	 * {@see orphaned_artifacts()} already pinned every path it returned, but a
+	 * grace period ({@see Sweeper}) means real time — and potentially a whole
+	 * further sweep cycle — passes between that enumeration and this call, so the
+	 * pin is re-checked here rather than trusted from the earlier read. This is
+	 * the same defence in depth {@see delete_artifact()} applies to a job-owned
+	 * artifact, and for the same reason: never delete a path this call has not
+	 * itself just proven sits where it is allowed to act.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param string $path Absolute path previously returned by {@see orphaned_artifacts()}.
+	 * @return void
+	 */
+	public function delete_orphaned_artifact( string $path ): void {
+
+		// A null byte can never belong to a real path and would make realpath raise
+		// a ValueError; treat such a path as nothing to remove.
+		if ( str_contains( $path, "\0" ) ) {
+			return;
+		}
+
+		// Unlink only when the path still resolves to a real file genuinely inside
+		// the served downloads directory — never one that has since moved outside it.
+		$downloads = realpath( $this->downloads_path() );
+		$resolved = realpath( $path );
+		if ( $downloads !== false && $resolved !== false && str_starts_with( $resolved, $downloads . '/' ) && is_file( $resolved ) ) {
+			unlink( $resolved ); // phpcs:ignore WordPress.WP.AlternativeFunctions.unlink_unlink -- removing the plugin's own orphaned sealed artifact once its grace period has elapsed.
 		}
 
 	}

@@ -126,6 +126,13 @@ final class Sweeper {
 	 * out from under itself. A job within both windows, and every already-terminal job,
 	 * is left untouched.
 	 *
+	 * The same call also reclaims a served artifact no job record claims at all
+	 * ({@see Job_Store::orphaned_artifacts()}, ADR-0019) — residue a cancel or
+	 * consume that once landed mid-tick without this file's lock discipline, or a
+	 * crash between an artifact's publish and its record settling, can leave
+	 * behind. That reclamation is reported nowhere in the return value: an orphan
+	 * has no job to report as expired, only a file to remove.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @return array<int, Extraction_Job> The jobs this sweep expired.
@@ -168,6 +175,12 @@ final class Sweeper {
 			}
 		}
 
+		// Reclaim a served artifact no job record claims, once it has aged past its
+		// own grace period — the same TTL window a never-consumed, still-recorded
+		// artifact is judged by above, reused rather than a new constant (see
+		// {@see reclaim_orphans()} for why deleting on sight would be wrong).
+		$this->reclaim_orphans( $ttl, $now );
+
 		return $expired;
 
 	}
@@ -203,6 +216,42 @@ final class Sweeper {
 
 		return ! $job->state->is_terminal()
 			|| ( $job->state === Job_State::Failed && ! $job->is_pre_adaptation_stall() );
+
+	}
+
+	/**
+	 * Reclaims a served artifact whose job record is gone, once it has aged past its grace period.
+	 *
+	 * {@see Job_Store::orphaned_artifacts()} can report a false positive as well as
+	 * a true one: a transient read glitch that makes {@see Job_Store::find()} skip
+	 * a live job for exactly one enumeration (its own bounded retry exists for
+	 * this, issue #20), or a crash between an artifact's publish and its record
+	 * settling, can each make a live job's artifact look ownerless for a moment
+	 * that is not actually a leak. Deleting on sight would treat that moment as
+	 * proof. The grace period this reclaims past exists to tell the two apart
+	 * without a second, invented threshold: an orphan younger than it may simply
+	 * not have had its record catch up yet, while one older than the window a
+	 * live job's own heartbeat keeps fresh is not waiting on anything — nothing
+	 * legitimate takes that long. Reusing the TTL for it, rather than a dedicated
+	 * constant, is deliberate (ADR-0019): it is already the window a never-consumed
+	 * but still-recorded artifact is judged by one call above, so an artifact with
+	 * no record at all gets no narrower a benefit of the doubt than one that at
+	 * least still has one.
+	 *
+	 * @since 0.6.0
+	 *
+	 * @param int $ttl The resolved heartbeat TTL, reused here as the orphan's grace period.
+	 * @param int $now The sweep's own reference time, shared with the job loop above.
+	 * @return void
+	 */
+	private function reclaim_orphans( int $ttl, int $now ): void {
+
+		foreach ( $this->store->orphaned_artifacts() as $path ) {
+			$mtime = filemtime( $path );
+			if ( $mtime !== false && ( $now - $mtime ) > $ttl ) {
+				$this->store->delete_orphaned_artifact( $path );
+			}
+		}
 
 	}
 
