@@ -4,7 +4,7 @@
 
 The plugin's behaviour is verified end-to-end against a real WordPress, dispatching requests through the live REST server exactly as an HTTP client would reach them. The harness runs inside a [WordPress Playground](https://wordpress.github.io/wordpress-playground/) instance — WASM PHP plus SQLite — which is the default integration harness in `agents.d/coding-standard/wordpress.md`. It needs no MySQL server and no local web server, so it runs the same on a laptop and in CI.
 
-MySQL-backed tooling (DDEV, the WordPress core PHPUnit suite) is the standard's explicit fallback, reserved for behaviour Playground cannot exercise — MySQL-specific SQL, locking semantics, or multi-process cron. `GET /tables` is the first behaviour that needs it: its row-count and byte-size estimates come from `SHOW TABLE STATUS`, whose `Rows`, `Data_length`, and `Index_length` columns SQLite stubs to zero, so their magnitudes can only be verified against a real MySQL-family engine. See the DDEV harness below.
+MySQL-backed tooling (DDEV, the WordPress core PHPUnit suite) is the standard's explicit fallback, reserved for behaviour Playground cannot exercise — MySQL-specific SQL, locking semantics, or multi-process cron. `GET /tables`' row-count and byte-size estimates were the first behaviour that needed it: they come from `SHOW TABLE STATUS`, whose `Rows`, `Data_length`, and `Index_length` columns SQLite stubs to zero, so their magnitudes can only be verified against a real MySQL-family engine. `Table_Dumper`'s dump SQL is the second: `SHOW KEYS`, the keyset predicate, the `LIMIT`/`OFFSET` fallback, and `SHOW CREATE TABLE` DDL all reach the database on the fast suite through SQLite's translation of them, never through MySQL itself. See the DDEV harness below.
 
 ### Running it
 
@@ -49,9 +49,13 @@ Current tests:
 
 ## MySQL-backed integration check (DDEV)
 
-The row-count and byte-size estimates in `GET /tables` are the storage engine's own `SHOW TABLE STATUS` figures. WordPress Playground runs on SQLite, whose translation of that statement reports `Rows`, `Data_length`, and `Index_length` as zero, so the fast suite can only verify the listing's shape — never that a populated table reports a plausible, positive estimate. That verification is the standard's DDEV fallback for MySQL-specific SQL.
+Some behaviour cannot be verified on WordPress Playground's SQLite at all, because SQLite's translation of the statement involved either stubs the figures that matter or silently diverges from what a real MySQL-family engine does. That verification is the standard's DDEV fallback for MySQL-specific SQL, and two concerns currently need it.
 
-`tests/Integration/DDEV/run.sh` provisions a throwaway DDEV WordPress project on a real MySQL-family (InnoDB) database in a temporary directory, activates the plugin, seeds a little content, and asserts through `tests/Integration/DDEV/tables-size-test.php` that the options, users, and posts tables report a positive byte-size estimate and a positive estimated row count. It tears the whole project down again on exit, so the machine is left state-neutral.
+The row-count and byte-size estimates in `GET /tables` are the storage engine's own `SHOW TABLE STATUS` figures. SQLite's translation of that statement reports `Rows`, `Data_length`, and `Index_length` as zero, so the fast suite can only verify the listing's shape — never that a populated table reports a plausible, positive estimate.
+
+`Table_Dumper` is the plugin's most MySQL-specific code, and none of its SQL is genuinely exercised by the fast suite: `SHOW KEYS` and the `Seq_in_index` restoration that orders a composite primary key's columns, the lexicographic keyset predicate that pages without `OFFSET`, the `LIMIT`/`OFFSET` fallback for a keyless table, the `SHOW CREATE TABLE` DDL, and the byte-level escaping of `NULL`, quotes, backslashes, newlines, and multi-byte characters — every one of those statements reaches the database on the fast suite through SQLite's translation layer, not through MySQL itself. `tests/Integration/table-chunking-test.php` pins the same acceptance criteria on SQLite and remains valuable for that, but only the DDEV harness proves the SQL is correct against the engine the plugin actually runs on in production, including the one check SQLite cannot make at all: that the dumped SQL reloads into a row-for-row identical table.
+
+`tests/Integration/DDEV/run.sh` provisions a throwaway DDEV WordPress project on a real MySQL-family (InnoDB) database in a temporary directory, activates the plugin, seeds a little content, and runs every `*-test.php` in that directory through `wp eval-file`: `tests/Integration/DDEV/tables-size-test.php` asserts that the options, users, and posts tables report a positive byte-size estimate and a positive estimated row count, and `tests/Integration/DDEV/table-dumping-test.php` drives `Table_Dumper` directly against four fixture tables — a single-column key, a composite key, no key at all, and a table of few fat rows — asserting every row is carried exactly once and in the key's own order, that a composite key is paged on all its columns, that a row-bounded slice's concatenation is byte-identical to a single-slice dump, that a byte-bounded slice never comes back empty and a page it cut short is never mistaken for the end of the table, that the keyless fixture completes via the offset walk, and that the dumped SQL reloads into a table identical to the original. It tears the whole project down again on exit, so the machine is left state-neutral.
 
 It requires Docker and DDEV, and is deliberately **not** part of `composer gate` — MySQL-backed tests are the exception, kept out of the fast PR-time suite. Run it on demand:
 
@@ -64,6 +68,10 @@ or directly:
 ```
 bash tests/Integration/DDEV/run.sh
 ```
+
+### What stays structurally unreachable in Playground
+
+Some behaviour cannot be exercised by either harness above, and is recorded here rather than being discovered twice. Real filesystem latency: Playground's virtual filesystem and a DDEV bind mount both hide the timing a slow or remote disk imposes. Real concurrency between a tick and the watchdog: both harnesses drive ticks synchronously from a single PHP process, so a watchdog and a tick racing for the same job's lock is never genuinely concurrent. Symlink handling: Playground's virtual filesystem does not support symlinks at all. Multi-process cron: both harnesses invoke the tick endpoint directly rather than through WP-Cron's own scheduling and process model. And, before this plan, MySQL dump SQL — now covered by `tests/Integration/DDEV/table-dumping-test.php` above, but the general shape of the gap remains: anything that depends on a real MySQL-family engine's own behaviour rather than on WordPress's abstractions over it needs the DDEV fallback, not Playground.
 
 ## Static analysis and coding standard
 
