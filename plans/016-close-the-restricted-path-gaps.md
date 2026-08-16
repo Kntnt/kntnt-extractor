@@ -540,10 +540,16 @@ In `classes/Restricted_Path.php`:
    Keep the same prefix-match style the existing `id_rsa` pattern used (no
    end anchor), so `id_ed25519.pub` still matches through the prefix.
 
-3. Update `@since` on any new consequence to `0.6.0` (the plugin's current
-   unreleased version — confirm with `grep -n 'Version:' kntnt-extractor.php`
-   and `head -10 CHANGELOG.md`, matching the convention already used by
-   other unreleased additions, e.g. `grep -n '@since 0.6.0' classes/Dispatcher.php`).
+3. Update `@since` on any new consequence to **the plugin's current unreleased
+   version**, which you must determine rather than assume: run
+   `grep -n 'Version:' kntnt-extractor.php` for the last released version and
+   `head -10 CHANGELOG.md` to confirm an `[Unreleased]` section is open. The
+   `@since` you write is the *next* version, one minor above the header's —
+   this plan deliberately does not name a number, because it was written
+   before 0.6.0 shipped and any number written here goes stale the moment a
+   release is cut. Match the convention already used by other additions
+   awaiting release: `grep -rhoE '@since 0\.[0-9]+\.[0-9]+' classes/ | sort |
+   uniq -c` shows which version the current unreleased work is stamped with.
 
 **Verify**:
 - `composer phpcs` → exit 0

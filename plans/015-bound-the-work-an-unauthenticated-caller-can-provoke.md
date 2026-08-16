@@ -11,6 +11,15 @@
 > "Current state" excerpts against the live code before proceeding; on a
 > mismatch, treat it as a STOP condition.
 
+> **On `@since` in this plan's code blocks**: they read
+> `@since <NEXT_UNRELEASED_VERSION>`, deliberately. This plan was written
+> before 0.6.0 was cut, and originally hardcoded `0.6.0` — a number that goes
+> stale the moment a release ships. Determine the value yourself:
+> `grep -n 'Version:' kntnt-extractor.php` gives the last released version,
+> and the `@since` you write is the next one, one minor above it. Confirm
+> against what other unreleased work is stamped with:
+> `grep -rhoE '@since 0\.[0-9]+\.[0-9]+' classes/ | sort | uniq -c`.
+
 ## Status
 
 - **Priority**: P1
@@ -243,7 +252,7 @@ Add two new class constants, positioned near the top of `Extractions_Controller`
  * against still clears it. Resolved through the Config seam under
  * `max_selection_elements`.
  *
- * @since 0.6.0
+ * @since <NEXT_UNRELEASED_VERSION>
  */
 private const int DEFAULT_MAX_SELECTION_ELEMENTS = 500_000;
 
@@ -256,7 +265,7 @@ private const int DEFAULT_MAX_SELECTION_ELEMENTS = 500_000;
  * This is roughly 11× that. Resolved through the Config seam under
  * `max_body_bytes`.
  *
- * @since 0.6.0
+ * @since <NEXT_UNRELEASED_VERSION>
  */
 private const int DEFAULT_MAX_BODY_BYTES = 52_428_800;
 ```
@@ -268,7 +277,7 @@ Add two private resolver methods, modelled exactly on `Files_Controller.php:112-
  * Resolves the combined selection-element cap through the Config seam, clamped
  * to at least one.
  *
- * @since 0.6.0
+ * @since <NEXT_UNRELEASED_VERSION>
  *
  * @return int The maximum combined elements across tables, tables_structure_only,
  *             and files.
@@ -285,7 +294,7 @@ private function max_selection_elements(): int {
  * Resolves the request-body byte cap through the Config seam, clamped to at
  * least one.
  *
- * @since 0.6.0
+ * @since <NEXT_UNRELEASED_VERSION>
  *
  * @return int The maximum raw request body size in bytes.
  */
