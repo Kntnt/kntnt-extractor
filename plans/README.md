@@ -22,14 +22,16 @@ Every plan is self-contained. None of them assumes you have read any other plan,
 | 009 | Write the normative container-format specification | P2 | M | LOW | 004, 006, 014 | DONE (`0b90bde`) — `docs/container-format.md`, 141 lines. The plan's drift check would have stopped it on the very changes it declared a dependency on; the live code was used as the source of truth instead. The inline wire-format block in `Sealed_Writer` was kept and given a pointer, not replaced. Three findings recorded, none fixed: the framing carries no MAC of its own, the `FORMAT_VERSION`/`api_version` coupling holds only empirically, and no test exercises a non-UTF-8 segment name. A few `file:line` citations in the document are a handful of lines stale, shifted by the commit's own insertion |
 | 010 | Decide what a 429 tells the caller about the occupied slot | P3 | S | LOW | 013 | DONE (no code, no ADR) — **decided: do nothing.** Execution record appended to the plan file. See "Findings considered and rejected" below for the trigger that would reopen it |
 | 011 | Record what retires the schema back-compatibility branches | P3 | S | LOW | — | DONE (`0df118c`) — one ADR-0015 bullet, one changelog line, no code. Two corrections to the plan's own model: (a) `to_array()` writes some keys unconditionally and others only when non-default, so several branches the plan grouped with the cluster read an absent key as the ordinary shape of a *new* record and therefore never retire; (b) nothing matched the plan's definition of "vestigial". **The retirement condition is uncheckable in general** — the plugin ships to sites the author does not operate, and deactivation or a disabled WP-Cron freezes the spared record indefinitely. The recommendation that follows, unimplemented and left as a decision: give the exemption itself an expiry |
-| 015 | Bound the work an unauthenticated caller can provoke on `POST /extractions` | P1 | M | MED | — | TODO |
-| 016 | Close the restricted-path deny-list's two enforcement gaps (editor droppings, resolved-vs-unresolved path) | P1 | M | LOW | — | TODO |
-| 017 | Record what an opaque failure actually was | P1 | S | LOW | — | TODO |
-| 018 | Let `strict: false` cover a file that vanishes *during* packaging | P1 | M | MED | 017 (soft) | TODO |
+| 015 | Bound the work an unauthenticated caller can provoke on `POST /extractions` | P1 | M | MED | — | TODO — tracked as #26 |
+| 016 | Close the restricted-path deny-list's two enforcement gaps (editor droppings, resolved-vs-unresolved path) | P1 | M | LOW | — | TODO — tracked as #37 |
+| 017 | Record what an opaque failure actually was | P1 | S | LOW | — | TODO — tracked as #25 |
+| 018 | Let `strict: false` cover a file that vanishes *during* packaging | P1 | M | MED | 017 (soft) | TODO — tracked as #31 |
 
 Note the ordering: **012 runs second**, before 002 and 003, and **014 runs before 008 and 013**. The numbering is chronological (012–014 were written after the rest); the table's row order is the execution order.
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale).
+
+**Where the rest of the open work lives.** Every unexecuted plan above is also an issue on this repository's tracker, and so is every finding that has *no* plan — the ones that need a decision, a measurement, or a plan written first. Filed 2026-08-19 from the record of the first two production runs. A plan-backed issue carries `ready-for-agent` and the plan is its specification; a finding without one carries `needs-triage`, or `ready-for-human` where it needs a real host rather than a decision. The tracker is the authority on what is open; this table is the authority on what each plan does.
 
 ## Read this before starting anything
 
