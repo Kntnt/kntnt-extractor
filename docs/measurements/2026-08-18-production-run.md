@@ -57,7 +57,11 @@ This does not retract the split. Per-chunk cost no longer varies with selection 
 
 ### 3. The failure that ends production runs records nothing about itself
 
-The run failed at byte 0 of the second of two large `.mp4` files, five minutes after its last chunk committed, having packaged 97.8 % of the selection. The poll reported:
+The run failed having packaged 97.8 % of the selection. **What it died on is now identified, and it is not what this document first said.** An earlier revision read the failure as the large-file wall, because the last sample before it showed a multi-part `.mp4` at byte 0; that was wrong. The `attempts` list in the failed sample shows that file completed, then eight small `.webp` files begun within two seconds at full speed, and the last chunk begun before the job died was `wp-content/uploads/2026/08/kntnt-extractor.zip` — at 02:34:55, nine seconds before the failure.
+
+That file was present in the `GET /files` walk at 20:22 and returns `404` today while its neighbours in the same directory return `200` (verified independently). The most likely explanation is WordPress's own upgrade cleanup removing the release archive that installed the very Extractor build this run depended on, hours into the run. `strict: false` covers only files already gone when the job is created, so a file deleted *during* packaging fails the whole job.
+
+Be exact about the epistemic status: **the plugin said only `The extraction failed.`** The attribution above is a strongly supported inference from four converging facts — the file was the last chunk begun, in the same second range as the death; it 404s now; its neighbours do not; and its removal has an obvious cause. The server confirmed none of it, which is the subject of this finding rather than an aside. The poll reported:
 
 ```json
 {"state": "failed", "error": {"message": "The extraction failed."}}
