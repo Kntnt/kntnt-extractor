@@ -24,6 +24,7 @@ Every plan is self-contained. None of them assumes you have read any other plan,
 | 011 | Record what retires the schema back-compatibility branches | P3 | S | LOW | — | DONE (`0df118c`) — one ADR-0015 bullet, one changelog line, no code. Two corrections to the plan's own model: (a) `to_array()` writes some keys unconditionally and others only when non-default, so several branches the plan grouped with the cluster read an absent key as the ordinary shape of a *new* record and therefore never retire; (b) nothing matched the plan's definition of "vestigial". **The retirement condition is uncheckable in general** — the plugin ships to sites the author does not operate, and deactivation or a disabled WP-Cron freezes the spared record indefinitely. The recommendation that follows, unimplemented and left as a decision: give the exemption itself an expiry |
 | 015 | Bound the work an unauthenticated caller can provoke on `POST /extractions` | P1 | M | MED | — | TODO |
 | 016 | Close the restricted-path deny-list's two enforcement gaps (editor droppings, resolved-vs-unresolved path) | P1 | M | LOW | — | TODO |
+| 017 | Record what an opaque failure actually was | P1 | S | LOW | — | TODO |
 
 Note the ordering: **012 runs second**, before 002 and 003, and **014 runs before 008 and 013**. The numbering is chronological (012–014 were written after the rest); the table's row order is the execution order.
 
@@ -120,6 +121,7 @@ Constraints inside that order:
 - **013** — `consume` and `cancel` purge without the tick lock, an artifact orphaned in that window is unreachable by the sweep, and no caller can ask what of theirs is still on the site.
 - **009** — the container format is defined in a class docblock here and read only by another repository; nothing here can verify the byte-compatibility claim the project makes about itself.
 - **010** — the concurrency ceiling is global but the job listing is owner-scoped and live-only, so a 429 tells the caller nothing about what they are waiting for.
+- **017** — a production run failed at 97.8 % after six hours and the whole record of why is `The extraction failed.`, which is not a message the plugin wrote but `error_of()`'s fallback for a null `error`. No stall reason, so no two-pair limit reading; the failure mode that actually ends runs on this host bypasses the project's cheapest diagnostic entirely. **Read its "What this does not fix" section** — a process killed outright still records nothing, and the plan says so.
 - **011** — the sweep spares one failed record forever, which keeps a cluster of schema back-compatibility branches permanently reachable with no recorded condition for retiring them.
 
 ## Findings considered and rejected

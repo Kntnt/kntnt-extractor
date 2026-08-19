@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- `docs/measurements/` records measured facts about how this plugin behaves on a real production host, with the raw sample series committed beside each write-up. Its first entry, `2026-08-18-production-run.md`, is the measurement ADR-0014 said could not be taken from a laptop: 720 samples of a six-hour extraction against `safeteam.se`, taken by an observer independent of the client's own poll loop. It reports three things and states plainly what it does not establish. Three files large enough to need more than one part — 0.006 % of the selection — consumed 44 % of the wall clock, packaging seventeen times slower per byte than ordinary files, which rules out per-file path resolution and stat calls as the dominant cost. The record split's predicted factor of two on a slow host did not materialise: 257 ms per chunk of moving time against the prior release's ~210 ms on the same host, so the share of a production chunk that `save()` occupied was badly overestimated and the unattributed remainder is very nearly the whole cost. And the run failed opaquely at 97.8 % after six hours, recording nothing about why. ADR-0014 carries the outcome as a consequence; no code changed.
+
 ## [0.6.0] – 2026-08-16
 
 ### Fixed
