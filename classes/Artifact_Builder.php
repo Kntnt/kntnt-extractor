@@ -53,11 +53,11 @@ final class Artifact_Builder {
 	 * clone — 48,578 files and 186 tables in 3.56 h — and the fastest of the four sizes
 	 * that controlled experiment measured; the 8 MiB this replaces sits far past a
 	 * threshold between 2 and 4 MiB that turns a slow run into an impossible one, and
-	 * had never produced a full-size part on that host until the run it killed. It is
-	 * **not** claimed optimal: nothing below 256 KB was tested, and the curve's shape
-	 * suggests smaller may be faster still, traded against a per-chunk overhead those
-	 * numbers do not resolve. Nor does it generalise — every figure is one host, and
-	 * the knob above is what answers a different one.
+	 * the production host was never once asked for a part that size until the run it
+	 * killed. It is **not** claimed optimal: nothing below 256 KB was tested, and the
+	 * curve's shape suggests smaller may be faster still, traded against a per-chunk
+	 * overhead those numbers do not resolve. Nor does it generalise — every figure is
+	 * one host, and the knob above is what answers a different one.
 	 *
 	 * @since 0.1.0
 	 */
