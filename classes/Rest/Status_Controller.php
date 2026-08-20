@@ -144,12 +144,19 @@ final class Status_Controller {
 	 * travel on the refusal instead — each error's `data` carries the `limit` it was
 	 * checked against and the caller's own `count` or `bytes` — which is where a
 	 * client needs the number anyway: at the moment it has to split a request, not
-	 * in advance of ever sending one.
+	 * in advance of ever sending one. `chunk_size` is `POST /extractions`' optional
+	 * per-run file-part budget: additive by the same reasoning as `strict`, since an
+	 * omitted member packages at the site's own Config default exactly as before —
+	 * and worth naming precisely because the value a host survives is measured
+	 * rather than universal (`docs/measurements/2026-08-19-chunk-size-curve.md`), so
+	 * a client that cannot see the name is stuck with whatever constant the site
+	 * happens to carry.
 	 *
 	 * @since 0.6.0
 	 */
 	private const array HONOURED_BEHAVIOURS = [
 		'attempts',
+		'chunk_size',
 		'chunks_done',
 		'disclosure',
 		'selection_limits',

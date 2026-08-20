@@ -196,8 +196,9 @@ final class Job_Store {
 	 *
 	 * Mints an unguessable id, writes the job's state file into a fresh randomly-
 	 * named directory, and returns the job. The caller guarantees the inputs are
-	 * resolved: the tables exist, the files are inside the root, and the key is
-	 * canonical base64 of a 32-byte X25519 public key.
+	 * resolved: the tables exist, the files are inside the root, the key is
+	 * canonical base64 of a 32-byte X25519 public key, and any requested chunk size
+	 * is already inside the range the Config seam permits.
 	 *
 	 * @since 0.1.0
 	 *
@@ -207,11 +208,12 @@ final class Job_Store {
 	 * @param array<int, string> $structure_only Requested structure-only table names, already resolved (issue #16).
 	 * @param array<int, string> $files          Requested file paths, already resolved inside the root.
 	 * @param array<int, string> $skipped_files  Paths a `strict: false` create dropped because they no longer existed.
+	 * @param int                $chunk_size     File-part budget in bytes the caller asked this job to package at, or 0 to package at the Config default. Already checked against the range the Config seam permits (issue #28); the stall adaptation halves it from here like any other per-job budget (ADR-0015).
 	 * @return Extraction_Job The persisted, queued job.
 	 *
 	 * @throws RuntimeException When the job's state file cannot be written whole.
 	 */
-	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files, array $skipped_files = [] ): Extraction_Job {
+	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files, array $skipped_files = [], int $chunk_size = 0 ): Extraction_Job {
 
 		// Resolve and harden the working directory, and lay down the separate served
 		// downloads directory the ready artifact will be fetched from, then mint an
@@ -223,7 +225,7 @@ final class Job_Store {
 		$this->ensure_downloads();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
-		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed', skipped_files: array_values( $skipped_files ) );
+		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed', chunk_size: $chunk_size, skipped_files: array_values( $skipped_files ) );
 
 		// Give the job its own directory, drop an index.html into it as defence in
 		// depth, and persist the two files that let a later request resume it. The
