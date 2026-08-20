@@ -58,6 +58,15 @@ use WP_REST_Server;
  * that cannot be taken is a 409 naming the reason, never a silent skip and never a
  * wait (ADR-0019).
  *
+ * Two caps stand ahead of that whole ladder, and ahead of the capability gate with
+ * it (ADR-0020): a raw body larger than `max_body_bytes` is a 413 refused before the
+ * body is decoded, and a combined `tables` + `tables_structure_only` + `files`
+ * selection larger than `max_selection_elements` is a 422 refused before any element
+ * of it reaches a `realpath()` call or the table catalog. They exist because the
+ * order below is what an unauthenticated caller gets to provoke for free, and they
+ * bound what that costs; a request inside both is validated in exactly the order
+ * this paragraph describes, unchanged.
+ *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
  * key a 400, a selection naming a credential-bearing restricted path (ADR-0011)
@@ -81,20 +90,59 @@ use WP_REST_Server;
 final class Extractions_Controller {
 
 	/**
-	 * Wires the controller to the access gate, the job store, and the driver.
+	 * Combined `tables` + `tables_structure_only` + `files` elements one selection
+	 * may carry when the knob does not override it.
 	 *
-	 * The Config seam is deliberately absent: the concurrency ceiling was the only
-	 * knob this endpoint read, and it now belongs to {@see Job_Store::has_free_slot()}
-	 * beside the count it bounds, so the controller no longer configures anything.
+	 * Measured against a real production selection — 186 tables and 49,116 files
+	 * (ADR-0014) — and set at roughly ten times that combined count, so a
+	 * legitimate clone of a site an order of magnitude larger than the one this was
+	 * measured against still clears it. A cap that refuses the one large job this
+	 * plugin exists to do would be the worse failure (ADR-0020). Resolved
+	 * through the Config seam under `max_selection_elements`, so a site raises it
+	 * with the `KNTNT_EXTRACTOR_MAX_SELECTION_ELEMENTS` constant or the
+	 * `kntnt_extractor_config_max_selection_elements` filter.
+	 *
+	 * @since 0.6.1
+	 */
+	private const int DEFAULT_MAX_SELECTION_ELEMENTS = 500_000;
+
+	/**
+	 * Raw request-body bytes `POST /extractions` accepts when the knob does not
+	 * override it.
+	 *
+	 * A synthetic payload shaped like the same production selection — 186 tables,
+	 * 49,116 files, path samples deliberately longer than the real run's — encodes
+	 * to 4,687,437 bytes; this is roughly eleven times that. It is a separate knob
+	 * from the element cap because it bounds a different cost: a body carrying few
+	 * elements of enormous individual strings passes the count and still has to be
+	 * decoded. Resolved through the Config seam under `max_body_bytes`, so a site
+	 * raises it with the `KNTNT_EXTRACTOR_MAX_BODY_BYTES` constant or the
+	 * `kntnt_extractor_config_max_body_bytes` filter.
+	 *
+	 * @since 0.6.1
+	 */
+	private const int DEFAULT_MAX_BODY_BYTES = 52_428_800;
+
+	/**
+	 * Wires the controller to the access gate, the Config seam, the job store, and
+	 * the driver.
+	 *
+	 * The Config seam is back, and reads exactly two knobs: the selection-element
+	 * cap and the request-body byte cap this endpoint bounds an unauthenticated
+	 * caller's pre-authorization work with (ADR-0020). The concurrency ceiling
+	 * is not among them — it belongs to {@see Job_Store::has_free_slot()} beside the
+	 * count it bounds, and is read there.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param Authorizer $authorizer The shared both-capabilities access gate.
+	 * @param Config     $config     The constant-then-filter configuration seam.
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
 	 * @param Dispatcher $dispatcher Drives a job forward and nudges a stalled queue.
 	 */
 	public function __construct(
 		private readonly Authorizer $authorizer,
+		private readonly Config $config,
 		private readonly Job_Store $store,
 		private readonly Dispatcher $dispatcher,
 	) {}
@@ -190,9 +238,12 @@ final class Extractions_Controller {
 	/**
 	 * Permission callback for creating a job: validate the request, then authorize.
 	 *
-	 * The request is fully validated first — body shape (422), public key (400),
-	 * and resource existence (404) — and only a request that survives all three
-	 * reaches the capability gate. Running validation here rather than in the main
+	 * The request is fully validated first — size (413/422), body shape (422),
+	 * public key (400), and resource existence (404) — and only a request that
+	 * survives all of them reaches the capability gate. The two size caps are what
+	 * bound the cost of the rest, since everything this method runs, it runs for an
+	 * anonymous caller who has proved nothing (ADR-0020). Running validation here
+	 * rather than in the main
 	 * callback is deliberate: WordPress runs the permission callback before the
 	 * callback, so this is the seam where a 404 can be made to precede the 403 the
 	 * capability gate would otherwise return first (ADR-0003).
@@ -792,10 +843,15 @@ final class Extractions_Controller {
 	/**
 	 * Validates a create request into a resolved payload, or the first failing check.
 	 *
-	 * The checks run in the contract's fixed precedence: a body that is not a JSON
-	 * object, or a selection that is not a list of non-empty strings, or one that
-	 * selects nothing, or one that lists a table as both full-data and structure-only,
-	 * is a 422; an absent or malformed public key is a 400; a file matching the
+	 * The checks run in the contract's fixed precedence, and the two size caps run
+	 * ahead of all of them (ADR-0020): a raw body over `max_body_bytes` is a 413
+	 * decided before `json_decode()` sees it, and a combined selection over
+	 * `max_selection_elements` is a 422 decided as soon as the three arrays are
+	 * shape-checked, before the overlap check and everything after it.
+	 *
+	 * Then the ladder proper: a body that is not a JSON object, or a selection that is
+	 * not a list of non-empty strings, or one that selects nothing, or one that lists
+	 * a table as both full-data and structure-only, is a 422; an absent or malformed public key is a 400; a file matching the
 	 * credential-bearing deny-list (ADR-0011) is a 422 naming every offending path;
 	 * an unknown table (full-data or structure-only) or a file resolving outside the
 	 * installation root is a 404 naming every missing table and every missing file.
@@ -823,8 +879,28 @@ final class Extractions_Controller {
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
+		// Refuse an oversized body before it is decoded: an unauthenticated caller
+		// must not be able to spend json_decode() time and memory proportional to a
+		// body of unbounded size (ADR-0020). The refusal reports the limit and
+		// the caller's own size, because a client that hits this needs the number to
+		// shrink its request by, not merely the news that a number exists.
+		$body = (string) $request->get_body();
+		$body_bytes = strlen( $body );
+		$max_body_bytes = $this->max_body_bytes();
+		if ( $body_bytes > $max_body_bytes ) {
+			return new WP_Error(
+				'kntnt_extractor_payload_too_large',
+				__( 'The request body exceeds the maximum accepted size.', 'kntnt-extractor' ),
+				[
+					'status' => 413,
+					'limit' => $max_body_bytes,
+					'bytes' => $body_bytes,
+				],
+			);
+		}
+
 		// Parse the body; anything that is not a JSON object is a malformed body.
-		$data = json_decode( (string) $request->get_body(), true );
+		$data = json_decode( $body, true );
 		if ( ! is_array( $data ) ) {
 			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'The request body must be a JSON object.', 'kntnt-extractor' ) );
 		}
@@ -837,6 +913,24 @@ final class Extractions_Controller {
 		$files = $this->string_selection( $data['files'] ?? [] );
 		if ( $tables === null || $structure_only === null || $files === null || ( $tables === [] && $structure_only === [] && $files === [] ) ) {
 			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'Provide tables, tables_structure_only, and/or files as arrays of non-empty strings, selecting at least one.', 'kntnt-extractor' ) );
+		}
+
+		// Bound the whole selection before any element of it reaches a realpath() call
+		// or a catalog comparison: an oversized selection is refused ahead of the
+		// restricted-path check, the existence check, and the capability gate alike
+		// (ADR-0020), on three counts of arrays whose shape is already settled.
+		$selection_elements = count( $tables ) + count( $structure_only ) + count( $files );
+		$max_selection_elements = $this->max_selection_elements();
+		if ( $selection_elements > $max_selection_elements ) {
+			return new WP_Error(
+				'kntnt_extractor_selection_too_large',
+				__( 'The selection exceeds the maximum number of tables and files accepted in one request.', 'kntnt-extractor' ),
+				[
+					'status' => 422,
+					'limit' => $max_selection_elements,
+					'count' => $selection_elements,
+				],
+			);
 		}
 
 		// A table is either dumped whole or structure-only, never both: the same name in
@@ -910,6 +1004,44 @@ final class Extractions_Controller {
 			'public_key' => $public_key,
 			'skipped_files' => $skipped_files,
 		];
+
+	}
+
+	/**
+	 * Resolves the combined selection-element cap through the Config seam, clamped
+	 * to at least one.
+	 *
+	 * A non-numeric override is ignored in favour of the default rather than coerced
+	 * to a meaningless zero, and the floor of one keeps the endpoint usable however
+	 * the knob is misconfigured — the same discipline
+	 * {@see Job_Store::max_active_jobs()} applies to its own ceiling.
+	 *
+	 * @since 0.6.1
+	 *
+	 * @return int The most combined elements one selection may carry across tables,
+	 *             tables_structure_only, and files.
+	 */
+	private function max_selection_elements(): int {
+
+		$configured = $this->config->get( 'max_selection_elements', self::DEFAULT_MAX_SELECTION_ELEMENTS );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_SELECTION_ELEMENTS );
+
+	}
+
+	/**
+	 * Resolves the request-body byte cap through the Config seam, clamped to at
+	 * least one.
+	 *
+	 * @since 0.6.1
+	 *
+	 * @return int The largest raw request body, in bytes, this endpoint will decode.
+	 */
+	private function max_body_bytes(): int {
+
+		$configured = $this->config->get( 'max_body_bytes', self::DEFAULT_MAX_BODY_BYTES );
+
+		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_BODY_BYTES );
 
 	}
 

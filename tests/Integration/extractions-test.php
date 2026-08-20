@@ -152,6 +152,41 @@ kntnt_extractor_assert( $post_extractions( [ 'files' => [ '../wp-load.php' ], 'p
 kntnt_extractor_assert( $post_extractions( [ 'files' => [ "wp-load.php\u{0000}../../etc/passwd" ], 'public_key' => $valid_key ] )->get_status() === 404, 'A null byte in a file path is rejected 404 at the realpath boundary, never allowed to crash it' );
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 401, 'A fully valid request from an unauthenticated caller is refused 401 once existence passes (ADR-0012)' );
 
+// --- the two selection-shape caps, refused ahead of the capability gate ---
+
+// Both caps are lowered through their own knobs so the fixtures stay cheap to
+// build, and each filter is removed the moment its assertions are done: this
+// file shares one process with every test file the bootstrap requires after it,
+// so a cap left in force would leak into theirs.
+$force_elements = static fn(): int => 3;
+add_filter( 'kntnt_extractor_config_max_selection_elements', $force_elements );
+$oversized_selection = $post_extractions( [ 'tables' => [ 'a', 'b' ], 'files' => [ 'c', 'd' ], 'public_key' => $valid_key ] );
+$oversized_selection_data = $oversized_selection->get_data();
+kntnt_extractor_assert( $oversized_selection->get_status() === 422, 'A selection over the element cap is rejected 422 before the capability check' );
+kntnt_extractor_assert( is_array( $oversized_selection_data ) && ( $oversized_selection_data['code'] ?? null ) === 'kntnt_extractor_selection_too_large', 'The element-cap refusal names its own cause' );
+kntnt_extractor_assert( is_array( $oversized_selection_data ) && ( $oversized_selection_data['data']['limit'] ?? null ) === 3 && ( $oversized_selection_data['data']['count'] ?? null ) === 4, 'The element-cap refusal reports the limit and the caller\'s own count, so a client can split its selection' );
+kntnt_extractor_assert( $post_extractions( [ 'tables' => [ 'wp_no_such_table_xyz' ], 'public_key' => $valid_key ] )->get_status() === 404, 'A selection within the lowered cap still reaches the existence check' );
+remove_filter( 'kntnt_extractor_config_max_selection_elements', $force_elements );
+
+// The byte cap is pinned to the fixture's own encoded length rather than to a
+// guessed number, so the two requests below straddle the boundary by exactly one
+// byte: the same body is refused under a cap one short of it and admitted under a
+// cap equal to it, which is what proves the comparison is on the right side.
+$sized_body = [ 'tables' => [ $wpdb->options ], 'files' => [ 'wp-load.php' ], 'public_key' => $valid_key ];
+$sized_bytes = strlen( (string) wp_json_encode( $sized_body ) );
+$force_bytes = static fn(): int => $sized_bytes - 1;
+add_filter( 'kntnt_extractor_config_max_body_bytes', $force_bytes );
+$oversized_body = $post_extractions( $sized_body );
+$oversized_body_data = $oversized_body->get_data();
+kntnt_extractor_assert( $oversized_body->get_status() === 413, 'A body over the byte cap is rejected 413 before it is decoded, before the capability check' );
+kntnt_extractor_assert( is_array( $oversized_body_data ) && ( $oversized_body_data['code'] ?? null ) === 'kntnt_extractor_payload_too_large', 'The body-cap refusal names its own cause' );
+kntnt_extractor_assert( is_array( $oversized_body_data ) && ( $oversized_body_data['data']['limit'] ?? null ) === $sized_bytes - 1 && ( $oversized_body_data['data']['bytes'] ?? null ) === $sized_bytes, 'The body-cap refusal reports the limit and the caller\'s own size, so a client can shrink its request' );
+remove_filter( 'kntnt_extractor_config_max_body_bytes', $force_bytes );
+$at_cap_bytes = static fn(): int => $sized_bytes;
+add_filter( 'kntnt_extractor_config_max_body_bytes', $at_cap_bytes );
+kntnt_extractor_assert( $post_extractions( $sized_body )->get_status() === 401, 'A body of exactly the cap is admitted and runs the whole ladder unchanged, down to the capability gate' );
+remove_filter( 'kntnt_extractor_config_max_body_bytes', $at_cap_bytes );
+
 // --- issue #16: the structure-only sibling list extends the same ladder ---
 
 // AC2: a table listed in BOTH tables and tables_structure_only is a request-shape

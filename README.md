@@ -82,6 +82,17 @@ If a chunk is still too big for the host, the job neither hangs nor dies: after 
 
 Only a chunk whose bounds have all reached their floor — one byte, one row — still fails the job. Then the poll's `error.message` names the table and row (or file and byte) it stalled on, and reports two pairs of limits: what the host is configured with, and what the plugin is actually running under after asking for more. Read the difference. Equal pairs mean the host refused the request, so raise the limits in the host configuration. Differing pairs mean the raise was granted and the chunk died anyway, so the kill came from the web server or the container rather than from PHP, and no chunk size will help.
 
+### How large a selection one request may carry
+
+`POST /extractions` is validated before the caller's capability is checked — that is what lets it answer "no such table" rather than "not permitted" to a request for something that does not exist — so two caps bound what an anonymous request can cost before it is bounded by anything else. Both are settable as a `wp-config.php` constant or through the matching `kntnt_extractor_config_*` filter:
+
+- `KNTNT_EXTRACTOR_MAX_SELECTION_ELEMENTS` — combined entries across `tables`, `tables_structure_only` and `files`, default 500,000. Over it, the request is `422 kntnt_extractor_selection_too_large`.
+- `KNTNT_EXTRACTOR_MAX_BODY_BYTES` — raw request body size, default 50 MiB. Over it, the request is `413 kntnt_extractor_payload_too_large`, decided before the body is parsed.
+
+Both defaults are about ten times a real production selection (186 tables and 49,116 files, encoding to 4.47 MiB), so no ordinary clone should ever meet either. If one does, raise the constant on that site — each refusal reports the `limit` it was measured against and your own `count` or `bytes` in the error's `data`, so you can split the selection or raise the knob knowing the exact number. An authenticated `GET /status` names `selection_limits` in `honours`, which is how a client tells a build that enforces these caps from one that does not.
+
+These bound one request, not a sequence of them. Rate limiting is your web server's or host's job; the plugin has no knob for it.
+
 ### Telling a slow job from a stuck one
 
 A poll of a running or ready job carries `progress`:

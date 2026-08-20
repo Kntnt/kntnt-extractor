@@ -135,7 +135,16 @@ final class Status_Controller {
 	 * what was missing: additive `data` members on an error an old client already
 	 * handles, and the one behaviour on this list a caller must currently infer
 	 * from `api_version` to know whether the names will be there — which is the
-	 * inference ADR-0017 exists to remove.
+	 * inference ADR-0017 exists to remove. `selection_limits` is the name a caller
+	 * checks for before assuming an arbitrarily large selection or an arbitrarily
+	 * large body will be accepted: a build carrying it refuses either with
+	 * `422 kntnt_extractor_selection_too_large` or `413
+	 * kntnt_extractor_payload_too_large` rather than working through it (ADR-0020).
+	 * It is presence-only like every other name here, so the limits themselves
+	 * travel on the refusal instead — each error's `data` carries the `limit` it was
+	 * checked against and the caller's own `count` or `bytes` — which is where a
+	 * client needs the number anyway: at the moment it has to split a request, not
+	 * in advance of ever sending one.
 	 *
 	 * @since 0.6.0
 	 */
@@ -143,6 +152,7 @@ final class Status_Controller {
 		'attempts',
 		'chunks_done',
 		'disclosure',
+		'selection_limits',
 		'skipped_files',
 		'state',
 		'strict',

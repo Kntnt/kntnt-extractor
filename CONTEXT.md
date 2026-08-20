@@ -24,6 +24,10 @@ _Avoid_: file list, scan
 A file path matching the fixed deny-list of credential-bearing patterns (`wp-config.php` and its variants, `.env` files, root-level database dumps and key material). Listed in the manifest like any other file but never extractable: a selection containing one is rejected at job creation, naming the offending paths.
 _Avoid_: blocked file, sensitive file
 
+**Selection limits**:
+The two caps a create request is measured against before anything else: a combined element count across `tables`, `tables_structure_only` and `files`, and the raw request body's size in bytes. Both are checked ahead of the restricted-path check, the existence check and the capability gate, so an oversized request is refused before an unauthenticated caller can spend a `realpath()` per path or a catalog query on it; each refusal reports the limit it was measured against and the caller's own count or size. They bound what one request costs, not how often one may be sent (ADR-0020).
+_Avoid_: quota, rate limit, throttle
+
 **Table list**:
 The enumeration of tables that exist in the site's database, the file-side manifest's counterpart.
 
