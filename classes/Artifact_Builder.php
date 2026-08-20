@@ -49,7 +49,7 @@ final class Artifact_Builder {
 	 * only the fallback when neither is set.
 	 *
 	 * 256 KB, read off `docs/measurements/2026-08-19-chunk-size-curve.md` rather than
-	 * chosen (ADR-0021). It is the only value this project has watched complete a real
+	 * chosen (ADR-0023). It is the only value this project has watched complete a real
 	 * clone — 48,578 files and 186 tables in 3.56 h — and the fastest of the four sizes
 	 * that controlled experiment measured; the 8 MiB this replaces sits far past a
 	 * threshold between 2 and 4 MiB that turns a slow run into an impossible one, and
@@ -94,7 +94,7 @@ final class Artifact_Builder {
 	 * Four MiB, which was originally derived as half the file-part
 	 * {@see DEFAULT_CHUNK_SIZE} on the belief that the host packaged 8 MiB file parts
 	 * without complaint. The chunk-size curve then measured that belief false, and the
-	 * file-part default has moved to 256 KB (ADR-0021), so the derivation is gone and
+	 * file-part default has moved to 256 KB (ADR-0023), so the derivation is gone and
 	 * this figure now stands on its own. It is left where it is deliberately: nothing
 	 * has measured the table side, a slice is a different cost from a part — fetched as
 	 * PHP row arrays, escaped into SQL, and copied again through the seal — and the one

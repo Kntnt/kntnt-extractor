@@ -111,7 +111,7 @@ final class Dispatcher {
 	 * every extra attempt costs a full execution-time limit — paid 18 times over on the
 	 * way from the 256 KB default file part to the floor, and paid only on a host that
 	 * is already failing. That walk was 23 halvings long while the default was 8 MiB
-	 * (ADR-0021); the argument is unchanged and only its arithmetic moved.
+	 * (ADR-0023); the argument is unchanged and only its arithmetic moved.
 	 *
 	 * Not one, which the same reasoning nearly reaches. The kill is usually
 	 * deterministic and a second attempt at the same size usually dies the same way, but

@@ -6,7 +6,7 @@
  * is what failed a 74-minute production run outright, and what later cost a
  * six-hour one 44 % of its wall clock on three files. The replacement is read off
  * a committed measurement rather than chosen, so it is pinned here rather than
- * left to a reader of the constant (ADR-0021).
+ * left to a reader of the constant (ADR-0023).
  *
  * It pins what issue #27 decided:
  *  - AC1: with neither constant, filter, nor per-job budget set, the file-part
