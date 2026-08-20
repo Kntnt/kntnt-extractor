@@ -573,6 +573,15 @@ final class Extractions_Controller {
 	 * ({@see Extraction_Job::with_thrown_failure()}), not because the poll distinguishes
 	 * them. It does not, and no caller learns a second shape.
 	 *
+	 * What the second of those may contain is decided rather than assumed (ADR-0022).
+	 * The plugin's own composition — the throwable's class, the origin named relative
+	 * to the installation root, the line, the chunk — discloses nothing it did not
+	 * write. The throwable's own message, relayed inside it, **may carry a filesystem
+	 * path or a fragment of SQL**, because it is arbitrary by construction and
+	 * `Dispatcher::THROWN_MESSAGE_BOUND` bounds the size of that disclosure and not its
+	 * kind. The reader is the owner, authenticated and holding `operate` plus
+	 * `manage_options` (ADR-0002), and the diagnosis is judged to be worth it there.
+	 *
 	 * The fallback is therefore no longer the ordinary case but a diagnosis of its own:
 	 * a failed job reporting it reached no `catch` at all, so the PHP process was killed
 	 * rather than throwing. Every non-failed state omits the field.

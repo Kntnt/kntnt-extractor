@@ -631,9 +631,10 @@ final class Dispatcher {
 	 * killed by, but both of which it can report. The two pairs come from the job
 	 * record — the first tick's measurement — not from this process, so a stall
 	 * written hours later still describes the limits in force when the chunk died.
-	 * Everything in it is either the
-	 * caller's own selection or a runtime setting `GET /environment` already discloses
-	 * to the same capability, so it leaks nothing the opacity rule (ADR-0007) protects.
+	 * Everything in it is either the caller's own selection or a runtime setting
+	 * `GET /environment` already discloses to the same capability, so this reason —
+	 * unlike the one a throw relays — discloses nothing the plugin did not write
+	 * (ADR-0022).
 	 *
 	 * @since 0.4.0
 	 *
