@@ -281,9 +281,12 @@ final class Extractions_Controller {
 	 * configured ceiling is refused with 429. The ceiling is enforced by taking the
 	 * slot and then re-checking it, never by checking and then taking — a check
 	 * answers for an instant already past, so two creates arriving together would
-	 * both be told the slot was free. The payload is re-derived from the
-	 * request — parsing it is how this callback obtains its inputs, not a second
-	 * validation of them. The job's first continuation is scheduled for after this
+	 * both be told the slot was free. A create that loses that race hands the slot
+	 * back under the job's own tick lock, the same lock consume, cancel and the TTL
+	 * sweep take before purging anything (ADR-0019), and leaves the job to the sweep
+	 * when the lock cannot be taken — the refusal is the ceiling's own 429 either way.
+	 * The payload is re-derived from the request — parsing it is how this callback
+	 * obtains its inputs, not a second validation of them. The job's first continuation is scheduled for after this
 	 * 201 is sent, so no loopback or packaging work precedes the response (ADR-0010).
 	 *
 	 * @since 0.1.0
@@ -311,15 +314,30 @@ final class Extractions_Controller {
 		// only then confirm nothing else took it in the window the check above leaves
 		// open. This is the resume path's sequence ({@see Dispatcher::resume_failed()}),
 		// for the same reason: the count is stale the instant it is read, so two creates
-		// that merely checked would both pass and both take. Losing the race hands the
-		// slot straight back, so a create refused here leaves no more behind than one
-		// refused above. The purge needs no tick lock, unlike the three purging actors
-		// ADR-0019 governs: this job was minted by this request, its id has been handed
-		// to nobody, and its first continuation is scheduled only below, so there is no
-		// build to delete out from under.
+		// that merely checked would both pass and both take.
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
 		if ( ! $this->store->has_free_slot( 1 ) ) {
-			$this->store->purge( $job );
+			// Hand the slot straight back under the job's own tick lock, exactly as consume,
+			// cancel and the sweep do (ADR-0019), so a create refused here leaves no more behind
+			// than one refused above. Having handed the id to nobody does not make this job
+			// unreachable: it is queued, and {@see Watchdog::patrol()} enumerates every job in
+			// the store and advances a queued one without needing an id or a scheduled
+			// continuation, so a patrol landing in this window may already be building through
+			// it — exactly the live build ADR-0019 forbids deleting underneath. A lock that
+			// cannot be taken is that case, so the job is left where it stands for the TTL sweep
+			// to reclaim once it falls silent, never deleted out from under its builder. The
+			// caller is told the same 429 either way: what a 429 discloses about the occupied
+			// slot is a settled question, and a caller that was never handed an id has nothing a
+			// 409 would let it retry.
+			$lock = $this->store->lock( $job );
+			if ( $lock !== null ) {
+				try {
+					$this->store->purge( $job );
+				} finally {
+					$this->store->unlock( $lock );
+				}
+			}
+
 			return $this->ceiling_reached();
 		}
 
