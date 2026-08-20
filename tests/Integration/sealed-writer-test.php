@@ -466,3 +466,60 @@ kntnt_extractor_assert( $empty_recovered === '', 'A zero-length segment seals an
 // criteria) and the round-trip assertion above, which exercises the same
 // >2 MB payload through the new string-only add_segment() and would fail if
 // the write path still needed any stream.
+
+// Issue #35: a segment name that is not valid UTF-8 survives byte for byte.
+//
+// `docs/container-format.md` §3 frames each index entry as an 8-byte
+// little-endian `name_length` followed by that many raw bytes, and §5 states
+// that a name "carries no encoding assumption and no delimiter". That property
+// is what lets an installation-root-relative file path serve as a segment name
+// at all: a POSIX path is a byte string rather than text, and a filesystem
+// written under a legacy locale hands out names no UTF-8 decoder accepts. Until
+// now the guarantee was documented from the framing alone — every name the
+// suite had ever put through the writer was plain ASCII, so a layer that
+// quietly re-encoded names would have left the suite green. Bind the
+// specification's claim to the writer here.
+$binary_name = "wp-content/uploads/2026/07/r\xE4ksm\xF6rg\xE5s-\xFF\xFE\x80.jpg";
+
+// Non-vacuity: were the fixture decodable as UTF-8, everything below would be
+// an ordinary ASCII round-trip wearing this test's name. An empty pattern with
+// the `u` modifier returns false rather than 0 on a subject PCRE cannot decode,
+// which settles it without depending on mbstring being built into the harness.
+kntnt_extractor_assert( preg_match( '//u', $binary_name ) === false, 'The non-UTF-8 name fixture is genuinely undecodable as UTF-8 (non-vacuity)' );
+
+// Seal that name, and an ordinary one straight after it. The trailing entry is
+// what makes this a test of the length prefix rather than of one lucky string:
+// an index that framed names by a delimiter instead of by §3's length would
+// desync on the bytes above and misparse everything following them.
+$binary_payload = "-- the bytes the file at that path held\n";
+$binary_path = tempnam( sys_get_temp_dir(), 'kntnt-binary-name-' );
+$binary_writer = new Sealed_Writer( $binary_path );
+$binary_writer->open( $public_key );
+$binary_writer->add_segment( $binary_name, $binary_payload );
+$binary_writer->add_segment( 'wp_options', 'the segment after the binary-named one' );
+$binary_writer->finalize();
+
+// Recover the index with the same independent reader the rest of this file
+// uses — the one a client implements over the wire format, not the writer's own
+// code read backwards.
+$binary_container = $parse( (string) file_get_contents( $binary_path ) );
+$binary_names = $open_index( $binary_container['sealed_index'], $keypair ) ?? [];
+$binary_name_recovered = $binary_names[0] ?? null;
+kntnt_extractor_assert( $binary_name_recovered === $binary_name, 'A segment name containing invalid UTF-8 round-trips byte for byte through the sealed index (docs/container-format.md §3, §5)' );
+kntnt_extractor_assert( count( $binary_names ) === 2 && ( $binary_names[1] ?? null ) === 'wp_options', 'The name after a binary one still parses: §3\'s length prefix frames the name, so undecodable bytes cannot desync the index' );
+
+// Discriminating control for the byte-for-byte check. That check would be worth
+// little if any plausible mangling still compared equal, so name the mangling
+// actually in reach: substituting each undecodable byte with U+FFFD, which is
+// what PHP's JSON encoder does under JSON_INVALID_UTF8_SUBSTITUTE and what
+// `wp_json_encode()` does silently to a name like this. The substituted form
+// must differ from the fixture, and must not be what came back — so a writer
+// that had sanitised the name would fail the assertion above rather than pass
+// on a name that merely survived in recognisable shape.
+$substituted_name = json_decode( json_encode( $binary_name, JSON_INVALID_UTF8_SUBSTITUTE ) );
+kntnt_extractor_assert( $substituted_name !== $binary_name && $binary_name_recovered !== $substituted_name, 'A UTF-8-substituted form of the name differs from what the container returned (negative control: a sanitising writer would be caught)' );
+
+// §5's positional pairing holds for a binary name too: the first index entry
+// belongs to the first segment record, so the payload written under that name
+// is the payload that comes back under it.
+kntnt_extractor_assert( $open_segment( $binary_container['records'][0], $keypair ) === $binary_payload, 'The segment paired with the non-UTF-8 name recovers its own plaintext (docs/container-format.md §5)' );
