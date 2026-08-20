@@ -506,11 +506,14 @@ final class Extractions_Controller {
 	 *
 	 * The field's shape is unchanged — a `message` and nothing more — but the message is
 	 * the reason the job recorded when the plugin diagnosed the failure itself, falling
-	 * back to a generic one otherwise. Only a failure this code can describe safely gets
-	 * a reason: the stalled build (ADR-0013) composes one from the caller's own selection
-	 * and two runtime settings, whereas an unexpected throw is still caught opaquely
-	 * (ADR-0007) and its message is never captured, because it could carry a filesystem
-	 * path or a fragment of SQL. Every non-failed state omits the field.
+	 * back to a generic one otherwise. Both failures the plugin can see write a reason:
+	 * the stalled build (ADR-0013) composes one from the caller's own selection and two
+	 * runtime settings, and an unexpected throw composes one naming the throwable,
+	 * bounded and trace-free so the arbitrary string it relays cannot carry a whole
+	 * query or a call stack out to the caller (ADR-0007). The fallback is therefore no
+	 * longer the ordinary case but a diagnosis of its own: a failed job reporting it
+	 * reached no `catch` at all, so the PHP process was killed rather than throwing.
+	 * Every non-failed state omits the field.
 	 *
 	 * @since 0.1.0
 	 *

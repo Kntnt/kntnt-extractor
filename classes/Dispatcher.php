@@ -27,13 +27,14 @@ use Throwable;
  * across one or more budgeted ticks and survives an interruption between them. Once the
  * lock is released the tick fires the continuation loopback once, and only when work
  * remains. A build that throws drops the job to failed rather than leaving it wedged in
- * running (ADR-0010). A build whose chunk keeps dying where no `catch` can see it
- * — a memory or execution-time kill — first halves the budgets of the chunk that
- * died and retries, and is failed only once they cannot shrink further
- * (ADR-0015). A job stalled and failed by a release that could not do that — an
- * on-disk record from 0.5.1 or earlier — is re-driven instead: the next tick, or
- * the watchdog, re-enters `running` with a fresh attempt window and adapted
- * budgets, truncating the container to the last acknowledged offset so an
+ * running (ADR-0010), recording which throwable, from where, and on which chunk, so the
+ * failure is readable from the poll instead of inferred afterwards. A build whose chunk
+ * keeps dying where no `catch` can see it — a memory or execution-time kill — first
+ * halves the budgets of the chunk that died and retries, and is failed only once they
+ * cannot shrink further (ADR-0015). A job stalled and failed by a release that could
+ * not do that — an on-disk record from 0.5.1 or earlier — is re-driven instead: the
+ * next tick, or the watchdog, re-enters `running` with a fresh attempt window and
+ * adapted budgets, truncating the container to the last acknowledged offset so an
  * uncommitted tail cannot be duplicated.
  *
  * Two liveness signals share the job's own state and heartbeat rather than a lock.
@@ -165,6 +166,27 @@ final class Dispatcher {
 	 * @since 0.6.0
 	 */
 	private const int DEFAULT_MEMORY_LIMIT = 1073741824;
+
+	/**
+	 * Characters of a caught throwable's own message the failure reason keeps.
+	 *
+	 * The reason is written onto the job record and returned verbatim by the poll, so
+	 * a throwable's message travels to every caller that can read the job. Unlike the
+	 * stall reason, which is composed entirely from the caller's own selection and two
+	 * settings `GET /environment` already discloses, this one relays a string the
+	 * plugin did not write and cannot bound: a PDO or filesystem error carries a query
+	 * fragment or a path, and third-party code hooked into the packaging carries
+	 * anything at all. Truncating is what keeps the record's size and its disclosure
+	 * both bounded, and the head is the half worth keeping — a throwable states what
+	 * went wrong first and elaborates afterwards.
+	 *
+	 * Not a Config knob. Raising it would widen what a failed poll discloses, which is
+	 * a decision about the REST contract rather than a tuning choice, and lowering it
+	 * only breaks the diagnosis this exists to provide.
+	 *
+	 * @since 0.6.1
+	 */
+	private const int THROWN_MESSAGE_BOUND = 300;
 
 	/**
 	 * Wires the driver to the job store, the Config seam, and the artifact builder.
@@ -360,11 +382,12 @@ final class Dispatcher {
 		}
 
 		// Package exactly one bounded chunk; a build that throws drops the job to failed
-		// rather than leaving it stuck in running.
+		// rather than leaving it stuck in running, carrying what threw so the failure is
+		// readable from the poll alone rather than reconstructed afterwards (issue #25).
 		try {
 			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
-		} catch ( Throwable ) {
-			return $this->persist_failure( $running->with_state( Job_State::Failed ) );
+		} catch ( Throwable $thrown ) {
+			return $this->persist_failure( $running->with_failure( $this->thrown_reason( $running, $thrown ) ) );
 		}
 
 		// A complete step means the last chunk finalized and published the container, so
@@ -670,6 +693,62 @@ final class Dispatcher {
 		}
 
 		return __( 'the artifact\'s sealed index', 'kntnt-extractor' );
+
+	}
+
+	/**
+	 * Composes the caller-visible reason a build killed by an unexpected throw is failed with.
+	 *
+	 * The counterpart to {@see stall_reason()} for the other way a build ends, and the
+	 * reason this one exists at all: a production run failed at 97.8 % after six hours
+	 * and the whole account of why was `error_of()`'s fallback sentence for a null
+	 * `error`, so the cause had to be inferred from four converging facts instead of
+	 * read off the record (`docs/measurements/2026-08-18-production-run.md` §3). It
+	 * names what a reader needs and the plugin can actually see: which throwable, its
+	 * own message, where it came from, and — reusing the stall's own chunk naming,
+	 * because the persisted progress means exactly the same thing here — which chunk
+	 * was being packaged when it threw. On the observed failure that last fact alone
+	 * would have identified the vanished file.
+	 *
+	 * It opens by saying which of the two failures this is, because that is what the
+	 * reader must not have to guess: a stall exhausted its budgets and may be worth
+	 * retrying at a smaller size, whereas this is a bug or an environment fault, is
+	 * never re-driven (ADR-0015), and has already had its part-built container
+	 * discarded.
+	 *
+	 * What it deliberately does not carry is a stack trace, and what it bounds is the
+	 * throwable's own message — see {@see THROWN_MESSAGE_BOUND} for why that string,
+	 * alone among the parts, is the one the plugin cannot vouch for.
+	 *
+	 * This cannot describe a failure that killed the PHP process outright, since no
+	 * `catch` runs then and nothing is written. That is the point of keeping the
+	 * fallback: after this, a failed job still polling as the fallback sentence is one
+	 * PHP died on rather than threw, and those two were previously indistinguishable.
+	 *
+	 * @since 0.6.1
+	 *
+	 * @param Extraction_Job $job    The job whose chunk threw, as it stood when the throw happened.
+	 * @param Throwable      $thrown The throwable the packaging died on.
+	 * @return string The failure reason, phrased for the polling owner to act on.
+	 */
+	private function thrown_reason( Extraction_Job $job, Throwable $thrown ): string {
+
+		// Keep the head of the throwable's own message and mark where it was cut, so a
+		// truncated diagnosis cannot be misread as the whole of what PHP reported.
+		$message = $thrown->getMessage();
+		if ( mb_strlen( $message ) > self::THROWN_MESSAGE_BOUND ) {
+			$message = mb_substr( $message, 0, self::THROWN_MESSAGE_BOUND ) . '…';
+		}
+
+		return sprintf(
+			/* translators: 1: the class name of the throwable, 2: the throwable's own message, truncated, 3: the source file the throw came from, 4: the line number in that file, 5: a description of the chunk being packaged. */
+			__( 'The extraction failed with an unexpected error rather than by exhausting its budgets: %1$s — “%2$s” — thrown at %3$s line %4$d while packaging %5$s. Nothing here is a host limit the run can adapt to, so this is not a resumable state and the part-built container has already been discarded. Address what the error names — a file or table that changed or disappeared mid-run, a permission, or a fault in code hooked into the packaging — and request the extraction again.', 'kntnt-extractor' ),
+			$thrown::class,
+			$message,
+			$thrown->getFile(),
+			$thrown->getLine(),
+			$this->stalled_chunk( $job ),
+		);
 
 	}
 

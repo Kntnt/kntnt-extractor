@@ -207,11 +207,14 @@ final readonly class Extraction_Job {
 	/**
 	 * Returns a copy failed with a caller-visible reason, stamped as just updated.
 	 *
-	 * Reserved for a failure the plugin diagnosed itself and can describe safely — the
-	 * stalled build (ADR-0013) is the case that exists. An unexpected throw stays
-	 * opaque and drops the job to failed through {@see with_state()} instead, leaving
-	 * the reason null, because its message could carry a filesystem path or a fragment
-	 * of SQL that must not reach a caller (ADR-0007).
+	 * Reserved for a failure the plugin can describe safely, which is both of the two
+	 * it can see at all: the stalled build (ADR-0013) composes its reason from the
+	 * caller's own selection and two settings `GET /environment` already discloses,
+	 * and an unexpected throw composes one naming the throwable, bounded and
+	 * trace-free so the arbitrary string it relays stays within what the poll may
+	 * return (issue #25). What still leaves the reason null is a failure no `catch`
+	 * ever reaches — a process killed outright — and after those two that absence is
+	 * itself the diagnosis rather than a gap.
 	 *
 	 * @since 0.4.0
 	 *
@@ -362,10 +365,10 @@ final readonly class Extraction_Job {
 	 * That is a failure a release too old to adapt wrote: it diagnosed a stall — so
 	 * it carries a reason — and the schema-8 budget keys are absent, because that
 	 * release never wrote them. Every failure *this* release writes is one of the
-	 * other three shapes: an opaque throw (no reason), a stall it already shrank
-	 * its way to the floor over (adapted budgets), or a chunk whose bounds it
-	 * could never shrink at all, which is failed with the keys present at zero
-	 * and the container already discarded.
+	 * other three shapes: an unexpected throw (a reason naming the throwable, the
+	 * keys present), a stall it already shrank its way to the floor over (adapted
+	 * budgets), or a chunk whose bounds it could never shrink at all, which is
+	 * failed with the keys present at zero and the container already discarded.
 	 *
 	 * The signal is the absence of those keys, not their values. This release always
 	 * stamps them — as zero while the job still packages at the Config defaults — so
