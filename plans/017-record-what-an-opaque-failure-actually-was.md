@@ -94,7 +94,7 @@ Redirect the gate to a file and capture `$?` on its own line — `composer gate 
 
 **Out of scope**:
 
-- `Extractions_Controller::error_of()` and the poll contract. The member is already `error.message` and already carries whatever `$job->error` holds; this plan fills that field rather than changing its shape. **`api_version` does not move.**
+- The poll contract. The member is already `error.message` and already carries one string; this plan fills a field it resolves rather than changing its shape. **`api_version` does not move.** *(Amended 2026-08-21: `Extractions_Controller::error_of()` itself is in scope after all, by one `??` — step 1's first rule puts the thrown reason in a field of its own, so the method resolves the plugin's own diagnosis, then that one, then the same fallback. The contract it answers is what stays out of scope, and it does.)*
 - The resume path. An opaque failure stays un-re-driven; recording what it was does not make it safe to retry, and arguing otherwise is a separate decision against ADR-0015.
 - The fail-time discard of the container. Whether a diagnosable failure should keep its staging is a real question and a different plan — see "Maintenance notes".
 - Anything in the adaptation family. Rule R1 in `~/Projects/kntnt-transfer-engine-open-work.md` still binds, and this plan is deliberately outside it: it adds no knob, no lever, and no recovery.
@@ -107,12 +107,14 @@ Trunk-based: commit straight to `main`, no branch, no PR. Do not push, tag, or b
 
 ### Step 1: Record the throwable on the job
 
-At the path identified in "Current state", compose a reason from the caught throwable instead of leaving `error` null. It must carry, at minimum, the throwable's **class**, its **message**, and the **file and line** it came from. Follow the stall reason's own convention for how the string is built and stored, so `error_of()` needs no change.
+At the path identified in "Current state", compose a reason from the caught throwable instead of recording nothing. It must carry, at minimum, the throwable's **class**, its **message**, and the **file and line** it came from. Follow the stall reason's own convention for how the string is *built*, so `error_of()` resolves it with no change of shape.
 
-Two rules on content, both load-bearing:
+Four rules on content and destination, all load-bearing:
 
-1. **The message is operator-facing and may be read by a caller over REST.** A throwable's message can carry a path or a query fragment. Truncate to a bounded length and do not include a stack trace — `Job_Store` already treats what rides on the record as caller-visible, and the poll returns this field to anyone who can read the job.
-2. **Say what it is.** Prefix the recorded reason so a reader can tell this class of failure from a stall at a glance, in the same register as the stall reason's opening: the extraction failed with an unexpected error rather than by exhausting its budgets, this is not a resumable state, and the container has been discarded.
+1. **Write it to a field of its own; `error` stays null for a throw.** *(Amended 2026-08-21, from #25's verification — the first execution of this plan wrote it into `error` and failed verification on exactly this.)* `error` is contractually the reason **the plugin diagnosed itself**, and its nullity is read as a signal by two subsystems that have nothing to do with the poll: `Extraction_Job::is_pre_adaptation_stall()` treats a non-null `error` as "a stall was diagnosed here", and both `Dispatcher::is_resumable()` and `Sweeper::reclaimable()` act on the answer. A record rebuilt from a 0.5.1-or-earlier write keeps the schema-8 budget keys absent for the rest of its life, so a throw that filled `error` turned exactly that record into the one failure this release re-drives. "Follow the stall reason's own convention" above is about how the string is *composed*, and reads naturally as "store it where the stall stores it" — which is the mistake.
+2. **The message is operator-facing and may be read by a caller over REST.** A throwable's message can carry a path or a query fragment. Truncate to a bounded length and do not include a stack trace — `Job_Store` already treats what rides on the record as caller-visible, and the poll returns this field to anyone who can read the job. What the relayed message may disclose is decided, deliberately and in writing, in ADR-0022.
+3. **Name the origin relative to the installation root.** *(Amended 2026-08-21, same source.)* "The file and line" is satisfied exactly as well by a root-relative path, at no cost, and an absolute one would have the same sentence disclose one file root-relative — the chunk, via `stalled_chunk()` — and another absolutely, by two rules with a reason for neither.
+4. **Say what it is.** Prefix the recorded reason so a reader can tell this class of failure from a stall at a glance, in the same register as the stall reason's opening: the extraction failed with an unexpected error rather than by exhausting its budgets, this is not a resumable state, and the container has been discarded.
 
 Also record the chunk being attempted when the throw happened, if the failing path has it in hand. The `attempts` log is bounded at eight entries and is purged with the record, so the reason is the only place this survives — and on the observed failure, knowing it died at byte 0 of a specific `.mp4` was the single most useful fact available.
 
@@ -158,7 +160,7 @@ Stop and report if:
 
 - The drift check reports changes to any in-scope file and the excerpts no longer match.
 - **You cannot find a path that marks a job failed without composing a reason.** That would mean the throw escapes the plugin entirely, which makes this a different plan — report what you found instead of inventing a `catch`.
-- Recording the throwable requires a new field on the job record. The record is at schema 8 and released as of 0.6.0, so a new field is a schema bump and no longer free — report rather than bumping.
+- ~~Recording the throwable requires a new field on the job record. The record is at schema 8 and released as of 0.6.0, so a new field is a schema bump and no longer free — report rather than bumping.~~ **This condition fired, was reported, and is settled on #25** *(2026-08-21)*: it does require one, because step 1's first rule above says `error` is not the destination. The field is added to schema 8 without a bump, because its absence is the ordinary shape of a record that has not failed that way rather than a signal about the release that wrote it — the same tolerant, non-legacy-signalling branch `skipped_files` and `attempt_log` already are, which ADR-0015's own Consequences bullet lists as outside the cluster that retires together. `API_VERSION` does not move either (ADR-0017/0018): nothing about the artifact's shape changes and the poll still returns one string.
 - An existing stall test changes behaviour. The stall path must be untouched.
 - You conclude the container should be kept for a diagnosable failure. That is a real question and a defensible position, and it is out of scope here — report it.
 
