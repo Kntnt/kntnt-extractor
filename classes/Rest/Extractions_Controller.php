@@ -278,7 +278,10 @@ final class Extractions_Controller {
 	 *
 	 * The request has already passed validation and the capability gate, so the
 	 * only new gate here is concurrency: a second non-terminal job beyond the
-	 * configured ceiling is refused with 429. The payload is re-derived from the
+	 * configured ceiling is refused with 429. The ceiling is enforced by taking the
+	 * slot and then re-checking it, never by checking and then taking — a check
+	 * answers for an instant already past, so two creates arriving together would
+	 * both be told the slot was free. The payload is re-derived from the
 	 * request — parsing it is how this callback obtains its inputs, not a second
 	 * validation of them. The job's first continuation is scheduled for after this
 	 * 201 is sent, so no loopback or packaging work precedes the response (ADR-0010).
@@ -298,20 +301,31 @@ final class Extractions_Controller {
 			return $payload;
 		}
 
-		// Enforce the global concurrency ceiling: a create beyond it is a 429, the
+		// Refuse a create the ceiling has no room for before anything is written: the
 		// caller's cue to poll or consume the active job before starting another.
 		if ( ! $this->store->has_free_slot() ) {
-			return new WP_Error(
-				'kntnt_extractor_too_many_jobs',
-				__( 'Another extraction is already in progress. Wait for it to finish before starting another.', 'kntnt-extractor' ),
-				[ 'status' => 429 ],
-			);
+			return $this->ceiling_reached();
 		}
 
-		// Persist a queued job bound to the caller, then schedule its first continuation
-		// for after this 201 is sent, so the response never waits on loopback or
-		// packaging work — the job's execution begins post-response (ADR-0007/0010).
+		// Persist a queued job bound to the caller — which is what takes the slot — and
+		// only then confirm nothing else took it in the window the check above leaves
+		// open. This is the resume path's sequence ({@see Dispatcher::resume_failed()}),
+		// for the same reason: the count is stale the instant it is read, so two creates
+		// that merely checked would both pass and both take. Losing the race hands the
+		// slot straight back, so a create refused here leaves no more behind than one
+		// refused above. The purge needs no tick lock, unlike the three purging actors
+		// ADR-0019 governs: this job was minted by this request, its id has been handed
+		// to nobody, and its first continuation is scheduled only below, so there is no
+		// build to delete out from under.
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
+		if ( ! $this->store->has_free_slot( 1 ) ) {
+			$this->store->purge( $job );
+			return $this->ceiling_reached();
+		}
+
+		// Schedule the job's first continuation for after this 201 is sent, so the
+		// response never waits on loopback or packaging work — the job's execution
+		// begins post-response (ADR-0007/0010).
 		$this->dispatcher->continue_after_response( $job );
 
 		// Echo the id and queued state; name skipped files only when a strict: false
@@ -328,6 +342,25 @@ final class Extractions_Controller {
 			$response,
 			201,
 		);
+
+	}
+
+	/**
+	 * The refusal a create earns when the concurrency ceiling has no room for it.
+	 *
+	 * Both places that answer 429 return this one: the check before anything is
+	 * written, and the re-check after the slot has been taken. The two are
+	 * deliberately indistinguishable to the caller — what a 429 discloses about the
+	 * occupied slot is a settled question of its own, and closing the race between
+	 * them did not reopen it.
+	 *
+	 * @since 0.6.1
+	 *
+	 * @return WP_Error A 429 naming the concurrency ceiling as the cause.
+	 */
+	private function ceiling_reached(): WP_Error {
+
+		return $this->error( 429, 'kntnt_extractor_too_many_jobs', __( 'Another extraction is already in progress. Wait for it to finish before starting another.', 'kntnt-extractor' ) );
 
 	}
 

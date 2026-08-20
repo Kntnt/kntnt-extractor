@@ -17,11 +17,19 @@
  * one-non-terminal-job concurrency rule answers a second create with 429 unless
  * the limit is raised (AC7). A freshly created job polls as `queued` (AC8).
  *
+ * It also pins that the ceiling is enforced by taking the slot and then
+ * re-checking it, not by checking and then taking (issue #36): a create whose slot
+ * was claimed by another create inside its own check-to-take window releases what
+ * it took and is refused with the ceiling's existing 429, leaving nothing on disk.
+ *
  * @package Kntnt\Extractor
  * @since   0.1.0
  */
 
 declare( strict_types = 1 );
+
+use Kntnt\Extractor\Config;
+use Kntnt\Extractor\Job_Store;
 
 global $wpdb;
 
@@ -248,6 +256,64 @@ add_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 201, 'Raising the concurrency limit admits a second job (201)' );
 kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 429, 'The raised limit still refuses the job past the ceiling (429)' );
 remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_max );
+
+// --- issue #36: the create path takes the slot and then re-checks it ---
+
+// Isolate this on a working directory of its own: the checks above deliberately left
+// live jobs behind, and the ceiling below must be reached by exactly the rival job
+// this section plants and by nothing else.
+$race_work = wp_upload_dir()['basedir'] . '/kntnt-extractor-race-' . bin2hex( random_bytes( 4 ) );
+$force_race_work = static fn(): string => $race_work;
+add_filter( 'kntnt_extractor_config_work_dir', $force_race_work, 20 );
+
+// Drive the check-to-take window through the Config seam rather than by timing, which
+// no single-process harness can interleave: `has_free_slot()` counts the live jobs
+// first and resolves the ceiling second, so a filter on the ceiling knob runs inside
+// the very window the race lives in, with the count already taken. A job created from
+// there is precisely the rival create that arrived a moment earlier, and it lands
+// deterministically on every run.
+$race_store = new Job_Store( new Config() );
+$rival_id = '';
+$rival_create = static function ( mixed $ceiling ) use ( &$rival_id, $race_store, $owner, $valid_key ): mixed {
+	if ( $rival_id === '' ) {
+		$rival_id = $race_store->create( (int) $owner->ID, $valid_key, [ $GLOBALS['wpdb']->options ], [], [] )->id;
+	}
+	return $ceiling;
+};
+add_filter( 'kntnt_extractor_config_max_active_jobs', $rival_create );
+$lost = $post_extractions( $valid_body() );
+$lost_data = $lost->get_data();
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $rival_create );
+
+kntnt_extractor_assert( $rival_id !== '', 'The rival create lands inside the create path\'s own check-to-take window (#36)' );
+kntnt_extractor_assert( $lost->get_status() === 429, 'A create whose slot was taken between the check and the take is refused 429 (#36)' );
+kntnt_extractor_assert( is_array( $lost_data ) && ( $lost_data['code'] ?? null ) === 'kntnt_extractor_too_many_jobs', 'The lost-race refusal carries the concurrency ceiling\'s own error code (#36)' );
+
+// The refusal is the one an ordinary second create already earns, byte for byte:
+// what a 429 tells the caller about the occupied slot is a settled question this fix
+// does not reopen (see "Findings considered and rejected" in plans/README.md).
+$plain_refusal = $post_extractions( $valid_body() );
+kntnt_extractor_assert( $plain_refusal->get_status() === $lost->get_status() && $plain_refusal->get_data() === $lost_data, 'The lost-race refusal is the ceiling refusal sent today, unchanged in status, code and body (#36)' );
+
+// The slot the refused caller took is given back, not leaked: only the rival's job
+// survives on disk, so nothing counts against the ceiling that no caller holds.
+$race_entries = scandir( $race_work );
+$race_jobs = array_values( array_filter( $race_entries === false ? [] : $race_entries, static fn( string $entry ): bool => preg_match( '/^[a-f0-9]{32}$/', $entry ) === 1 ) );
+kntnt_extractor_assert( $race_jobs === [ $rival_id ], 'The caller that lost the race releases the job it took, leaving only the rival on disk (#36)' );
+kntnt_extractor_assert( $race_store->count_active() === 1, 'Exactly one job occupies a ceiling of one once the race has been decided (#36)' );
+
+// Control: the same request against the same state, with room under the ceiling, is a
+// 201 — so the refusal above was the slot and not this section's own isolation.
+$force_race_max = static fn(): int => 2;
+add_filter( 'kntnt_extractor_config_max_active_jobs', $force_race_max );
+kntnt_extractor_assert( $post_extractions( $valid_body() )->get_status() === 201, 'The same create succeeds once the ceiling has room, so the refusal above was the slot (#36)' );
+remove_filter( 'kntnt_extractor_config_max_active_jobs', $force_race_max );
+
+// Give the working directory back to the checks around this section, and take this
+// one's own tree and its served downloads sibling with it.
+remove_filter( 'kntnt_extractor_config_work_dir', $force_race_work, 20 );
+$rmrf( $race_work );
+$rmrf( $race_work . '-downloads' );
 
 // Leave the suite state clean for later files, including the served downloads sibling.
 $rmrf( $work );
