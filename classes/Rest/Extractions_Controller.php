@@ -85,6 +85,12 @@ use WP_REST_Server;
  * paths from the selection, records them on the job, and still 404s a missing
  * table, a traversal, or a selection that is empty after the skip.
  *
+ * A second optional member, `chunk_size`, carries the job's own file-part budget
+ * in bytes, so the one setting that decides whether a multi-hour run survives can
+ * be chosen per run instead of by editing a constant on the site. Omitted, the job
+ * packages at whatever the Config knob resolves to, byte for byte as before; a
+ * value outside the range that seam already permits is a malformed member.
+ *
  * @since 0.1.0
  */
 final class Extractions_Controller {
@@ -305,7 +311,7 @@ final class Extractions_Controller {
 		// Persist a queued job bound to the caller, then schedule its first continuation
 		// for after this 201 is sent, so the response never waits on loopback or
 		// packaging work — the job's execution begins post-response (ADR-0007/0010).
-		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'] );
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
 		$this->dispatcher->continue_after_response( $job );
 
 		// Echo the id and queued state; name skipped files only when a strict: false
@@ -868,6 +874,14 @@ final class Extractions_Controller {
 	 * behaviour they already understood, which is why `strict` itself required
 	 * no version bump on its own.
 	 *
+	 * `chunk_size` is optional on the same terms and checked immediately after
+	 * `strict`, since both are optional scalar members refused the same way. It
+	 * carries the job's own file-part budget in bytes; omitted, the job packages at
+	 * the Config default exactly as before. Its accepted range is the Config seam's
+	 * own rather than a number this endpoint picks — see {@see chunk_size_of()} —
+	 * and a value outside it is a `422 kntnt_extractor_malformed_body` like any
+	 * other malformed member, never a code of its own.
+	 *
 	 * The structure-only selection (issue #16) is additive and independently
 	 * omittable: an absent or null `tables_structure_only` behaves as `[]`, so a
 	 * pre-#16 caller sending only `tables`/`files` is unchanged.
@@ -875,7 +889,7 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>}|WP_Error
+	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>, chunk_size: int}|WP_Error
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
@@ -947,6 +961,16 @@ final class Extractions_Controller {
 			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'strict must be a boolean when provided.', 'kntnt-extractor' ) );
 		}
 
+		// A present chunk_size must land in the range the Config seam already puts
+		// in force for the same knob — an integer of at least one, bounded nowhere
+		// above ({@see chunk_size_of()}) — and anything else is a malformed member
+		// like any other. An omitted one is zero, which is the record's own "use the
+		// Config default" and therefore today's behaviour exactly.
+		$chunk_size = $this->chunk_size_of( $data['chunk_size'] ?? null );
+		if ( $chunk_size === null ) {
+			return $this->error( 422, 'kntnt_extractor_malformed_body', __( 'chunk_size must be an integer of at least 1 when provided.', 'kntnt-extractor' ) );
+		}
+
 		// Require a well-formed key: present, valid base64, exactly a 32-byte X25519
 		// public key. Its absence or malformation is a client error, not a not-found.
 		$public_key = $this->canonical_public_key( $data['public_key'] ?? null );
@@ -1003,7 +1027,47 @@ final class Extractions_Controller {
 			'files' => $kept_files,
 			'public_key' => $public_key,
 			'skipped_files' => $skipped_files,
+			'chunk_size' => $chunk_size,
 		];
+
+	}
+
+	/**
+	 * Resolves the optional `chunk_size` member into a per-job budget, or null when
+	 * it is outside the range the Config seam permits.
+	 *
+	 * The range is derived rather than chosen, which is the whole point of the
+	 * member: `Artifact_Builder::configured()` reads the `chunk_size` knob as
+	 * `max( 1, … )` and bounds it nowhere above, so an integer of at least one is
+	 * exactly the set of values that seam can put in force — and the per-job budget
+	 * this member feeds already agrees, since `Artifact_Builder::budgets()` honours
+	 * a job's own size only while it is positive. No constant is introduced for
+	 * either end: the floor is read off the existing clamp and the absence of a
+	 * ceiling off the absence of one, because what a given host survives is a
+	 * measured, host-specific fact (`docs/measurements/2026-08-19-chunk-size-curve.md`)
+	 * and not something this endpoint is in a position to decide.
+	 *
+	 * An absent member — and, by the same null-is-absent reading `strict` and
+	 * `tables_structure_only` already use, an explicitly null one — resolves to
+	 * zero, the record's own "package at the Config default".
+	 *
+	 * @since 0.6.1
+	 *
+	 * @param mixed $value The decoded `chunk_size` value, or null when absent.
+	 * @return int|null The per-job file-part budget in bytes, 0 when unrequested,
+	 *                  or null when the member is present and out of range.
+	 */
+	private function chunk_size_of( mixed $value ): ?int {
+
+		// An absent member asks for nothing, which is the zero the record already
+		// reads as "use the Config default".
+		if ( $value === null ) {
+			return 0;
+		}
+
+		// A present member arrives as a JSON integer or it is malformed — the same
+		// type discipline `strict` applies, never a coercion of a numeric string.
+		return ( is_int( $value ) && $value >= 1 ) ? $value : null;
 
 	}
 

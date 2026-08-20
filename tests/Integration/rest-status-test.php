@@ -104,6 +104,12 @@ kntnt_extractor_assert( is_array( $honours ) && in_array( 'disclosure', $honours
 // version bump since the parameter is absent-by-default and additive.
 kntnt_extractor_assert( is_array( $honours ) && in_array( 'state', $honours, true ), 'GET /status reports honours naming state' );
 
+// `chunk_size` — POST /extractions' optional per-run file-part budget (issue
+// #28). The value that lets a long extraction survive is host-specific, and a
+// client that cannot see this name has to fall back to whatever the site's own
+// constant happens to be.
+kntnt_extractor_assert( is_array( $honours ) && in_array( 'chunk_size', $honours, true ), 'GET /status reports honours naming chunk_size' );
+
 // A user login that is itself an email address round-trips verbatim, since that
 // is the shape the primary consumer's credential convention has to split.
 $email_login = wp_insert_user( [ 'user_login' => 'status@example.com', 'user_pass' => wp_generate_password(), 'user_email' => 'status@example.com', 'role' => 'subscriber' ] );
