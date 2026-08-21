@@ -220,10 +220,10 @@ remove_filter( 'kntnt_extractor_config_chunk_size', $small_chunk );
 // --- AC6: the poll change surfaces v1 fields and is itself not a bump --------
 //
 // Surfacing these progress/error fields did not bump the contract. The version
-// reads 2 because two later, unrelated cutovers each added new caller-visible
-// surface: the structure-only extraction (issue #16) and the kntnt-wp-skills
-// trio (GET /environment and its siblings). So assert the current reported
-// version rather than a frozen 1.
+// has moved past 1 for later, unrelated reasons: the coordinated cutover that
+// added the `tables_structure_only` request field (issue #16) and the read
+// endpoints GET /environment and GET /extractions, and the bumps after it. So
+// assert the current reported version rather than a frozen 1.
 $status = rest_get_server()->dispatch( new WP_REST_Request( 'GET', '/kntnt-extractor/v1/status' ) )->get_data();
 kntnt_extractor_assert( is_array( $status ) && ( $status['api_version'] ?? null ) === 7, 'GET /status reports the current api_version (AC6)' );
 
