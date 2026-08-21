@@ -274,9 +274,10 @@ kntnt_extractor_assert( isset( $schedules[ Watchdog::WATCHDOG_SCHEDULE ] ), 'The
 kntnt_extractor_assert( ( $schedules[ Watchdog::WATCHDOG_SCHEDULE ]['interval'] ?? null ) === 900, 'The watchdog schedule runs every 900 seconds (AC2)' );
 
 // Drive a stalled queued job through the SCHEDULED HOOK itself — do_action fires the
-// exact add_action( WATCHDOG_HOOK, ... ) binding the Plugin registers against the
-// plugin-wired Watchdog, not a locally built instance — so this binds the production
-// callback, not just patrol() in isolation.
+// exact add_action( WATCHDOG_HOOK, ... ) binding the Plugin registers, whose closure
+// builds the Watchdog and the driver under it when the event fires, rather than this
+// file's locally built instance — so this binds the production callback, not just
+// patrol() in isolation.
 $hooked_created = $post_extractions( $selection )->get_data();
 $hooked_id = is_array( $hooked_created ) ? (string) ( $hooked_created['id'] ?? '' ) : '';
 do_action( Watchdog::WATCHDOG_HOOK );

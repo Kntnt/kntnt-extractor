@@ -65,12 +65,13 @@ final class Table_Dumper {
 	 * The site's table names keyed for lookup, or `null` before the first read.
 	 *
 	 * Filled by {@see require_known_table()} and no longer-lived than the request
-	 * that filled it: the plugin constructs one dumper per request, so this is
-	 * request scope by construction rather than by invalidation. It is an
-	 * optimisation and never an authority — a name it does not carry sends the
-	 * check back to the live catalog before anything is refused (ADR-0003's
-	 * addendum), which is what keeps the validation rule the same rule it was
-	 * when every slice read the listing for itself.
+	 * that filled it: the plugin builds no dumper at load, and whatever drives — a
+	 * REST callback, or the watchdog cron event when it fires — builds one of its
+	 * own, so this is request scope by construction rather than by invalidation.
+	 * It is an optimisation and never an authority — a name it does not carry
+	 * sends the check back to the live catalog before anything is refused
+	 * (ADR-0003's addendum), which is what keeps the validation rule the same
+	 * rule it was when every slice read the listing for itself.
 	 *
 	 * @var array<string, true>|null
 	 */
