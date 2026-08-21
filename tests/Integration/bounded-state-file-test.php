@@ -12,20 +12,23 @@
  *
  * The fix splits the record by what is BOUNDED rather than by what is mutable, since
  * unboundedness is the actual defect: the selection and the segment names are the only
- * two parts of a job that grow without limit, and neither one changes in a way a chunk
- * needs to persist. The selection moves to `job.json`, written once at create; the
+ * two parts of a job that grow without limit, and neither one changes in a way the two
+ * saves a chunk performs need to persist. The selection moves to `job.json`, written at
+ * create and by nothing else except a tick that skipped a vanished file, through
+ * `Job_Store::save_with_selection()` (ADR-0026); the line drawn here is unboundedness
+ * and not immutability, which used to amount to the same thing and no longer does. The
  * segment names move to an append-only index sidecar beside the in-progress container,
  * owned by the writer that is the only thing that ever needed them; and `state.json` —
- * the only file a save rewrites — holds a fixed set of scalars whose size is O(1) in
- * the selection, forever.
+ * the only file `Job_Store::save()` rewrites — holds a fixed set of scalars whose size
+ * is O(1) in the selection, forever.
  *
  * This file pins that contract, which is a performance property expressed as an
  * observable one — bytes on disk, not a stopwatch, so it holds on any host:
  *  - AC1 (the save is bounded): the file a save rewrites stays under a small fixed
  *    ceiling however large the selection is and however many segments are sealed, and
  *    it carries no path from the selection.
- *  - AC2 (the selection is written once): the file holding the selection is
- *    byte-identical before and after a build advances many chunks.
+ *  - AC2 (a chunk that skips nothing never rewrites the selection): the file holding
+ *    the selection is byte-identical before and after a build advances many chunks.
  *  - AC3 (the liveness counter survives): the poll's `progress.chunks_done` still
  *    counts every sealed segment, which is what a client's stall rule watches.
  *  - AC4 (the sealed index is exact): a build resumed across many ticks publishes an
@@ -208,13 +211,16 @@ $bsf_secret = is_array( $bsf_state ) && is_string( $bsf_state['tick_secret'] ?? 
 kntnt_extractor_assert( $bsf_secret !== '', 'The per-job tick secret is persisted in the state file' );
 
 // The selection is the unbounded half and must be nowhere near the per-save file:
-// serialising it once is fine, serialising it per chunk is the defect.
+// serialising it at create, or once per skip, is fine; serialising it per chunk is the
+// defect.
 kntnt_extractor_assert(
 	filesize( $bsf_job_file ) > $bsf_ceiling,
 	'The selection file is genuinely larger than the ceiling the state file is held to, so AC1 is a real constraint',
 );
 
-// Capture the selection file's exact bytes, so AC2 can prove no chunk ever rewrote it.
+// Capture the selection file's exact bytes, so AC2 can prove no chunk rewrote it. No
+// file in this fixture vanishes under the packaging, so nothing here reaches
+// `save_with_selection()`, the one write that ever touches this half (ADR-0026).
 $bsf_job_before = (string) file_get_contents( $bsf_job_file );
 
 // Drive the job one bounded chunk per tick, recording the largest the per-save file
@@ -264,7 +270,7 @@ kntnt_extractor_assert(
 	'The per-save state file carries neither a selected path nor a segment-name list (AC1)',
 );
 
-// --- AC2: the selection is written once ------------------------------------------
+// --- AC2: a chunk that skips nothing never rewrites the selection ----------------
 
 clearstatcache( true, $bsf_job_file );
 kntnt_extractor_assert(
