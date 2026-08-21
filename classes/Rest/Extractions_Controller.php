@@ -319,8 +319,9 @@ final class Extractions_Controller {
 	 * sweep take before purging anything (ADR-0019), and leaves the job to the sweep
 	 * when the lock cannot be taken — the refusal is the ceiling's own 429 either way.
 	 * The payload is re-derived from the request — parsing it is how this callback
-	 * obtains its inputs, not a second validation of them. The job's first continuation is scheduled for after this
-	 * 201 is sent, so no loopback or packaging work precedes the response (ADR-0010).
+	 * obtains its inputs, not a second validation of them. The job's first
+	 * continuation is scheduled for after this 201 is sent, so no loopback or
+	 * packaging work precedes the response (ADR-0010).
 	 *
 	 * @since 0.1.0
 	 *
@@ -349,6 +350,7 @@ final class Extractions_Controller {
 		// checked would both pass and both take.
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'], $payload['strict'] );
 		if ( ! $this->store->has_free_slot( 1 ) ) {
+
 			// Hand the slot straight back under the job's own tick lock, exactly as consume,
 			// cancel and the sweep do (ADR-0019), so a create refused here leaves no more behind
 			// than one refused above. Having handed the id to nobody does not make this job
