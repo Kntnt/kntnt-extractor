@@ -199,11 +199,10 @@ final class Artifact_Builder {
 			$table_cursor = $progress->table_cursor;
 			$segment_count = $progress->segment_count;
 			$container_bytes = $progress->container_bytes;
+			$index_bytes = $progress->index_bytes;
 
-			// A build begun under record schema 6 kept its segment names in the job record
-			// and left no sidecar, so rebuild one from them before resuming; every record
-			// written since carries the sidecar's own committed length instead (ADR-0014).
-			$index_bytes = $progress->legacy_names === null ? $progress->index_bytes : $writer->seed_index( $progress->legacy_names );
+			// Reopen the container and its sidecar at the two offsets the last clean tick
+			// acknowledged, which is what discards a crashed tick's uncommitted tail.
 			$writer->resume( $public_key, $container_bytes, $index_bytes );
 		}
 

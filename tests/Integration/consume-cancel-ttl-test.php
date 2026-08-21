@@ -21,11 +21,16 @@
  *    403 and deletes nothing, and an unknown id is a 404 before ownership.
  *  - AC6: the same sweep bounds the one terminal residue there is. A failed job
  *    keeps its record so a poll can still report the reason, and nothing else ever
- *    reclaims it; the sweep now does, on the same two windows — except for the
- *    stranded pre-adaptation stall a resume re-drives (ADR-0015) — diagnosed, no
- *    schema-8 budget keys — which it spares however old, and reclaims as usual
- *    once that resume has adapted its budgets. A this-release stall that never
- *    shrank (reason present, keys at 0) is not that shape and is reclaimed.
+ *    reclaims it; the sweep does, on the same two windows as any unfinished job
+ *    and with no exemption of any kind (ADR-0024, and ADR-0015's addendum). Every
+ *    shape a failure comes in is reclaimed alike: the floor stall, the opaque
+ *    throw, and the stall that never shrank because its chunk spends no bound.
+ *    Beside them sits the record an unsupported release wrote, which this release
+ *    no longer deserialises at all: it is skipped quietly — a 404, not a throw —
+ *    and the failures around it are still reclaimed by the very same sweep. That
+ *    last property is what makes retiring the tolerance branches safe to ship,
+ *    because it is what stops one stale file from breaking the sweep for the
+ *    live jobs beside it.
  *  - AC8: cancel and consume both take the job's per-job tick lock before purging
  *    (ADR-0019). A lock held by a live tick refuses with 409 rather than a silent
  *    skip or a wait, and deletes nothing; the same call succeeds once the lock is
@@ -398,7 +403,7 @@ kntnt_extractor_assert( ! array_key_exists( $fresh_id, $expired_small_by_id ), '
 kntnt_extractor_assert( is_file( $fresh_artifact ) && is_dir( $fresh_dir ), 'The fresh job survives the sweep with its artifact intact (AC4)' );
 $cancel( $fresh_id );
 
-// --- AC6: a failed record is bounded by the same windows, except the resume ---
+// --- AC6: every failed record is bounded by the same windows, with no exemption ---
 
 // A failure keeps its record so a poll can still report it with its reason, and
 // GET /extractions lists only non-terminal jobs — so before this, every failed run
@@ -418,12 +423,11 @@ $restate = static function ( string $id, array $overrides, array $drop = [] ) us
 	file_put_contents( $path, (string) wp_json_encode( $state ) );
 };
 
-// The four failure shapes, all aged far past any short TTL: a stall this release
-// adapted its way to the floor over (a reason and shrunken budgets), an opaque
-// throw (no reason at all), a this-release stall that never shrank (a reason and
-// the schema-8 keys present at zero — structure-only or index), and the stranded
-// pre-adaptation stall — a diagnosed stall with no budget keys whatsoever, which
-// is what 0.5.1 and earlier wrote.
+// The three failure shapes this release writes, all aged far past any short TTL: a
+// stall it adapted its way to the floor over (a reason and shrunken budgets), an
+// opaque throw (no reason at all), and a stall that never shrank because its chunk
+// spends no bound — a structure-only table or the sealed index — which reaches
+// `failed` with the budget keys present at zero.
 $aged_stamp = [ 'state' => 'failed', 'updated_at' => time() - 100000, 'progressed_at' => time() - 100000 ];
 $f_floor_id = $id_of( $post_extractions( $selection ) );
 $restate( $f_floor_id, $aged_stamp + [ 'error' => 'The extraction stalled at the floor.', 'chunk_size' => 1 ] );
@@ -431,37 +435,45 @@ $f_opaque_id = $id_of( $post_extractions( $selection ) );
 $restate( $f_opaque_id, $aged_stamp + [ 'error' => null ] );
 $f_unshrinkable_id = $id_of( $post_extractions( $selection ) );
 $restate( $f_unshrinkable_id, $aged_stamp + [ 'error' => 'The extraction stalled: 3 consecutive attempts.', 'chunk_size' => 0, 'table_chunk_bytes' => 0, 'table_chunk_rows' => 0 ] );
-$f_stranded_id = $id_of( $post_extractions( $selection ) );
-$restate( $f_stranded_id, $aged_stamp + [ 'error' => 'The extraction stalled: 3 consecutive attempts.' ], [ 'chunk_size', 'table_chunk_bytes', 'table_chunk_rows' ] );
-kntnt_extractor_assert( is_dir( $work . '/' . $f_floor_id ) && is_dir( $work . '/' . $f_opaque_id ) && is_dir( $work . '/' . $f_unshrinkable_id ) && is_dir( $work . '/' . $f_stranded_id ), 'All four failed records are on disk before the sweep (precondition)' );
 
-// The predicate itself, read off the planted records, so a sweep result cannot
-// hide a misclassification of the zero-budget this-release shape as the resume.
-$f_unshrinkable = $store->find( $f_unshrinkable_id );
-$f_stranded = $store->find( $f_stranded_id );
-kntnt_extractor_assert( $f_unshrinkable !== null && ! $f_unshrinkable->is_pre_adaptation_stall(), 'A this-release stall with keys at 0 is not a pre-adaptation stall (AC6)' );
-kntnt_extractor_assert( $f_stranded !== null && $f_stranded->is_pre_adaptation_stall(), 'A diagnosed stall with the budget keys absent is the pre-adaptation shape (AC6)' );
+// Beside them, the shape 0.5.1 and earlier wrote: a diagnosed stall with no budget
+// keys whatsoever. This release understands the current schema and no earlier one
+// (ADR-0024), so that record is not a fourth kind of failure — it is not a readable
+// job at all, and the assertions below are about it being ignored rather than swept.
+$f_legacy_id = $id_of( $post_extractions( $selection ) );
+$restate( $f_legacy_id, $aged_stamp + [ 'error' => 'The extraction stalled: 3 consecutive attempts.' ], [ 'chunk_size', 'table_chunk_bytes', 'table_chunk_rows' ] );
+kntnt_extractor_assert( is_dir( $work . '/' . $f_floor_id ) && is_dir( $work . '/' . $f_opaque_id ) && is_dir( $work . '/' . $f_unshrinkable_id ) && is_dir( $work . '/' . $f_legacy_id ), 'All four failed records are on disk before the sweep (precondition)' );
 
+// The unparseable record degrades quietly: skipped rather than thrown, so nothing
+// that walks the store can be taken down by one stale file. Read through the store
+// and through the poll, because those are the two ways anything ever reaches it.
+$f_legacy_read = null;
+$f_legacy_threw = false;
+try {
+	$f_legacy_read = $store->find( $f_legacy_id );
+} catch ( Throwable $e ) {
+	$f_legacy_threw = true;
+}
+kntnt_extractor_assert( ! $f_legacy_threw, 'Deserialising a record that predates the current schema does not throw (AC6)' );
+kntnt_extractor_assert( $f_legacy_read === null, 'A record written before the current schema does not read back as a job (AC6)' );
+kntnt_extractor_assert( $get_extraction( $f_legacy_id )->get_status() === 404, 'A record the plugin can no longer parse polls as no such job (AC6)' );
+
+// The enumeration around it still completes: the same sweep that walks over the
+// unreadable record reclaims all three failures beside it, on the ordinary windows.
 $expired_failed = [];
 foreach ( $sweeper->sweep() as $job ) {
 	$expired_failed[ $job->id ] = $job->state;
 }
-kntnt_extractor_assert( array_key_exists( $f_floor_id, $expired_failed ) && ! is_dir( $work . '/' . $f_floor_id ), 'The sweep reclaims a floor-failure this release wrote (AC6)' );
-kntnt_extractor_assert( array_key_exists( $f_opaque_id, $expired_failed ) && ! is_dir( $work . '/' . $f_opaque_id ), 'The sweep reclaims an opaque failure, which is never resumed either (AC6)' );
-kntnt_extractor_assert( array_key_exists( $f_unshrinkable_id, $expired_failed ) && ! is_dir( $work . '/' . $f_unshrinkable_id ), 'The sweep reclaims a this-release stall that never shrank (keys present at 0) (AC6)' );
+kntnt_extractor_assert( array_key_exists( $f_floor_id, $expired_failed ) && ! is_dir( $work . '/' . $f_floor_id ), 'The sweep reclaims a floor-failure (AC6)' );
+kntnt_extractor_assert( array_key_exists( $f_opaque_id, $expired_failed ) && ! is_dir( $work . '/' . $f_opaque_id ), 'The sweep reclaims an opaque failure (AC6)' );
+kntnt_extractor_assert( array_key_exists( $f_unshrinkable_id, $expired_failed ) && ! is_dir( $work . '/' . $f_unshrinkable_id ), 'The sweep reclaims a stall that never shrank, its keys present at 0 (AC6)' );
+kntnt_extractor_assert( ( $expired_failed[ $f_floor_id ] ?? null ) === Job_State::Expired, 'A reclaimed failure is recorded expired like any other swept job (AC6)' );
 kntnt_extractor_assert( $get_extraction( $f_floor_id )->get_status() === 404, 'A reclaimed failure is gone: a later poll is a 404, as for any purged job (AC6)' );
 
-// The one failure the sweep must never touch: its container and progress are the
-// input the resume path re-drives, and it is older than any TTL by construction.
-kntnt_extractor_assert( ! array_key_exists( $f_stranded_id, $expired_failed ), 'The sweep spares the stranded pre-adaptation stall — that record is the resume (AC6)' );
-kntnt_extractor_assert( is_dir( $work . '/' . $f_stranded_id ), 'The spared record keeps its working directory and container (AC6)' );
-
-// Once a resume has run, the record carries adapted budgets and is ordinary
-// residue like any other — the control that shows the exemption is the record
-// shape and not the state.
-$restate( $f_stranded_id, [ 'chunk_size' => 1 ] );
-$expired_after_resume = array_map( static fn( Extraction_Job $job ): string => $job->id, $sweeper->sweep() );
-kntnt_extractor_assert( in_array( $f_stranded_id, $expired_after_resume, true ) && ! is_dir( $work . '/' . $f_stranded_id ), 'The same record is reclaimed once a resume has adapted its budgets (AC6)' );
+// Nothing hunts down what an unsupported release left behind, deliberately: there
+// is no migration and no cleanup routine, so the unreadable directory is simply
+// never claimed. Asserted so the omission is a decision on record, not a gap.
+kntnt_extractor_assert( is_dir( $work . '/' . $f_legacy_id ), 'An unreadable record is left where it lies rather than hunted down (AC6)' );
 
 remove_filter( 'kntnt_extractor_config_ttl', $force_ttl );
 

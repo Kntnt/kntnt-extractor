@@ -74,7 +74,6 @@ final readonly class Build_Progress {
 	 * @param int|null                $file_mtime      Mtime of the mid-package file when its first part was sealed, or null between files.
 	 * @param int                     $table_offset    Rows of the mid-dump table already sealed into earlier slices, zero between tables.
 	 * @param array<int, string>|null $table_cursor    Primary-key tuple the mid-dump table's last slice ended on, or null between tables and for a keyless table.
-	 * @param array<int, string>|null $legacy_names    Segment names carried by a record written under schema 6, for the one resume that rebuilds the sidecar from them, or null for every record written since. Never persisted.
 	 */
 	public function __construct(
 		public int $tables_done,
@@ -88,15 +87,10 @@ final readonly class Build_Progress {
 		public ?int $file_mtime = null,
 		public int $table_offset = 0,
 		public ?array $table_cursor = null,
-		public ?array $legacy_names = null,
 	) {}
 
 	/**
 	 * Serialises the progress into the associative array persisted with the job.
-	 *
-	 * The legacy name list is deliberately absent: it exists only to carry a schema-6
-	 * record's names into the sidecar on the first resume after an upgrade, and writing
-	 * it back would reintroduce the unbounded field this record no longer has.
 	 *
 	 * @since 0.1.0
 	 *
@@ -142,34 +136,30 @@ final readonly class Build_Progress {
 			return null;
 		}
 		$tables_done = $data['tables_done'] ?? null;
-		$structure_done = $data['structure_done'] ?? 0;
+		$structure_done = $data['structure_done'] ?? null;
 		$file_index = $data['file_index'] ?? null;
 		$file_offset = $data['file_offset'] ?? null;
 		$container_bytes = $data['container_bytes'] ?? null;
+		$index_bytes = $data['index_bytes'] ?? null;
+		$segment_count = $data['segment_count'] ?? null;
+		$table_offset = $data['table_offset'] ?? null;
 		$file_size = self::non_negative_or_null( $data['file_size'] ?? null );
 		$file_mtime = self::non_negative_or_null( $data['file_mtime'] ?? null );
 
-		// The segment bookkeeping is a schema-7 change (ADR-0014): the ordered names
-		// moved out to the writer's index sidecar, leaving a count and that sidecar's
-		// committed length. A schema-6 record carries the names instead, so its count is
-		// their number and the names ride along — unpersisted — for the one resume that
-		// rebuilds the sidecar from them. A record carrying neither shape describes no
-		// build at all, and a present-but-ill-typed name list is a malformed index that
-		// disqualifies it, exactly as it always did.
-		$has_legacy = array_key_exists( 'segment_names', $data );
-		$legacy_names = $has_legacy ? self::string_list( $data['segment_names'] ) : null;
-		$segment_count = $data['segment_count'] ?? ( $legacy_names === null ? null : count( $legacy_names ) );
-		$index_bytes = $data['index_bytes'] ?? 0;
+		// The mid-table cursor is the one field that is legitimately null — between
+		// tables, and for a keyless table the row count alone walks — so the key must be
+		// present while its value may be nothing. A present, non-null value that is not a
+		// list of strings is a malformed resume anchor and disqualifies the record.
+		$cursor_ok = array_key_exists( 'table_cursor', $data );
+		$table_cursor = $cursor_ok ? $data['table_cursor'] : null;
+		if ( $table_cursor !== null ) {
+			$table_cursor = self::string_list( $table_cursor );
+			$cursor_ok = $table_cursor !== null;
+		}
 
-		// The table position is a schema-6 addition (ADR-0013); a record written before
-		// it carries neither key, so an absent row offset reads as zero and an absent
-		// cursor as none — the shape of a build not currently mid-table, which is what a
-		// pre-0.4.0 record's table always was. A cursor that IS present but is not a list
-		// of strings is a malformed resume anchor and disqualifies the record, the same
-		// stance the segment-name list takes.
-		$table_offset = $data['table_offset'] ?? 0;
-		$has_cursor = ( $data['table_cursor'] ?? null ) !== null;
-		$table_cursor = $has_cursor ? self::string_list( $data['table_cursor'] ) : null;
+		// Reject the record unless every counter is a non-negative int and the optional
+		// file identity is well formed. A missing counter is a shape this release does
+		// not write, and therefore one it does not read (ADR-0024).
 		if ( ! is_int( $tables_done ) || $tables_done < 0
 			|| ! is_int( $structure_done ) || $structure_done < 0
 			|| ! is_int( $file_index ) || $file_index < 0
@@ -178,14 +168,13 @@ final readonly class Build_Progress {
 			|| ! is_int( $index_bytes ) || $index_bytes < 0
 			|| ! is_int( $segment_count ) || $segment_count < 0
 			|| ! is_int( $table_offset ) || $table_offset < 0
-			|| ( $has_cursor && $table_cursor === null )
-			|| ( $has_legacy && $legacy_names === null )
+			|| ! $cursor_ok
 			|| $file_size === false
 			|| $file_mtime === false ) {
 			return null;
 		}
 
-		return new self( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor, $legacy_names );
+		return new self( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor );
 
 	}
 
@@ -212,7 +201,7 @@ final readonly class Build_Progress {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param mixed $value A decoded `table_cursor` or legacy `segment_names` value.
+	 * @param mixed $value A decoded `table_cursor` value.
 	 * @return array<int, string>|null The value as a list of strings, or null.
 	 */
 	private static function string_list( mixed $value ): ?array {

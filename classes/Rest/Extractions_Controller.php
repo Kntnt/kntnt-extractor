@@ -318,9 +318,8 @@ final class Extractions_Controller {
 
 		// Persist a queued job bound to the caller — which is what takes the slot — and
 		// only then confirm nothing else took it in the window the check above leaves
-		// open. This is the resume path's sequence ({@see Dispatcher::resume_failed()}),
-		// for the same reason: the count is stale the instant it is read, so two creates
-		// that merely checked would both pass and both take.
+		// open: the count is stale the instant it is read, so two creates that merely
+		// checked would both pass and both take.
 		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
 		if ( ! $this->store->has_free_slot( 1 ) ) {
 			// Hand the slot straight back under the job's own tick lock, exactly as consume,

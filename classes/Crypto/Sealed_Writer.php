@@ -217,53 +217,6 @@ final class Sealed_Writer {
 	}
 
 	/**
-	 * Writes the index sidecar from an already-committed name list, returning its length.
-	 *
-	 * The migration path for a job whose build began under record schema 6, where the
-	 * committed names lived in the job record and no sidecar existed. Those names ARE
-	 * the committed index payload, so writing them out reconstructs exactly the sidecar
-	 * this build would have had, and the returned length is the anchor
-	 * {@see resume()} then truncates back to. Called at most once per job, on the first
-	 * tick after the upgrade; every later tick resumes from the sidecar like any other.
-	 *
-	 * Without it an in-flight build could not be resumed at all — {@see resume()} fails
-	 * closed on a missing sidecar rather than silently sealing an index that names only
-	 * the segments written after the upgrade — and an extraction hours into its run
-	 * would be abandoned by installing a release. Schema 6 is the last shape that
-	 * carried the names, so this can be dropped once no such record can still be live.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @param array<int, string> $committed_names Names of the segments already written, in order.
-	 * @return int Byte length of the reconstructed sidecar.
-	 *
-	 * @throws LogicException   When a container is already open on this writer.
-	 * @throws RuntimeException When the sidecar cannot be written in full.
-	 */
-	public function seed_index( array $committed_names ): int {
-
-		// Refuse to rewrite the sidecar under a live writer: it is append-only from
-		// open()/resume() onwards, and rewriting it whole would drop names already sealed.
-		if ( $this->handle !== null ) {
-			throw new LogicException( 'Sealed_Writer::seed_index() cannot rewrite the index of an open container; call finalize() or suspend() first.' );
-		}
-
-		// Encode the names in the index's own framing and publish the sidecar whole; a
-		// short write would understate the anchor and silently drop names on resume.
-		$payload = '';
-		foreach ( $committed_names as $name ) {
-			$payload .= pack( 'P', strlen( $name ) ) . $name;
-		}
-		$written = file_put_contents( $this->index_path(), $payload ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents -- reconstructing the container's own index sidecar in the plugin's scratch area; WP_Filesystem would demand FTP credentials on some hosts.
-		if ( $written === false || $written < strlen( $payload ) ) {
-			throw new RuntimeException( 'Unable to reconstruct the sealed container index.' );
-		}
-
-		return strlen( $payload );
-
-	}
-
-	/**
 	 * Reopens an in-progress container to append the next sealed segment.
 	 *
 	 * The chunked, resumable build (ADR-0007) writes one bounded segment per tick and

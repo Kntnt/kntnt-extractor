@@ -22,8 +22,8 @@ namespace Kntnt\Extractor;
  *
  * That set is every non-terminal job plus the one terminal state that leaves
  * anything behind: a failure keeps its record so a poll can still report it, and
- * nothing else ever reclaimed it. The single exception is the stranded
- * pre-adaptation stall a resume is for. {@see reclaimable()} draws that line.
+ * nothing else ever reclaimed it. There is no exception of any kind (ADR-0024);
+ * {@see reclaimable()} draws that line.
  *
  * Measuring staleness from the job's heartbeat rather than its creation is
  * deliberate: a ready artifact's clock starts when it became ready, and a job still
@@ -199,13 +199,12 @@ final class Sweeper {
 	 * ({@see Job_Store::reclaim_staging()}), so what is left is small, but a large
 	 * selection still makes `job.json` megabytes of it and nothing bounds the count.
 	 *
-	 * The one failure this must never touch is the stranded pre-adaptation stall
-	 * ({@see Extraction_Job::is_pre_adaptation_stall()}): its container and progress
-	 * are the input a resume re-drives (ADR-0015), and it is by definition older than
-	 * any TTL, having been left behind by a release that is being upgraded away from.
-	 * Sweeping it would delete the very thing the resume path was built to recover.
-	 * Once a resume runs, the record carries adapted budgets and this window applies
-	 * to it like any other.
+	 * No failure is exempt. One used to be — the stall an earlier release stranded,
+	 * spared because a resume re-drove it — and the exemption cost more than it
+	 * bought: it was wider than the resume it protected, so a record stalled where
+	 * nothing can shrink was spared forever and re-driven by nobody (issue #41).
+	 * `failed` is now terminal in both directions (ADR-0024), which leaves this a
+	 * question about terminality alone.
 	 *
 	 * @since 0.6.0
 	 *
@@ -214,8 +213,7 @@ final class Sweeper {
 	 */
 	private function reclaimable( Extraction_Job $job ): bool {
 
-		return ! $job->state->is_terminal()
-			|| ( $job->state === Job_State::Failed && ! $job->is_pre_adaptation_stall() );
+		return ! $job->state->is_terminal() || $job->state === Job_State::Failed;
 
 	}
 
