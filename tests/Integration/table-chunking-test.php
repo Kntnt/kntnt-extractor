@@ -36,6 +36,11 @@
  *  - AC8: the poll's `chunks_done` advances on every packaging chunk, so a job working
  *    steadily through one large table is distinguishable from a wedged one — which the
  *    four whole-resource counters alone cannot do.
+ *  - AC9: a table's two catalog facts — that the name exists, and which columns page it
+ *    — are read once per request rather than once per slice, and the memo holding them
+ *    is an optimisation and never an authority: a miss re-reads the live catalog before
+ *    anything is accepted or refused. The cross-tick guard the key memo narrows is
+ *    pinned alongside it.
  *
  * @package Kntnt\Extractor
  * @since   0.4.0
@@ -231,6 +236,151 @@ $wpdb->query( "INSERT INTO `{$keyless_table}` (`n`, `tag`) VALUES " . implode( '
 // The number of slices each fixture must split into under the forced row budget —
 // the property AC1 turns on: a whole-table segment would be exactly one.
 $expected_slices = (int) ceil( $fixture_rows / $slice_rows );
+
+// --- AC9: the catalog facts are read once per request, by a memo that re-reads ---
+
+// This section drives the dumper directly and runs ahead of the REST-driven cases
+// below deliberately. A memo that refused on a miss would break the one dumper the
+// plugin shares across this whole process, and this file would then abort on the
+// empty artifact of a failed job long before any assertion about the memo itself
+// was reached — so the assertions that discriminate between the two designs have to
+// stand where a run under the wrong one can still emit them.
+
+// Counts the two catalog round trips a stretch of dumping issues. Every statement
+// $wpdb runs passes the `query` filter, which is what lets these round trips be
+// pinned by a test where the filesystem ones of the same family could not be.
+$counts = [ 'tables' => 0, 'keys' => 0 ];
+$probe = static function ( string $query ) use ( &$counts ): string {
+	if ( str_starts_with( $query, 'SHOW TABLES' ) ) {
+		++$counts['tables'];
+	}
+	if ( str_starts_with( $query, 'SHOW KEYS' ) ) {
+		++$counts['keys'];
+	}
+	return $query;
+};
+
+// Drives one dumper through a whole table under the probe and reports what the
+// stretch cost: the SQL, the slices it took, and the two catalog counts. The filter
+// comes off even when the dump throws, so a refusal never leaks a third global
+// filter into every file that runs after this one.
+$probe_dump = static function ( Table_Dumper $dumper, string $table ) use ( $probe, &$counts, $slice_rows ): array {
+	$counts = [ 'tables' => 0, 'keys' => 0 ];
+	$sql = '';
+	$rows_done = 0;
+	$cursor = null;
+	$slices = 0;
+	add_filter( 'query', $probe );
+	try {
+		do {
+			[ $part, $cursor, $rows_done, $complete ] = $dumper->dump_chunk( $table, $cursor, $rows_done, $slice_rows, PHP_INT_MAX );
+			$sql .= $part;
+			$slices++;
+		} while ( ! $complete && $slices < 500 );
+	} finally {
+		remove_filter( 'query', $probe );
+	}
+	return [ $sql, $slices, $counts['tables'], $counts['keys'] ];
+};
+
+// A fresh dumper, so every catalog read this stretch makes is its own. Each slice
+// used to re-ask both questions; the saving is a round-trip count and nothing else,
+// so a count is what pins it. The slice count is asserted in the same breath because
+// one SHOW TABLES is also what a table that stopped being chunked would report.
+$rt_dumper = new Table_Dumper();
+[ , $rt_slices, $rt_tables, $rt_keys ] = $probe_dump( $rt_dumper, $single_table );
+kntnt_extractor_assert( $rt_slices > 1 && $rt_tables === 1 && $rt_keys === 1, "A multi-slice dump asks the catalog once, not once per slice: {$rt_slices} slices, {$rt_tables} SHOW TABLES, {$rt_keys} SHOW KEYS (AC9)" );
+
+// The harness failure in miniature, and the case the whole decision turns on: a
+// table that did not exist when the memo was filled. The memo is an optimisation,
+// so a miss re-reads and the table is dumped; a memo that refused on a miss would
+// deny a table that is plainly there, which is a behaviour change nobody asked for.
+$late_table = 'kntnt_extractor_chunk_late';
+$wpdb->query( "DROP TABLE IF EXISTS `{$late_table}`" );
+$wpdb->query( "CREATE TABLE `{$late_table}` ( `id` bigint(20) NOT NULL, `tag` varchar(40) NOT NULL, PRIMARY KEY (`id`) )" );
+$late_values = [];
+for ( $i = 1; $i <= $fixture_rows; $i++ ) {
+	$late_values[] = "({$i}, 'LATEMARK-{$i}')";
+}
+$wpdb->query( "INSERT INTO `{$late_table}` (`id`, `tag`) VALUES " . implode( ',', $late_values ) );
+
+$late_sql = '';
+$late_slices = 0;
+$late_tables = 0;
+$late_refused = '';
+try {
+	[ $late_sql, $late_slices, $late_tables ] = $probe_dump( $rt_dumper, $late_table );
+} catch ( Throwable $late_throwable ) {
+	$late_refused = $late_throwable->getMessage();
+}
+preg_match_all( '/LATEMARK-\d+/', $late_sql, $late_found );
+kntnt_extractor_assert( $late_refused === '' && count( $late_found[0] ) === $fixture_rows && count( array_unique( $late_found[0] ) ) === $fixture_rows, 'A table created after the memo was filled is still dumped, in full, through the same dumper (AC9)' );
+
+// And the re-read that accepted it is a re-read, not a re-reading. Without this,
+// "re-read on a miss" could degenerate into "re-read every slice" and give the whole
+// saving back on any table whose name arrives after the first read.
+kntnt_extractor_assert( $late_slices > 1 && $late_tables === 1, "That acceptance cost one listing, not one per slice: {$late_slices} slices, {$late_tables} SHOW TABLES (AC9)" );
+
+// A refusal is never decided on stale knowledge either. With the memo warm, an
+// unknown name is still refused — and refused against a listing this request took
+// from the database AFTER the name was seen, which is strictly fresher than the
+// listing the per-slice read could have taken before it.
+$absent_table = 'kntnt_extractor_chunk_absent';
+$absent_refused = '';
+$counts = [ 'tables' => 0, 'keys' => 0 ];
+add_filter( 'query', $probe );
+try {
+	$rt_dumper->dump_chunk( $absent_table, null, 0, $slice_rows, PHP_INT_MAX );
+} catch ( Throwable $absent_throwable ) {
+	$absent_refused = $absent_throwable->getMessage();
+}
+remove_filter( 'query', $probe );
+kntnt_extractor_assert( $absent_refused === 'Refusing to dump a table that does not exist in the catalog.' && $counts['tables'] === 1, "An unknown table is still refused with the memo warm, on a listing read after the name was seen: {$counts['tables']} SHOW TABLES (AC9)" );
+
+// --- AC9: the cross-tick guard the key memo narrows ---
+
+// dump_chunk() refuses a cursor whose arity no longer matches the table's key,
+// which is how a primary key that changed under a resume is caught. Memoising the
+// key narrows that guard by one scope, so what remains needs pinning: a change
+// between two TICKS, which is the guarantee production actually rests on, because
+// every tick is a fresh request with a dumper of its own.
+//
+// What this does NOT pin, and no longer can: the same change between two slices of
+// ONE tick. That case is outside the guard's reach once the key is memoised. It is
+// not unprotected — a table recreated mid-dump fails the page read itself — but the
+// arity check is no longer what catches it.
+$key_table = 'kntnt_extractor_chunk_rekeyed';
+$key_values = [];
+for ( $i = 1; $i <= $fixture_rows; $i++ ) {
+	$key_values[] = "({$i}, {$i})";
+}
+$wpdb->query( "DROP TABLE IF EXISTS `{$key_table}`" );
+$wpdb->query( "CREATE TABLE `{$key_table}` ( `a` bigint(20) NOT NULL, `b` bigint(20) NOT NULL, PRIMARY KEY (`a`) )" );
+$wpdb->query( "INSERT INTO `{$key_table}` (`a`, `b`) VALUES " . implode( ',', $key_values ) );
+
+// One tick's worth: a slice paged by the single-column key, ending on a cursor of
+// that key's arity. Without this the resume below would have nothing to disagree with.
+$first_tick_dumper = new Table_Dumper();
+[ , $key_cursor ] = $first_tick_dumper->dump_chunk( $key_table, null, 0, $slice_rows, PHP_INT_MAX );
+kntnt_extractor_assert( is_array( $key_cursor ) && count( $key_cursor ) === 1, 'A slice of a single-column-keyed table ends on a cursor of that key arity (AC9)' );
+
+// The key changes between the ticks. Dropping and recreating is what a real ALTER
+// leaves behind and is portable across both engines the suite runs on.
+$wpdb->query( "DROP TABLE IF EXISTS `{$key_table}`" );
+$wpdb->query( "CREATE TABLE `{$key_table}` ( `a` bigint(20) NOT NULL, `b` bigint(20) NOT NULL, PRIMARY KEY (`a`,`b`) )" );
+$wpdb->query( "INSERT INTO `{$key_table}` (`a`, `b`) VALUES " . implode( ',', $key_values ) );
+
+// The next tick is a new request and therefore a new dumper, which is why it reads
+// the changed key rather than the memoised one and refuses to seek an arity-1 cursor
+// through it. Resuming anyway would silently skip or repeat rows.
+$next_tick_dumper = new Table_Dumper();
+$key_refused = '';
+try {
+	$next_tick_dumper->dump_chunk( $key_table, $key_cursor, $slice_rows, $slice_rows, PHP_INT_MAX );
+} catch ( Throwable $key_throwable ) {
+	$key_refused = $key_throwable->getMessage();
+}
+kntnt_extractor_assert( $key_refused === 'A table primary key changed while the table was being dumped.', 'A primary key that changed between two ticks still fails the resume (AC9)' );
 
 // The unchunked reference: the same table rendered in a single slice, straight from
 // the dumper, under budgets neither of which can bite. AC2 compares the reassembled
@@ -633,6 +783,8 @@ $wpdb->query( "DROP TABLE IF EXISTS `{$single_table}`" );
 $wpdb->query( "DROP TABLE IF EXISTS `{$composite_table}`" );
 $wpdb->query( "DROP TABLE IF EXISTS `{$keyless_table}`" );
 $wpdb->query( "DROP TABLE IF EXISTS `{$fat_table}`" );
+$wpdb->query( "DROP TABLE IF EXISTS `{$late_table}`" );
+$wpdb->query( "DROP TABLE IF EXISTS `{$key_table}`" );
 $rmrf( $work );
 $rmrf( $work . '-downloads' );
 wp_set_current_user( 0 );
