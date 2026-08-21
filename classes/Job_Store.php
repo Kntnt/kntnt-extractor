@@ -437,17 +437,19 @@ final class Job_Store {
 	/**
 	 * Deletes a job's artifact and its own working directory, scoped strictly to it.
 	 *
-	 * This is the single irreversible cleanup that consume, cancel, and the TTL sweep
-	 * (ADR-0004) all reach the disk through. Exactly two things are removed and nothing
-	 * else: the job's sealed artifact in the served downloads directory, and the job's
-	 * own id-named state directory under the working directory. Every deletion is pinned
-	 * to this one job — the artifact by its own unguessable token, the directory by its
-	 * id-shaped name — and refuses to act on anything that resolves outside those two
-	 * locations, so a `KNTNT_EXTRACTOR_WORK_DIR` relocation is honoured yet the delete
-	 * can never escape to the shared working directory or beyond. A job cancelled before
-	 * it ever reached ready simply has no artifact to remove. The audit record lives in
-	 * its own file written earlier at the ready state (ADR-0006), so removing the job
-	 * here never touches it.
+	 * This is the single irreversible cleanup that consume, cancel, the TTL sweep
+	 * (ADR-0004), and a create that lost the race for the concurrency slot all reach the
+	 * disk through — the last of those purging a job it has just minted and handed to
+	 * nobody, so the slot it took is given straight back. Exactly two things are removed
+	 * and nothing else: the job's sealed artifact in the served downloads directory, and
+	 * the job's own id-named state directory under the working directory. Every deletion
+	 * is pinned to this one job — the artifact by its own unguessable token, the
+	 * directory by its id-shaped name — and refuses to act on anything that resolves
+	 * outside those two locations, so a `KNTNT_EXTRACTOR_WORK_DIR` relocation is
+	 * honoured yet the delete can never escape to the shared working directory or
+	 * beyond. A job cancelled before it ever reached ready simply has no artifact to
+	 * remove. The audit record lives in its own file written earlier at the ready state
+	 * (ADR-0006), so removing the job here never touches it.
 	 *
 	 * @since 0.1.0
 	 *
@@ -483,7 +485,7 @@ final class Job_Store {
 	public function purge_all(): void {
 
 		// Remove each still-known job's artifact and its own working directory first,
-		// the same per-job cleanup consume, cancel, and the TTL sweep reach disk through.
+		// the same per-job cleanup every other purging actor reaches disk through.
 		foreach ( $this->all() as $job ) {
 			$this->purge( $job );
 		}
@@ -749,11 +751,14 @@ final class Job_Store {
 	 *
 	 * The single owner of the per-job advisory lock ({@see container_lock_path()}),
 	 * so every actor that must not touch a job another is actively building through
-	 * takes it the same way: the tick driver serialising overlapping ticks, and the
-	 * TTL sweep refusing to purge a job a live tick holds. A null return means the
-	 * lock could not be taken — another actor holds it, or the lock file cannot even
-	 * be opened — and the caller treats that uniformly as "someone else owns this
-	 * right now, leave it alone" and no-ops. The non-blocking attempt never waits.
+	 * takes it the same way (ADR-0019): the tick driver serialising overlapping
+	 * ticks, the TTL sweep refusing to purge a job a live tick holds, consume and
+	 * cancel before purging a job the caller owns, and a create that lost the race
+	 * for the concurrency slot before purging the job it has just minted and handed
+	 * to nobody. A null return means the lock could not be taken — another actor
+	 * holds it, or the lock file cannot even be opened — and the caller treats that
+	 * uniformly as "someone else owns this right now, leave it alone" and no-ops.
+	 * The non-blocking attempt never waits.
 	 *
 	 * @since 0.1.0
 	 *
