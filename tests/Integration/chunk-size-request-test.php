@@ -25,7 +25,7 @@
  * other behaviour name that list carries.
  *
  * @package Kntnt\Extractor
- * @since   0.6.1
+ * @since   0.7.0
  */
 
 declare( strict_types = 1 );

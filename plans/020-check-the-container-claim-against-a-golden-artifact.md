@@ -130,7 +130,7 @@ The record and the trailer, `:502-503` and `:553`:
 
 ### Conventions to match
 
-Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; `declare( strict_types = 1 )`; a `//` comment above each paragraph stating its *purpose*; tabs and WordPress surface style; a full docblock on the class and on every method, with `@since 0.6.1` on new symbols (the convention `3084e81` set for this cycle). In Markdown, each paragraph is one physical line — never hard-wrapped.
+Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; `declare( strict_types = 1 )`; a `//` comment above each paragraph stating its *purpose*; tabs and WordPress surface style; a full docblock on the class and on every method, with an `@since` on new symbols naming the version this cycle will ship as, which is the version the `Version:` header in `kntnt-extractor.php` carries while the work is unreleased — read it off that header when you write the code, never off a literal in this plan. §4 of `docs/release-procedure.md` is what decides that number, and it has already moved once this cycle, from the 0.6.1 `3084e81` stamped to the 0.7.0 `771bb59` resolved. It is why the sample docblocks in step 2 carry `X.Y.Z` rather than a version, and why that placeholder is the one thing in them you do not copy as written. In Markdown, each paragraph is one physical line — never hard-wrapped.
 
 ## Commands you will need
 
@@ -189,7 +189,7 @@ git rev-parse v0.5.1:classes/Crypto/Sealed_Writer.php  # 6d3447906477a4e52c2890e
 git rev-parse v0.5.1:classes/Crypto/Invalid_Public_Key.php  # df400effe12b5120fd30c421d1333ea07c02bb8e
 ```
 
-2. Write `tests/Fixtures/container-0.5.1-recipe.php` **verbatim** — the byte counts in this plan are this recipe's, and a changed literal changes them:
+2. Write `tests/Fixtures/container-0.5.1-recipe.php` **verbatim, except that each `X.Y.Z` placeholder becomes the version from `kntnt-extractor.php`'s `Version:` header** (see "Conventions to match") — the byte counts in this plan are this recipe's, and a changed literal changes them. Those counts come from the returned segments alone, so the docblocks are not among the literals they depend on:
 
 ```php
 <?php
@@ -197,7 +197,7 @@ git rev-parse v0.5.1:classes/Crypto/Invalid_Public_Key.php  # df400effe12b5120fd
  * The recipe the golden container was built from.
  *
  * @package Kntnt\Extractor
- * @since   0.6.1
+ * @since   X.Y.Z
  */
 
 declare( strict_types = 1 );
@@ -213,7 +213,7 @@ declare( strict_types = 1 );
  * non-ASCII path holding every byte value (names and plaintexts are raw bytes), and two
  * segments with identical plaintext (a fresh key and nonce per segment).
  *
- * @since 0.6.1
+ * @since X.Y.Z
  *
  * @return array<int, array{0: string, 1: string}> The segments, in container order.
  */
@@ -246,7 +246,7 @@ function kntnt_extractor_golden_recipe(): array {
  * suite has one test key pair rather than two. It is a constant in a public repository
  * and protects nothing; it exists so the fixture is reproducible and openable in-process.
  *
- * @since 0.6.1
+ * @since X.Y.Z
  *
  * @return string The key pair, as `sodium_crypto_box_keypair()` returns one.
  */

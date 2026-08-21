@@ -96,7 +96,7 @@ Four of the suite's files construct a `Table_Dumper` of their own — `table-chu
 
 ### Conventions to match
 
-Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; a `//` comment above each paragraph stating its *purpose*, not its mechanism; WordPress surface style (tabs, `snake_case`, spaces inside parentheses); a full docblock with `@var` on each new property. New symbols in unreleased work carry `@since 0.6.1` — that is the convention `3084e81` set for this cycle. `classes/Crypto/Sealed_Writer.php:100-115` is the house style for a property docblock.
+Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; a `//` comment above each paragraph stating its *purpose*, not its mechanism; WordPress surface style (tabs, `snake_case`, spaces inside parentheses); a full docblock with `@var` on each new property. New symbols in unreleased work carry an `@since` naming the version this cycle will ship as, which is the version the `Version:` header in `kntnt-extractor.php` carries while the work is unreleased — read it off that header when you write the code, never off a literal in this plan. §4 of `docs/release-procedure.md` is what decides that number, and it has already moved once this cycle, from the 0.6.1 `3084e81` stamped to the 0.7.0 `771bb59` resolved. A plan that names a version instead hands its executor a stamp for a release that may never exist. `classes/Crypto/Sealed_Writer.php:100-115` is the house style for a property docblock.
 
 ## Commands you will need
 
