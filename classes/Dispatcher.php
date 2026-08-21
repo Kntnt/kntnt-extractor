@@ -378,6 +378,14 @@ final class Dispatcher {
 			return $this->persist_failure( $running->with_thrown_failure( $this->thrown_reason( $running, $thrown ) ) );
 		}
 
+		// A step that passed over a vanished file rather than packaging one records the
+		// path on the job, so the poll reports it exactly as a create-time skip
+		// (ADR-0026). Only a `strict: false` job can reach this at all.
+		$skipped = $step->skipped_file !== null;
+		if ( $skipped ) {
+			$running = $running->with_skipped_file( $step->skipped_file );
+		}
+
 		// A complete step means the last chunk finalized and published the container, so
 		// the job is ready for download and its completion is announced. Its progress is
 		// persisted alongside the state rather than discarded: the finalizing step sealed
@@ -385,7 +393,7 @@ final class Dispatcher {
 		// reporting one chunk fewer than its artifact holds.
 		if ( $step->complete ) {
 			$ready = $running->with_progress( $step->progress )->with_state( Job_State::Ready );
-			$this->store->save( $ready );
+			$this->persist_step( $ready, $skipped );
 			do_action( 'kntnt_extractor_job_ready', $ready );
 			return $ready;
 		}
@@ -394,9 +402,32 @@ final class Dispatcher {
 		// fresh heartbeat. The continuation loopback for the next chunk is fired once by
 		// the budgeted loop in tick() after the lock is released, not per chunk here.
 		$advanced = $running->with_progress( $step->progress );
-		$this->store->save( $advanced );
+		$this->persist_step( $advanced, $skipped );
 
 		return $advanced;
+
+	}
+
+	/**
+	 * Persists a packaged step, widening the write only when it changed the selection.
+	 *
+	 * Every ordinary step rewrites the state file alone, which is what keeps a save's
+	 * cost independent of how large the selection is (ADR-0014). A step that skipped a
+	 * vanished file appended to `skipped_files`, which lives in the selection half, so
+	 * that one — and only that one — pays the wider write (ADR-0026).
+	 *
+	 * @param Extraction_Job $job              The job as the step left it.
+	 * @param bool           $skipped_a_file   Whether this step appended to the skipped list.
+	 * @return void
+	 */
+	private function persist_step( Extraction_Job $job, bool $skipped_a_file ): void {
+
+		if ( $skipped_a_file ) {
+			$this->store->save_with_selection( $job );
+			return;
+		}
+
+		$this->store->save( $job );
 
 	}
 
