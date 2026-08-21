@@ -10,7 +10,7 @@ An unbounded list of attempts would grow with the build the way `segment_names` 
 
 ## Why not a new endpoint, and why not schema 9
 
-A dedicated `/attempts` route would be a second read path for a last-N array the poll already returns. The member is additive — a queued job omits it, an old client ignores unknown keys — so the REST contract stays at api_version 6. Schema 8 is still unreleased; the field joins the other schema-8 additions (`skipped_files`, the first-tick host-limit pair) rather than forcing a bump.
+A dedicated `/attempts` route would be a second read path for a last-N array the poll already returns. The member is additive — a queued job omits it, an old client ignores unknown keys — so the REST contract stays at api_version 6. *(Superseded in that one number by [0018](./0018-a-defines-value-discloses-only-from-an-allow-list-with-a-per-record-discriminator.md), which took `api_version` from 6 to 7 as a deliberate compatibility interlock for the define-disclosure change, before `v0.6.0`; this paragraph's argument is untouched — an additive member still does not bump the version, and this member is not what bumped it — only the integer named here has moved.)* Schema 8 is still unreleased; the field joins the other schema-8 additions (`skipped_files`, the first-tick host-limit pair) rather than forcing a bump.
 
 ## Consequences
 
