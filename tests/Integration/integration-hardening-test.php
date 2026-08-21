@@ -22,6 +22,12 @@
  *  - Finding 3 (patrol fault isolation): one job whose tick throws must not abort
  *    the whole watchdog patrol and starve every other stalled queue.
  *
+ * It also pins the condition ADR-0024 puts on retiring a tolerance branch: a
+ * record this release no longer understands is skipped, and the jobs around it
+ * still enumerate. A removal that let one stale file break the listing or the
+ * sweep for live jobs would be a defect rather than an application of that
+ * decision, so the skip is asserted here beside the other store-walking cases.
+ *
  * @package Kntnt\Extractor
  * @since   0.1.0
  */
@@ -219,33 +225,49 @@ try {
 kntnt_extractor_assert( ! $threw, 'A single job whose tick throws does not abort the watchdog patrol (finding 3)' );
 kntnt_extractor_assert( ( $store->find( $healthy )->state ?? Job_State::Queued ) !== Job_State::Queued, 'The patrol still restarts a healthy stalled queue despite a poison job in the set (finding 3)' );
 
-// --- Schema 4→5 back-compat: a pre-#16 record still parses and resumes (issue #16) ---
+// --- An unsupported record is skipped, and the jobs around it still enumerate ---
 
-// A job persisted by the previous release carries no top-level `structure_only` and, in
-// its progress, no `structure_done`. Drive a real job one chunk so it has a genuine
-// in-progress container, then strip both #16 fields to reproduce that on-disk shape, and
-// prove the store still reads it — an absent `structure_only` as `[]`, an absent
-// `structure_done` as 0 — rather than tightening into a required-key read that would
-// break every in-flight job on upgrade.
+// A record an earlier release wrote is no longer a shape this release parses
+// (ADR-0024). What must hold is how it fails to: quietly, so one stale file on disk
+// cannot break the listing or the sweep for the live jobs beside it. Drive a real
+// job one chunk first, then strip it back to what 0.5.1 wrote — no attempt counter,
+// no recorded reason, none of the schema-8 budget keys, and a progress record
+// carrying nothing schema 6 or 7 added — so the fixture is a shape a release
+// actually produced rather than a hand-built one.
 $legacy = $create();
 $dispatcher->tick( $store->find( $legacy ) );
 $data = $read_json( $legacy );
-unset( $data['structure_only'] );
+unset( $data['attempts'], $data['error'], $data['chunk_size'], $data['table_chunk_bytes'], $data['table_chunk_rows'] );
 if ( is_array( $data['progress'] ?? null ) ) {
-	unset( $data['progress']['structure_done'] );
+	unset( $data['progress']['structure_done'], $data['progress']['index_bytes'], $data['progress']['segment_count'], $data['progress']['table_offset'], $data['progress']['table_cursor'] );
 }
 $write_json( $legacy, $data );
 
-// The stripped record must reconstruct with the two #16 fields defaulted, not disqualify.
-$reloaded = $store->find( $legacy );
-kntnt_extractor_assert( $reloaded !== null, 'A pre-#16 record missing structure_only and progress.structure_done still parses (schema 4→5 back-compat)' );
-kntnt_extractor_assert( $reloaded !== null && $reloaded->structure_only === [], 'An absent structure_only reads as the empty selection (schema 4→5 back-compat)' );
-kntnt_extractor_assert( $reloaded !== null && $reloaded->progress !== null && $reloaded->progress->structure_done === 0, 'An absent progress.structure_done reads as zero (schema 4→5 back-compat)' );
+// A live job beside it, so "the enumeration completes" is an observation rather
+// than a vacuous one.
+$beside = $create();
 
-// A further tick must resume the build from that record rather than fail on the missing
-// keys — the caller-visible upgrade guarantee the back-compat read exists to keep.
-$resumed = $reloaded !== null ? $dispatcher->tick( $reloaded ) : null;
-kntnt_extractor_assert( $resumed !== null && $resumed->state !== Job_State::Failed, 'A further tick resumes the pre-#16 record rather than failing on the missing keys (schema 4→5 back-compat)' );
+$readable = [];
+$threw = false;
+try {
+	$readable = array_map( static fn( $job ): string => $job->id, $store->all() );
+} catch ( \Throwable $e ) {
+	$threw = true;
+}
+kntnt_extractor_assert( ! $threw, 'Enumerating a store holding a record this release cannot parse does not throw (ADR-0024)' );
+kntnt_extractor_assert( ! in_array( $legacy, $readable, true ), 'A record this release no longer understands is skipped rather than surfaced (ADR-0024)' );
+kntnt_extractor_assert( in_array( $beside, $readable, true ), 'The jobs around it still enumerate, which is what makes the skip safe (ADR-0024)' );
+kntnt_extractor_assert( $store->find( $legacy ) === null, 'Reading it directly answers no such job rather than a half-populated one (ADR-0024)' );
+
+// The sweep walks the same enumeration, so it must be equally unbothered by it.
+$swept = false;
+try {
+	$sweeper->sweep();
+	$swept = true;
+} catch ( \Throwable $e ) {
+	$swept = false;
+}
+kntnt_extractor_assert( $swept, 'A sweep over a store holding an unparseable record completes (ADR-0024)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );

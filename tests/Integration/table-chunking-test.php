@@ -27,8 +27,9 @@
  *    with a reason naming the table and row it stalled on. A job that can still
  *    progress is left to progress and has its attempt counter cleared by every
  *    real advance.
- *  - AC6: a job record written before this change still parses and still resumes
- *    (schema 5→6 back-compat).
+ *  - AC6: a job record written before this change is no longer a shape this
+ *    release understands (ADR-0024), and says so quietly — a 404 rather than a
+ *    throw, and the record left exactly where it lies.
  *  - AC7: a slice is bounded by bytes as well as by rows, so a table of few fat rows
  *    — the shape that sits inside any row budget and still cannot be packaged in one
  *    slice — splits rather than stalls, and a page the byte budget cut short is never
@@ -654,8 +655,12 @@ kntnt_extractor_assert( $unrounded_rows_done <= 150, 'AC5: a row budget that is 
 kntnt_extractor_assert( $floor_rows_done === 1, 'AC5: a row budget of one still renders exactly one row and advances the build (was: floored at 100)' );
 kntnt_extractor_assert( $floor_cursor !== null && $floor_complete === false, 'AC5: a row budget of one advances the cursor rather than stalling or returning an empty slice' );
 
-// --- AC6: a record written before this change still parses and still resumes ---
+// --- AC6: a record written before this change is no longer readable ---
 
+// This release understands the current schema and no earlier one (ADR-0024), so a
+// record missing the schema-6 keys is not an older job to be resumed but no job at
+// all. What has to be right is how it says so: quietly, without a throw, and
+// without rewriting what it could not read.
 wp_set_current_user( $owner->ID );
 $l_response = $post_extractions( [ 'tables' => [ $single_table ], 'public_key' => base64_encode( $public_key ) ] );
 $l_id = is_array( $l_response->get_data() ) ? (string) ( $l_response->get_data()['id'] ?? '' ) : '';
@@ -670,14 +675,13 @@ if ( is_array( $legacy['progress'] ?? null ) ) {
 }
 $write_state( $work, $l_id, $legacy );
 
-$reloaded = $get_extraction( $l_id )->get_data();
-kntnt_extractor_assert( is_array( $reloaded ) && ( $reloaded['state'] ?? null ) === 'running', 'A pre-0.4.0 record missing the table position and attempt counter still parses (schema 5→6 back-compat)' );
+kntnt_extractor_assert( $get_extraction( $l_id )->get_status() === 404, 'A record missing the table position and attempt counter reads as no such job (AC6)' );
 
-// A further tick must resume that record rather than fail on the missing keys — the
-// upgrade guarantee the lenient read exists to keep.
+// A further tick has nothing to drive and must leave the record untouched, since
+// nothing hunts down what an unsupported release wrote.
 $tick( $l_id, $l_secret );
-$resumed = $get_extraction( $l_id )->get_data();
-kntnt_extractor_assert( is_array( $resumed ) && ( $resumed['state'] ?? null ) !== 'failed', 'A further tick resumes the pre-0.4.0 record rather than failing on the missing keys (schema 5→6 back-compat)' );
+$l_after = $read_state( $work, $l_id ) ?? [];
+kntnt_extractor_assert( ! array_key_exists( 'attempts', $l_after ) && ! array_key_exists( 'error', $l_after ), 'A further tick neither revives nor rewrites the unreadable record (AC6)' );
 
 // --- AC7: a slice is bounded by bytes as well as by rows ---
 

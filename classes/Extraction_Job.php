@@ -118,18 +118,17 @@ final readonly class Extraction_Job {
 	 * @param Build_Progress|null       $progress   How far the chunked build has got, or null before it begins.
 	 * @param int|null                  $progressed_at Unix timestamp the build last advanced a chunk, or null before it has (treated as the creation time). Distinct from $updated_at, which every state save refreshes: this moves only on real progress, so the sweep's absolute ceiling can tell a slow-but-advancing large job from one whose chunk fails uncatchably every attempt.
 	 * @param int                       $attempts    Chunk attempts begun since the build last advanced, reset to zero by every real advance. The counter the tick driver bounds a chunk that dies uncatchably with (ADR-0013), so a job whose tick is killed from outside PHP fails rather than retrying forever.
-	 * @param string|null               $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Composed entirely from the caller's own selection and settings `GET /environment` already discloses, so this one carries no filesystem path, SQL, or other internal detail (ADR-0022). An unexpected throw is not a diagnosis of the plugin's own and is carried by $thrown instead, because two subsystems read the nullity of this field as "no stall was diagnosed here".
-	 * @param int                       $chunk_size  Per-job file-part budget in bytes, or 0 to use the Config default. Set at create when the caller asked for one on `POST /extractions` (issue #28), and overwritten when a stall halves it (ADR-0015) so the next tick — and a resume of a failed job — packages a smaller part rather than walking back into the same wall. The two are the same field on purpose: a requested size is a starting point the adaptation is free to walk down from, not a floor under it.
+	 * @param string|null               $error       Why the job failed, when the plugin diagnosed the failure itself, or null. Composed entirely from the caller's own selection and settings `GET /environment` already discloses, so this one carries no filesystem path, SQL, or other internal detail (ADR-0022). An unexpected throw is not a diagnosis of the plugin's own and is carried by $thrown instead, because what the two may disclose differs (ADR-0022).
+	 * @param int                       $chunk_size  Per-job file-part budget in bytes, or 0 to use the Config default. Set at create when the caller asked for one on `POST /extractions` (issue #28), and overwritten when a stall halves it (ADR-0015) so the next tick packages a smaller part rather than walking back into the same wall. The two are the same field on purpose: a requested size is a starting point the adaptation is free to walk down from, not a floor under it.
 	 * @param int                       $table_chunk_bytes Per-job table-slice byte budget, or 0 to use the Config default. The table-side counterpart of $chunk_size.
 	 * @param int                       $table_chunk_rows Per-job upper bound on rows fetched for one table slice, or 0 to use the Config default. Halved alongside $table_chunk_bytes, because the byte budget bounds only what is rendered while this bounds what `$wpdb->get_results()` materialises — the half a table stall is most likely to have died in (ADR-0015).
-	 * @param bool                      $budget_keys_present Whether the schema-8 budget keys were on the record this snapshot came from. True for every object this release constructs; false only when {@see from_array()} rebuilt a 0.5.1-or-earlier write that never had them. Not itself a persisted field — {@see to_array()} uses it to omit the keys again, so a save cannot turn a pre-adaptation stall into a this-release zero-budget write.
 	 * @param string|null               $host_memory_limit The host's `memory_limit` before the first tick asked for more, or null until that tick has run. The stall reason reads this rather than the live process, so a later tick still names the pair in force when the chunk died.
 	 * @param string|null               $host_max_execution_time The host's `max_execution_time` before the first tick asked for more, or null until that tick has run.
 	 * @param string|null               $raised_memory_limit The `memory_limit` in force after the first tick's ask, or null until that tick has run.
 	 * @param string|null               $raised_max_execution_time The `max_execution_time` in force after the first tick's ask, or null until that tick has run.
 	 * @param array<int, string>        $skipped_files Install-root-relative paths a `strict: false` create dropped because they no longer existed. Empty when nothing was skipped. Written once, with the selection.
 	 * @param array<int, Chunk_Attempt> $attempt_log Newest begun chunk attempts, oldest first, capped at {@see ATTEMPT_LOG_BOUND}. Empty until the first tick. A debug surface, not the stall counter (ADR-0016).
-	 * @param string|null               $thrown Why the job failed, when an unexpected throw killed the build, or null. The counterpart of $error and deliberately not the same field: this one is composed around a string the plugin did not write and cannot vouch for, whereas $error is its own diagnosis. Keeping them apart is what leaves $error null for a throw, which {@see is_pre_adaptation_stall()} reads as "not a diagnosed stall" (issue #25). Surfaced verbatim to the polling owner like $error, but under a deliberately wider rule: the relayed part **may** carry a filesystem path or a fragment of SQL, and the bound on it limits the size of that disclosure rather than its kind (ADR-0022).
+	 * @param string|null               $thrown Why the job failed, when an unexpected throw killed the build, or null. The counterpart of $error and deliberately not the same field: this one is composed around a string the plugin did not write and cannot vouch for, whereas $error is its own diagnosis (issue #25). Surfaced verbatim to the polling owner like $error, but under a deliberately wider rule: the relayed part **may** carry a filesystem path or a fragment of SQL, and the bound on it limits the size of that disclosure rather than its kind (ADR-0022).
 	 */
 	public function __construct(
 		public string $id,
@@ -150,7 +149,6 @@ final readonly class Extraction_Job {
 		public int $chunk_size = 0,
 		public int $table_chunk_bytes = 0,
 		public int $table_chunk_rows = 0,
-		public bool $budget_keys_present = true,
 		public ?string $host_memory_limit = null,
 		public ?string $host_max_execution_time = null,
 		public ?string $raised_memory_limit = null,
@@ -174,7 +172,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
 
 	}
 
@@ -205,7 +203,7 @@ final readonly class Extraction_Job {
 			$log = array_slice( $log, -self::ATTEMPT_LOG_BOUND );
 		}
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown );
 
 	}
 
@@ -215,16 +213,13 @@ final readonly class Extraction_Job {
 	 * Reserved for a failure the plugin worked out on its own and can describe entirely
 	 * in the caller's own vocabulary — the stalled build (ADR-0013), which composes its
 	 * reason from the selection the caller submitted and two settings `GET /environment`
-	 * already discloses. That is what {@see $error} means, and the nullity of that field
-	 * is load-bearing well beyond the poll: {@see is_pre_adaptation_stall()} reads it as
-	 * "a stall was diagnosed here", and both the resume path and the TTL sweep act on
-	 * the answer.
-	 *
-	 * A failure the plugin did not diagnose but merely caught therefore goes through
-	 * {@see with_thrown_failure()} instead, which is the same transition into `failed`
-	 * with the reason routed to a field of its own (issue #25). What leaves both fields
-	 * null is a failure no `catch` ever reaches — a process killed outright — and after
-	 * those two that absence is itself the diagnosis rather than a gap.
+	 * already discloses. That is what {@see $error} means, and it is why a failure the
+	 * plugin did not diagnose but merely caught goes through {@see with_thrown_failure()}
+	 * instead — the same transition into `failed`, with the reason routed to a field of
+	 * its own because what the two may disclose differs (ADR-0022, issue #25). What
+	 * leaves both fields null is a failure no `catch` ever reaches — a process killed
+	 * outright — and after those two that absence is itself the diagnosis rather than a
+	 * gap.
 	 *
 	 * @since 0.4.0
 	 *
@@ -233,7 +228,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
 
 	}
 
@@ -241,14 +236,10 @@ final readonly class Extraction_Job {
 	 * Returns a copy failed by an unexpected throw, carrying what threw, stamped as just updated.
 	 *
 	 * The other way a build ends, and deliberately not {@see with_failure()}. The reason
-	 * lands in {@see $thrown} and {@see $error} is left null, for a reason that is about
-	 * the record's readers rather than about the poll: a null `error` is how
-	 * {@see is_pre_adaptation_stall()} tells a stall an old release diagnosed from every
-	 * other failure, and a record rebuilt from a 0.5.1-or-earlier write keeps the
-	 * schema-8 budget keys absent for the rest of its life. Writing a throw's reason
-	 * into `error` therefore made exactly that record satisfy the one condition this
-	 * release re-drives on — nulling the diagnosis it had just recorded, against staging
-	 * the failure had already reclaimed (issue #25).
+	 * lands in {@see $thrown} and {@see $error} is left null, because the two fields are
+	 * kept apart by what each may disclose rather than by how they read: {@see $error}
+	 * carries nothing the plugin did not write, while this one relays a string the
+	 * plugin caught and cannot vouch for (ADR-0022, issue #25).
 	 *
 	 * The poll is unaffected either way: {@see Rest\Extractions_Controller::error_of()}
 	 * resolves the plugin's own diagnosis first, then this one, then its fallback
@@ -261,7 +252,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_thrown_failure( string $thrown ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown );
 
 	}
 
@@ -287,7 +278,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
 
 	}
 
@@ -298,9 +289,7 @@ final readonly class Extraction_Job {
 	 * died at the same offset enough times and the relevant budget can still shrink.
 	 * Attempts reset so the new size gets a fresh window; the budgets persist so a
 	 * later tick — or a resume after the job has left `running` — packages the smaller
-	 * part rather than rediscovering the same wall. Writing the budgets also
-	 * stamps the schema-8 keys present, so a save cannot drop them from a
-	 * keys-absent record.
+	 * part rather than rediscovering the same wall.
 	 *
 	 * @since 0.6.0
 	 *
@@ -309,54 +298,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
-
-	}
-
-	/**
-	 * Returns a copy re-entered into `running` from `failed`, with a fresh attempt window.
-	 *
-	 * Reserved for a diagnosed stall an earlier release recorded before it could adapt
-	 * (ADR-0015): the job still holds the container and the progress a resume needs, and
-	 * the budgets handed in here are already smaller than the ones it died on. An
-	 * unexpected throw, and a stall this release already adapted, stay failed and never
-	 * reach here. This is also the moment the schema-8 budget keys are written onto a
-	 * record that never had them, so a save cannot omit them and a second
-	 * failure is not resumable.
-	 *
-	 * BOTH failure reasons are cleared, because the job is no longer failed and a
-	 * record being re-driven carries no current one. Leaving either behind would have
-	 * the next poll describe a failure that has already been superseded, and — for
-	 * {@see $thrown} — would attribute the run's next ending to a throwable that
-	 * belongs to the previous attempt.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @param Chunk_Budgets $budgets The adapted bounds to persist across the resume.
-	 * @return self A new record identical to this one but running, with no attempts and neither reason.
-	 */
-	public function with_resume( Chunk_Budgets $budgets ): self {
-
-		return new self( $this->id, Job_State::Running, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, null, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, true, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, null );
-
-	}
-
-	/**
-	 * Whether a stall has ever shrunk this job's packaging budgets.
-	 *
-	 * False means the record still packages at the Config defaults — either because
-	 * nothing has stalled yet, or because it was written by a release that failed a
-	 * stall outright instead of adapting around it. The resume path (ADR-0015) reads it
-	 * as exactly that second thing, which is what keeps an automatic resume from ever
-	 * re-driving a job back into a wall this release has already measured.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @return bool True once any of the three budgets has been adapted down.
-	 */
-	public function has_adapted_budgets(): bool {
-
-		return $this->chunk_size > 0 || $this->table_chunk_bytes > 0 || $this->table_chunk_rows > 0;
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
 
 	}
 
@@ -378,7 +320,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_host_limits( string $host_memory_limit, string $host_max_execution_time, string $raised_memory_limit, string $raised_max_execution_time ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
 
 	}
 
@@ -403,37 +345,6 @@ final readonly class Extraction_Job {
 	}
 
 	/**
-	 * Whether this record is the stranded stall a resume exists for (ADR-0015).
-	 *
-	 * That is a failure a release too old to adapt wrote: it diagnosed a stall — so
-	 * it carries a reason — and the schema-8 budget keys are absent, because that
-	 * release never wrote them. Every failure *this* release writes is one of the
-	 * other three shapes: an unexpected throw (no reason of the plugin's own, whatever
-	 * it recorded in {@see $thrown}), a stall it already shrank its way to the floor
-	 * over (adapted budgets), or a chunk whose bounds it could never shrink at all,
-	 * which is failed with the keys present at zero and the container already discarded.
-	 *
-	 * The signal is the absence of those keys, not their values. This release always
-	 * stamps them — as zero while the job still packages at the Config defaults — so
-	 * a structure-only or index stall is not this shape even though
-	 * {@see has_adapted_budgets()} is also false for it.
-	 *
-	 * This is the one definition of that record shape, because two callers must
-	 * agree about it exactly: the {@see Dispatcher} re-drives it, and the TTL sweep
-	 * spares it while reclaiming every other failed record. A disagreement would
-	 * have the sweep delete the very container the resume is for.
-	 *
-	 * @since 0.6.0
-	 *
-	 * @return bool True when this is a pre-adaptation stall record.
-	 */
-	public function is_pre_adaptation_stall(): bool {
-
-		return $this->state === Job_State::Failed && $this->error !== null && ! $this->budget_keys_present;
-
-	}
-
-	/**
 	 * Serialises the job into the associative array persisted as JSON.
 	 *
 	 * The state crosses the boundary as its backed string value, and the schema
@@ -444,7 +355,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, thrown?: string, chunk_size?: int, table_chunk_bytes?: int, table_chunk_rows?: int, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int, thrown?: string, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
 	 */
 	public function to_array(): array {
 
@@ -465,28 +376,21 @@ final readonly class Extraction_Job {
 			'progressed_at' => $this->progressed_at,
 			'attempts' => $this->attempts,
 			'error' => $this->error,
+			'chunk_size' => $this->chunk_size,
+			'table_chunk_bytes' => $this->table_chunk_bytes,
+			'table_chunk_rows' => $this->table_chunk_rows,
 		];
 
 		// The thrown reason is written only once a throw has recorded one. Its absence
-		// is the ordinary shape of every record that has not failed that way — never a
-		// signal about the release that wrote the record, which is why it is omitted
-		// rather than persisted as an explicit null (issue #25).
+		// is the ordinary shape of every record that has not failed that way, which is
+		// why it is omitted rather than persisted as an explicit null (issue #25).
 		if ( $this->thrown !== null ) {
 			$record['thrown'] = $this->thrown;
 		}
 
-		// A this-release write always stamps the schema-8 budget keys, even when they
-		// are still zero (Config defaults). An older record that never had them must
-		// keep that absence, because it is the resume/sweep signal (ADR-0015).
-		if ( $this->budget_keys_present ) {
-			$record['chunk_size'] = $this->chunk_size;
-			$record['table_chunk_bytes'] = $this->table_chunk_bytes;
-			$record['table_chunk_rows'] = $this->table_chunk_rows;
-		}
-
-		// The first-tick limit pair is written only once it has been measured. An
-		// older schema-8 record, or a job that has not been ticked yet, keeps the
-		// keys absent rather than inventing empty readings.
+		// The first-tick limit pair is written only once it has been measured; a job
+		// that has not been ticked yet keeps the keys absent rather than inventing
+		// empty readings.
 		if ( $this->host_memory_limit !== null ) {
 			$record['host_memory_limit'] = $this->host_memory_limit;
 		}
@@ -500,16 +404,14 @@ final readonly class Extraction_Job {
 			$record['raised_max_execution_time'] = $this->raised_max_execution_time;
 		}
 
-		// Skipped files are a later addition to unreleased schema 8; omit the key
-		// when nothing was skipped so a job that never used strict: false writes
-		// the same record it always did.
+		// Omit the skipped-file list when nothing was skipped, so a job that never used
+		// strict: false carries no key for it at all.
 		if ( $this->skipped_files !== [] ) {
 			$record['skipped_files'] = $this->skipped_files;
 		}
 
-		// The attempt log is a later addition to unreleased schema 8; omit the key
-		// when nothing has been begun so a job that has not been ticked writes the
-		// same record it always did (ADR-0016).
+		// Omit the attempt log until something has been begun, so a job that has not
+		// been ticked carries no key for it at all (ADR-0016).
 		if ( $this->attempt_log !== [] ) {
 			$serialized = [];
 			foreach ( $this->attempt_log as $attempt ) {
@@ -550,78 +452,74 @@ final readonly class Extraction_Job {
 		$tables = self::string_list( $data['tables'] ?? null );
 		$files = self::string_list( $data['files'] ?? null );
 
-		// The structure-only selection is a schema-5 addition (issue #16); a record
-		// written before it simply carries none, so an absent value reads as the empty
-		// selection rather than disqualifying the record. A present-but-ill-typed value,
-		// by contrast, is a malformed selection and yields null, which fails the record.
-		$structure_only = array_key_exists( 'structure_only', $data ) ? self::string_list( $data['structure_only'] ) : [];
+		// The structure-only selection (issue #16) is written by every release this one
+		// understands, so an absent value is not an empty selection but a record from a
+		// release this one does not read (ADR-0024), and yields null like a malformed
+		// one does.
+		$structure_only = self::string_list( $data['structure_only'] ?? null );
 		$created_at = $data['created_at'] ?? null;
 		$updated_at = $data['updated_at'] ?? null;
 		$tick_secret = $data['tick_secret'] ?? null;
 		$artifact = $data['artifact'] ?? null;
 
-		// Build-progress is a schema-3 addition; an older record (or one whose build
-		// has not begun) simply carries none, so its absence is never disqualifying.
+		// Build-progress is written as an explicit null until the build begins, so a
+		// null — or a key an unfinished create never got to — reads as "not begun"
+		// rather than disqualifying the record.
 		$progress = array_key_exists( 'progress', $data ) && $data['progress'] !== null ? Build_Progress::from_array( $data['progress'] ) : null;
 
-		// The last-progress timestamp is a schema-4 addition; an older record (or one
-		// that has not progressed) carries none, and the sweep treats a null as the
-		// creation time. A present-but-ill-typed value is read as absent rather than
-		// disqualifying the whole record, so a hand-edited stamp never makes a live job
-		// unreadable — the ceiling simply falls back to the creation time for it.
+		// The last-progress timestamp is null until a chunk has advanced, and the sweep
+		// treats that null as the creation time. A present-but-ill-typed value is read
+		// as absent rather than disqualifying the whole record, so a hand-edited stamp
+		// never makes a live job unreadable — the ceiling simply falls back to the
+		// creation time for it.
 		$progressed_at = ( isset( $data['progressed_at'] ) && is_int( $data['progressed_at'] ) && $data['progressed_at'] >= 0 ) ? $data['progressed_at'] : null;
 
-		// The attempt counter and the failure reason are schema-6 additions (ADR-0013);
-		// an older record carries neither, so an absent counter reads as no attempts yet
-		// and an absent reason as none recorded. Both are read leniently, like the
-		// timestamp above: a hand-edited value falls back to its default rather than
-		// making a live job unreadable, since neither can corrupt an artifact — the
-		// counter merely costs one more attempt before the stall is called.
+		// The attempt counter and the diagnosed failure reason (ADR-0013) are on every
+		// record this release understands — the reason as an explicit null until one is
+		// written — so an absent KEY disqualifies the record (ADR-0024). A present but
+		// ill-typed VALUE still falls back to its default: a hand-edited counter costs
+		// one more attempt before the stall is called and can corrupt no artifact, so it
+		// must not make a live job unreadable.
+		$has_stall_fields = array_key_exists( 'attempts', $data ) && array_key_exists( 'error', $data );
 		$attempts = ( isset( $data['attempts'] ) && is_int( $data['attempts'] ) && $data['attempts'] >= 0 ) ? $data['attempts'] : 0;
 		$error = is_string( $data['error'] ?? null ) ? $data['error'] : null;
 
-		// The thrown reason is a later addition to unreleased schema 8 (issue #25); an
-		// absent or ill-typed value reads as nothing thrown, which is the ordinary shape
-		// of a record that has not failed that way. Unlike the budget keys below, this
-		// absence says nothing about which release wrote the record and is never read as
-		// a legacy signal.
+		// The thrown reason is written only once a throw has recorded one (issue #25), so
+		// an absent or ill-typed value reads as nothing thrown — the ordinary shape of a
+		// record that has not failed that way, and never a statement about the release
+		// that wrote it.
 		$thrown = is_string( $data['thrown'] ?? null ) ? $data['thrown'] : null;
 
-		// The per-job packaging budgets are a schema-8 addition (ADR-0015); an older
-		// record carries none of them, so an absent value reads as "use the Config
-		// default" rather than disqualifying the record. That absence is also what
-		// identifies a pre-adaptation stall ({@see is_pre_adaptation_stall()}): it is
-		// remembered here so a later save of the same record can omit the keys again,
-		// rather than writing zeroes that would look like a this-release write. A
-		// present-but-ill-typed value falls back the same way: a hand-edited budget
-		// never makes a live job unreadable, it just starts the next stall from the
-		// configured size.
-		$budget_keys_present = array_key_exists( 'chunk_size', $data )
-			|| array_key_exists( 'table_chunk_bytes', $data )
-			|| array_key_exists( 'table_chunk_rows', $data );
+		// The per-job packaging budgets (ADR-0015) are stamped by every release this one
+		// understands, as zero while the job still packages at the Config defaults, so an
+		// absent key disqualifies the record (ADR-0024). An ill-typed value falls back to
+		// zero for the same reason the counter above does: it starts the next stall from
+		// the configured size and makes nothing unreadable.
+		$has_budget_keys = array_key_exists( 'chunk_size', $data )
+			&& array_key_exists( 'table_chunk_bytes', $data )
+			&& array_key_exists( 'table_chunk_rows', $data );
 		$chunk_size = ( isset( $data['chunk_size'] ) && is_int( $data['chunk_size'] ) && $data['chunk_size'] >= 0 ) ? $data['chunk_size'] : 0;
 		$table_chunk_bytes = ( isset( $data['table_chunk_bytes'] ) && is_int( $data['table_chunk_bytes'] ) && $data['table_chunk_bytes'] >= 0 ) ? $data['table_chunk_bytes'] : 0;
 		$table_chunk_rows = ( isset( $data['table_chunk_rows'] ) && is_int( $data['table_chunk_rows'] ) && $data['table_chunk_rows'] >= 0 ) ? $data['table_chunk_rows'] : 0;
 
-		// The first-tick limit pair is a later addition to unreleased schema 8; an
-		// older write carries none of them, so an absent or ill-typed value reads
-		// as not-yet-measured rather than disqualifying the record.
+		// The first-tick limit pair is written only once a tick has measured it, so an
+		// absent or ill-typed value reads as not-yet-measured rather than disqualifying
+		// the record.
 		$host_memory_limit = is_string( $data['host_memory_limit'] ?? null ) ? $data['host_memory_limit'] : null;
 		$host_max_execution_time = is_string( $data['host_max_execution_time'] ?? null ) ? $data['host_max_execution_time'] : null;
 		$raised_memory_limit = is_string( $data['raised_memory_limit'] ?? null ) ? $data['raised_memory_limit'] : null;
 		$raised_max_execution_time = is_string( $data['raised_max_execution_time'] ?? null ) ? $data['raised_max_execution_time'] : null;
 
-		// Skipped files are a later addition to unreleased schema 8; an older write
-		// carries none, so an absent or ill-typed value reads as nothing skipped
-		// rather than disqualifying the record.
+		// The skipped-file list is omitted when nothing was skipped, so an absent or
+		// ill-typed value reads as exactly that rather than disqualifying the record.
 		$skipped_files = array_key_exists( 'skipped_files', $data ) ? self::string_list( $data['skipped_files'] ) : [];
 		if ( $skipped_files === null ) {
 			$skipped_files = [];
 		}
 
-		// The attempt log is a later addition to unreleased schema 8; an older write
-		// carries none, so an absent or ill-typed value reads as nothing begun rather
-		// than disqualifying the record. A malformed entry is dropped, not fatal.
+		// The attempt log is omitted until a tick has begun something, so an absent or
+		// ill-typed value reads as nothing begun rather than disqualifying the record.
+		// A malformed entry is dropped, not fatal.
 		$attempt_log = [];
 		if ( isset( $data['attempt_log'] ) && is_array( $data['attempt_log'] ) && array_is_list( $data['attempt_log'] ) ) {
 			foreach ( $data['attempt_log'] as $entry ) {
@@ -635,9 +533,10 @@ final readonly class Extraction_Job {
 			}
 		}
 
-		// Reject the record unless every field is present and correctly typed; a
-		// pre-execution record without the tick secret or artifact name is a schema
-		// this release cannot drive, so it reads as no readable job here.
+		// Reject the record unless every field this release writes is present and
+		// correctly typed. That includes the keys an older release never wrote: this
+		// release understands the shapes it writes and no others (ADR-0024), so such a
+		// record reads as no readable job here and its enumeration simply skips it.
 		if ( $state === null
 			|| ! is_string( $id ) || $id === ''
 			|| ! is_int( $owner )
@@ -648,11 +547,13 @@ final readonly class Extraction_Job {
 			|| ! is_int( $created_at )
 			|| ! is_int( $updated_at )
 			|| ! is_string( $tick_secret ) || $tick_secret === ''
-			|| ! is_string( $artifact ) || $artifact === '' ) {
+			|| ! is_string( $artifact ) || $artifact === ''
+			|| ! $has_stall_fields
+			|| ! $has_budget_keys ) {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $budget_keys_present, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown );
 
 	}
 

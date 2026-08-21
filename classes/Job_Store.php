@@ -76,9 +76,8 @@ final class Job_Store {
 	 * concurrent one is refused with 429. Resolved through the Config seam under
 	 * `max_active_jobs`, so a site raises it with the `KNTNT_EXTRACTOR_MAX_ACTIVE_JOBS`
 	 * constant or the matching filter. It lives here, beside the count it bounds,
-	 * because two callers now ask about the slot — the create endpoint and the resume
-	 * path (ADR-0015) — and a ceiling defined once per caller is a ceiling that
-	 * eventually differs between them.
+	 * rather than in the endpoint that refuses on it, so the ceiling and the count it
+	 * is compared against cannot drift apart.
 	 *
 	 * @since 0.6.0
 	 */
@@ -371,13 +370,13 @@ final class Job_Store {
 	/**
 	 * Whether the site's concurrency ceiling leaves room for one more live job.
 	 *
-	 * The single answer to "may another job occupy the slot", so the create endpoint
-	 * and the resume path (ADR-0015) cannot drift apart on where the ceiling sits or
-	 * how a misconfigured knob is clamped. It is asked in two situations: before
-	 * claiming the slot, and — by a caller that has already committed a job into it —
-	 * to confirm nothing else claimed it in the same window. `$already_taken` is what
-	 * separates them: it discounts jobs the caller itself just made active, so the
-	 * second question is not answered no by the caller's own job.
+	 * The single answer to "may another job occupy the slot", so no caller carries its
+	 * own idea of where the ceiling sits or how a misconfigured knob is clamped. It is
+	 * asked in two situations: before claiming the slot, and — by a caller that has
+	 * already committed a job into it — to confirm nothing else claimed it in the same
+	 * window. `$already_taken` is what separates them: it discounts jobs the caller
+	 * itself just made active, so the second question is not answered no by the
+	 * caller's own job.
 	 *
 	 * @since 0.6.0
 	 *
@@ -564,12 +563,11 @@ final class Job_Store {
 	/**
 	 * Deletes a failed job's in-progress container and sidecar, keeping the record.
 	 *
-	 * A job this release fails is never resumable (ADR-0015), so the partial
+	 * A failed job is terminal in both directions (ADR-0024), so its partial
 	 * container is residue the stranded-job sweep cannot see — `GET /extractions`
 	 * lists only non-terminal jobs. Reclaiming the large files at fail-time is
 	 * what empties the staging the next clone would otherwise select. The small
-	 * record stays so a poll still reports `failed` with its reason. A
-	 * pre-adaptation stall must not reach here: its container is the resume.
+	 * record stays so a poll still reports `failed` with its reason.
 	 *
 	 * Each path is realpath-checked to sit inside this job's own directory, the
 	 * same pin {@see delete_artifact()} uses, so a hand-edited token cannot

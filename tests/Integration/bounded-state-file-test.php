@@ -34,12 +34,14 @@
  *  - AC5 (both anchors roll back together): a crash that leaves garbage past the
  *    committed offset in the container AND in the index sidecar is truncated away on
  *    resume, so the two never disagree about how far the build got.
- *  - AC6 (an in-flight build survives the upgrade): a job whose record was written
- *    under schema 6 — its segment names in the record, no sidecar on disk — resumes
- *    with those names intact and publishes an index naming every segment, including
- *    the ones sealed before the upgrade. The failure this rules out is the silent one:
- *    such a container is well-framed and opens cleanly, and would simply be missing
- *    most of its names.
+ *  - AC6 (a build begun under schema 6 is skipped, not migrated): the migration that
+ *    rebuilt the sidecar from a schema-6 record's in-record name list retired with the
+ *    rest of ADR-0015's back-compatibility cluster (#52, ADR-0024). Such a record is
+ *    no longer read at all, and what this pins is that it says so quietly — a 404,
+ *    with the record left where it lies and the jobs beside it untouched — rather than
+ *    resuming into a container whose index would name only the segments sealed after
+ *    the upgrade. That silent, well-framed, mostly-nameless artifact is the failure
+ *    the migration existed to rule out, and skipping the record rules it out too.
  *
  * @package Kntnt\Extractor
  * @since   0.6.0
@@ -351,7 +353,7 @@ kntnt_extractor_assert(
 	'The crashed sidecar bytes are truncated away, so the sealed index names exactly the selection in order (AC5)',
 );
 
-// --- AC6: a build begun under schema 6 resumes with its names intact -------------
+// --- AC6: a build begun under schema 6 is skipped, not migrated -----------------
 
 wp_set_current_user( $bsf_owner->ID );
 $bsf_l_created = $bsf_post( $bsf_selection )->get_data();
@@ -360,57 +362,46 @@ $bsf_l_state_file = $bsf_work . '/' . $bsf_l_id . '/state.json';
 $bsf_l_state = json_decode( (string) file_get_contents( $bsf_l_state_file ), true );
 $bsf_l_secret = is_array( $bsf_l_state ) && is_string( $bsf_l_state['tick_secret'] ?? null ) ? $bsf_l_state['tick_secret'] : '';
 
-// Seal a few segments, so the migration has real committed names to carry rather than
-// an empty list any implementation would get right.
+// Seal a few segments, so the record stripped below is a build genuinely part way
+// through rather than one nothing would have been lost by abandoning.
 $bsf_tick( $bsf_l_id, $bsf_l_secret );
 $bsf_tick( $bsf_l_id, $bsf_l_secret );
 $bsf_tick( $bsf_l_id, $bsf_l_secret );
+kntnt_extractor_assert( $bsf_find_file( $bsf_work, $bsf_l_id, '.names' ) !== '', 'The schema-6 case has a real sidecar before the record is rewritten (AC6 precondition)' );
 
 // Rewrite the record into the shape 0.5.1 left behind — the ordered names in the
-// record, no segment count, no index offset — and delete the sidecar, which no release
-// before this one ever wrote. This is exactly the on-disk state an operator installing
-// the upgrade over a running extraction would create.
+// record, no segment count, no index offset, and none of the keys releases after it
+// added — and delete the sidecar, which no release before this one ever wrote. This
+// is exactly the on-disk state an operator installing the upgrade over a running
+// extraction would create.
 $bsf_sealed_so_far = array_slice( array_merge( [ $wpdb->options ], $bsf_files ), 0, 3 );
 $bsf_l_state = json_decode( (string) file_get_contents( $bsf_l_state_file ), true );
 $bsf_l_state['version'] = 6;
 $bsf_l_state['progress']['segment_names'] = $bsf_sealed_so_far;
 unset( $bsf_l_state['progress']['segment_count'], $bsf_l_state['progress']['index_bytes'] );
+unset( $bsf_l_state['attempts'], $bsf_l_state['error'], $bsf_l_state['chunk_size'], $bsf_l_state['table_chunk_bytes'], $bsf_l_state['table_chunk_rows'] );
 file_put_contents( $bsf_l_state_file, (string) wp_json_encode( $bsf_l_state ) );
 @unlink( $bsf_find_file( $bsf_work, $bsf_l_id, '.names' ) );
 clearstatcache();
 
-// The poll reads the migrated record without the sidecar, so the liveness counter
-// survives the upgrade even before the build is touched again.
-$bsf_l_poll = $bsf_get( $bsf_l_id )->get_data();
-kntnt_extractor_assert(
-	is_array( $bsf_l_poll ) && is_array( $bsf_l_poll['progress'] ?? null ) && ( $bsf_l_poll['progress']['chunks_done'] ?? null ) === 3,
-	'A schema-6 record still reports its chunks_done, counted from the names it carries (AC6)',
-);
+// The record is not read at all, so there is no migration to get right and no
+// half-nameless container to publish. It answers as no such job.
+kntnt_extractor_assert( $bsf_get( $bsf_l_id )->get_status() === 404, 'A schema-6 record is no longer read, so its poll is a 404 rather than a migration (AC6)' );
 
-$bsf_l_ticks = 0;
-while ( $bsf_l_ticks < 200 ) {
-	$bsf_l_current = $bsf_get( $bsf_l_id )->get_data();
-	if ( is_array( $bsf_l_current ) && in_array( $bsf_l_current['state'] ?? null, [ 'ready', 'failed' ], true ) ) {
-		break;
-	}
-	$bsf_tick( $bsf_l_id, $bsf_l_secret );
-	$bsf_l_ticks++;
-}
-
-$bsf_l_ready = $bsf_get( $bsf_l_id )->get_data();
+// A further tick has nothing to drive: the record is left byte for byte as it was
+// found, and no container is opened over the one the build already had.
+$bsf_tick( $bsf_l_id, $bsf_l_secret );
+$bsf_l_after = json_decode( (string) file_get_contents( $bsf_l_state_file ), true );
 kntnt_extractor_assert(
-	is_array( $bsf_l_ready ) && ( $bsf_l_ready['state'] ?? null ) === 'ready',
-	'A build begun under schema 6 resumes after the upgrade rather than failing or being abandoned (AC6)',
+	is_array( $bsf_l_after ) && ( $bsf_l_after['progress']['segment_names'] ?? null ) === $bsf_sealed_so_far && ! array_key_exists( 'attempts', $bsf_l_after ),
+	'A further tick neither revives the schema-6 record nor rewrites it (AC6)',
 );
+kntnt_extractor_assert( $bsf_find_file( $bsf_work, $bsf_l_id, '.names' ) === '', 'No sidecar is reconstructed for it, because nothing reseeds one any more (AC6)' );
 
-$bsf_l_url = is_array( $bsf_l_ready ) && is_string( $bsf_l_ready['download_url'] ?? null ) ? $bsf_l_ready['download_url'] : '';
-$bsf_l_path = $bsf_l_url !== '' ? $bsf_basedir . substr( $bsf_l_url, strlen( $bsf_baseurl ) ) : '';
-$bsf_l_raw = $bsf_l_path !== '' && is_file( $bsf_l_path ) ? (string) file_get_contents( $bsf_l_path ) : '';
-$bsf_l_names = $bsf_index_of( $bsf_l_raw, $bsf_keypair );
-kntnt_extractor_assert(
-	$bsf_l_names === array_merge( [ $wpdb->options ], $bsf_files ),
-	'The migrated build seals an index naming every segment, the ones written before the upgrade included (AC6)',
-);
+// The job beside it is unaffected, which is what makes skipping the unreadable one
+// safe: one stale record on disk must not cost the jobs around it (ADR-0024).
+$bsf_beside = $bsf_get( $bsf_r_id )->get_data();
+kntnt_extractor_assert( is_array( $bsf_beside ) && ( $bsf_beside['state'] ?? null ) === 'ready', 'The finished job beside the skipped record still polls as ready (AC6)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $bsf_intercept, 10 );

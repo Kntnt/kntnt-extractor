@@ -1,53 +1,36 @@
 <?php
 /**
- * Integration test: a failed job resumes from persisted progress, and a stalled
- * chunk shrinks rather than killing the run.
+ * Integration test: a stalled chunk shrinks rather than killing the run, and a
+ * failed job stays failed.
  *
- * A job that has left `running` used to be unrecoverable: the next attempt was a
- * fresh `POST /extractions` from segment zero, so every crash cost the whole run.
- * The state needed to continue already existed — `Build_Progress`, the append-only
- * container, `Sealed_Writer`'s truncate-on-resume — and what was missing was
- * permission, plus a way to not walk straight back into the same wall. This file
- * drives both halves end to end against the live REST server.
+ * A chunk that dies outside PHP — killed at a memory or execution-time limit, so
+ * no `catch` runs — used to cost the whole run. It now first asks the host for
+ * room, then halves the bounds the dead chunk actually spends, and fails the job
+ * only once they are all at their floor (ADR-0015). This file drives that end to
+ * end against the live REST server.
  *
- * Which failures resume is narrower than "any diagnosed stall", and the distinction
- * is the point of half these cases. A stall this release meets never fails the job
- * while its budget can still shrink — it halves and carries on — so the only stall
- * that reaches `failed` here is one already at the floor, and re-driving that would
- * walk back into a wall already measured all the way down. What resume is actually
- * for is the record an EARLIER release left behind: stalled, failed at the first
- * wall, budgets never tried at anything smaller. That is a job stranded by an
- * upgrade, and it is recovered rather than restarted from segment zero. The absence
- * of the schema-8 budget keys is what identifies it, so the cases below write those
- * records the way 0.5.1 wrote them — without the keys — rather than with the keys
- * zeroed, which no release ever produced.
+ * The other half of that decision — re-driving a stall an earlier release left
+ * behind — has retired (ADR-0024, and ADR-0015's addendum). `failed` is now
+ * terminal in both directions, and the cases below are what pin the second
+ * direction: no tick and no watchdog patrol re-enters a failed job into
+ * `running`, whichever shape the failure came in and whichever release wrote it.
  *
  * It pins:
- *  - AC1: a pre-adaptation record marked `failed` after a diagnosed stall is
- *    re-driven from its persisted progress by a further tick. Garbage appended past
- *    `container_bytes` — the crash-mid-chunk shape — is truncated away, the
- *    committed prefix is kept, and the finished container reassembles without a
- *    duplicated segment. The saved record carries the schema-8 budget keys, so a
- *    second failure of the same job is no longer a pre-adaptation stall.
  *  - AC2: a chunk begun repeatedly without finishing does not fail the job while
  *    its budget can still shrink. The file-part size is halved, the attempt
  *    counter is reset, and the job stays `running` and reaches `ready`.
  *  - AC3: a budget already at the floor of one byte still fails the job, with the
- *    stall reason naming the chunk. Adaptation is not an infinite retry — and
- *    neither is resume: a failure this release adapted its way into is never
- *    re-driven, whatever its budgets would still allow.
- *  - AC4: a job that failed opaquely (an unexpected throw, `error` null) is not
- *    resumed. Automatic resume of a permanent error would loop forever.
- *  - AC5: the watchdog restarts a pre-adaptation stall-failed job the same way it
- *    restarts a stale running one, and leaves an opaque failure alone.
- *  - AC6: a resume is declined when the concurrency ceiling has no room, because a
- *    failed job frees its slot and a create may already have taken it. The same
- *    record resumes once there is room, which is the control proving the refusal
- *    was the ceiling.
+ *    stall reason naming the chunk. Adaptation is not an infinite retry, and a
+ *    job it has failed is not re-driven however much budget it has left.
+ *  - AC4: nothing re-enters a failed job into `running` — not a further tick and
+ *    not a watchdog patrol — for a failure carrying no diagnosis of its own, for
+ *    one the plugin diagnosed, or for the record 0.5.1 wrote, which used to be
+ *    the single exception and is now not a readable job at all.
+ *  - P3: a stall whose chunk spends no bound at all still fails the job and still
+ *    discards its staging, keeping only the small record a poll reads.
  *  - P8.1: the first tick persists the pre-raise and post-raise host-limit pair
- *    on the job, a later tick's stall reason names that pair rather than the
- *    live process, and a schema-8 record written without the new fields still
- *    parses.
+ *    on the job, and a later tick's stall reason names that pair rather than the
+ *    live process.
  *
  * @package Kntnt\Extractor
  * @since   0.6.0
@@ -308,71 +291,6 @@ foreach ( $a_container['records'] as $i => $record ) {
 }
 kntnt_extractor_assert( $a_reassembled === $fixture_bytes, 'The adapted file reassembles to the original bytes (AC2)' );
 
-// --- AC1: a failed stall-job resumes, truncating an unacknowledged tail ---
-
-wp_set_current_user( $owner->ID );
-$r_response = $post_extractions( $selection );
-$r_id = is_array( $r_response->get_data() ) ? (string) ( $r_response->get_data()['id'] ?? '' ) : '';
-$r_secret = (string) ( ( $read_state( $work, $r_id ) ?? [] )['tick_secret'] ?? '' );
-
-// Seal the table and the first file part so there is a committed prefix to keep.
-$tick( $r_id, $r_secret );
-$tick( $r_id, $r_secret );
-$r_partial = $read_state( $work, $r_id ) ?? [];
-$r_progress = is_array( $r_partial['progress'] ?? null ) ? $r_partial['progress'] : [];
-$r_build = $build_file_of( $work, $r_id );
-$committed_bytes = is_int( $r_progress['container_bytes'] ?? null ) ? $r_progress['container_bytes'] : 0;
-$committed_prefix = $r_build !== '' && $committed_bytes > 0 ? substr( (string) file_get_contents( $r_build ), 0, $committed_bytes ) : '';
-kntnt_extractor_assert( strlen( $committed_prefix ) === $committed_bytes && $committed_bytes > 0, 'The committed prefix is captured before the crash (AC1)' );
-
-// Simulate a tick killed after appending bytes it never acknowledged, then drop the
-// job to failed exactly as 0.5.1 did: a spent attempt counter, a recorded reason, and
-// no budget keys at all, because that release had none to write. That is the record a
-// stranded production run is found in after this plugin is upgraded over it.
-if ( $r_build !== '' ) {
-	file_put_contents( $r_build, random_bytes( 32 ), FILE_APPEND );
-}
-$r_partial['state'] = 'failed';
-$r_partial['attempts'] = 3;
-$r_partial['error'] = 'The extraction stalled: 3 consecutive attempts to package a file ended without advancing.';
-unset( $r_partial['chunk_size'], $r_partial['table_chunk_bytes'], $r_partial['table_chunk_rows'] );
-$write_state( $work, $r_id, $r_partial );
-
-$tick( $r_id, $r_secret );
-$r_resumed = $read_state( $work, $r_id ) ?? [];
-kntnt_extractor_assert( ( $r_resumed['state'] ?? null ) !== 'failed', 'A further tick re-drives a stall-failed job instead of no-opping (AC1)' );
-kntnt_extractor_assert( ( $r_resumed['attempts'] ?? null ) === 0, 'Resuming a failed job resets the spent attempt counter (AC1)' );
-kntnt_extractor_assert(
-	array_key_exists( 'chunk_size', $r_resumed )
-	&& array_key_exists( 'table_chunk_bytes', $r_resumed )
-	&& array_key_exists( 'table_chunk_rows', $r_resumed ),
-	'A resume stamps the schema-8 budget keys onto the saved record (AC1)'
-);
-$r_resumed_job = ( new Job_Store( new Config() ) )->find( $r_id );
-kntnt_extractor_assert( $r_resumed_job !== null && $r_resumed_job->budget_keys_present, 'The reloaded resume has the schema-8 budget keys (AC1)' );
-kntnt_extractor_assert( $r_resumed_job !== null && ! $r_resumed_job->with_failure( 'The extraction stalled: 3 consecutive attempts ended without advancing.' )->is_pre_adaptation_stall(), 'A second failure after resume is not a pre-adaptation stall (AC1)' );
-
-$drive_to_ready( $r_id, $r_secret );
-$r_ready = $get_extraction( $r_id )->get_data();
-kntnt_extractor_assert( is_array( $r_ready ) && ( $r_ready['state'] ?? null ) === 'ready', 'A resumed failed job reaches ready (AC1)' );
-
-$r_raw = $artifact_bytes( is_array( $r_ready ) ? $r_ready : [] );
-kntnt_extractor_assert( $committed_prefix !== '' && str_starts_with( $r_raw, $committed_prefix ), 'The resumed artifact keeps the exact committed prefix — the unacknowledged tail was truncated, not sealed (AC1)' );
-
-$r_container = $parse( $r_raw );
-$r_names = $open_index( $r_container['sealed_index'], $keypair );
-$r_file_parts = is_array( $r_names ) ? count( array_filter( $r_names, static fn( string $n ): bool => $n === $fixture_rel ) ) : 0;
-kntnt_extractor_assert( $r_file_parts >= 2, 'The resumed container still splits the file into parts (AC1)' );
-
-$r_reassembled = '';
-foreach ( $r_container['records'] as $i => $record ) {
-	$plain = $open_segment( $record, $keypair );
-	if ( is_string( $plain ) && is_array( $r_names ) && ( $r_names[ $i ] ?? null ) === $fixture_rel ) {
-		$r_reassembled .= $plain;
-	}
-}
-kntnt_extractor_assert( $r_reassembled === $fixture_bytes, 'The resumed file reassembles despite the crash mid-chunk (AC1)' );
-
 // --- AC3: a budget already at one byte still fails the job ---
 
 wp_set_current_user( $owner->ID );
@@ -421,89 +339,66 @@ $tick( $f_id, $f_secret );
 $f_adapted_after = $read_state( $work, $f_id ) ?? [];
 kntnt_extractor_assert( ( $f_adapted_after['state'] ?? null ) === 'failed', 'A stall this release already adapted around is never re-driven, however much budget is left (AC3)' );
 
-// --- AC4: an opaque throw-failure is not resumed ---
+// --- AC4: nothing ever re-enters a failed job into `running` ---
 
-wp_set_current_user( $owner->ID );
-$t_response = $post_extractions( $selection );
-$t_id = is_array( $t_response->get_data() ) ? (string) ( $t_response->get_data()['id'] ?? '' ) : '';
-$t_secret = (string) ( ( $read_state( $work, $t_id ) ?? [] )['tick_secret'] ?? '' );
-$tick( $t_id, $t_secret );
-$t_state = $read_state( $work, $t_id ) ?? [];
-$t_state['state'] = 'failed';
-$t_state['error'] = null;
-$write_state( $work, $t_id, $t_state );
-$tick( $t_id, $t_secret );
-$t_after = $read_state( $work, $t_id ) ?? [];
-kntnt_extractor_assert( ( $t_after['state'] ?? null ) === 'failed', 'An opaque failed job is not re-driven (AC4)' );
-
-// --- AC5: the watchdog resumes a stall-failed job and ignores an opaque one ---
+// `failed` frees the concurrency slot, and it is terminal in the other direction
+// too: no tick, no watchdog patrol, and no other path puts a failed job back into
+// `running` (ADR-0024, and ADR-0015's addendum). Three shapes are driven through
+// both actors that could. Two are what this release writes — a failure carrying
+// no diagnosis of its own, which is what an unexpected throw leaves, and a stall
+// the plugin diagnosed itself. The third is the record 0.5.1 wrote, with no
+// budget keys at all: it used to be the one failure a tick re-drove, and it is
+// now not a readable job at all, so what it is left as is what it was found as.
 
 $store = new Job_Store( new Config() );
 $dispatcher = new Dispatcher( $store, new Config(), new Artifact_Builder( new Table_Dumper(), new Config() ) );
 $watchdog = new Watchdog( $store, $dispatcher );
 
-wp_set_current_user( $owner->ID );
-$w_response = $post_extractions( $selection );
-$w_id = is_array( $w_response->get_data() ) ? (string) ( $w_response->get_data()['id'] ?? '' ) : '';
-$tick( $w_id, (string) ( ( $read_state( $work, $w_id ) ?? [] )['tick_secret'] ?? '' ) );
-$w_state = $read_state( $work, $w_id ) ?? [];
-$w_state['state'] = 'failed';
-$w_state['attempts'] = 3;
-$w_state['error'] = 'The extraction stalled: 3 consecutive attempts ended without advancing.';
-$w_state['updated_at'] = time() - 86400;
-unset( $w_state['chunk_size'], $w_state['table_chunk_bytes'], $w_state['table_chunk_rows'] );
-$write_state( $work, $w_id, $w_state );
+// Plants a failed record of a given shape on top of a real, once-ticked job, so
+// each case carries genuine progress and a container rather than a bare fixture,
+// and is stamped stale enough that the watchdog counts it as untended.
+$plant_failure = static function ( array $overrides, array $drop ) use ( $post_extractions, $read_state, $write_state, $tick, $work, $owner, $selection ): string {
 
-$opaque_response = $post_extractions( $selection );
-$opaque_id = is_array( $opaque_response->get_data() ) ? (string) ( $opaque_response->get_data()['id'] ?? '' ) : '';
-$tick( $opaque_id, (string) ( ( $read_state( $work, $opaque_id ) ?? [] )['tick_secret'] ?? '' ) );
-$opaque_state = $read_state( $work, $opaque_id ) ?? [];
-$opaque_state['state'] = 'failed';
-$opaque_state['error'] = null;
-$opaque_state['updated_at'] = time() - 86400;
-$write_state( $work, $opaque_id, $opaque_state );
+	wp_set_current_user( $owner->ID );
+	$created = $post_extractions( $selection )->get_data();
+	$id = is_array( $created ) ? (string) ( $created['id'] ?? '' ) : '';
+	$tick( $id, (string) ( ( $read_state( $work, $id ) ?? [] )['tick_secret'] ?? '' ) );
+	$state = array_merge( $read_state( $work, $id ) ?? [], $overrides );
+	foreach ( $drop as $key ) {
+		unset( $state[ $key ] );
+	}
+	$write_state( $work, $id, $state );
 
-$driven = $watchdog->patrol();
-$driven_ids = array_map( static fn( $job ): string => $job->id, $driven );
-kntnt_extractor_assert( in_array( $w_id, $driven_ids, true ), 'The watchdog restarts a stall-failed job (AC5)' );
-kntnt_extractor_assert( ! in_array( $opaque_id, $driven_ids, true ), 'The watchdog leaves an opaque failed job alone (AC5)' );
-kntnt_extractor_assert( ( ( $read_state( $work, $w_id ) ?? [] )['state'] ?? null ) !== 'failed', 'The stall-failed job the watchdog drove is no longer failed (AC5)' );
-kntnt_extractor_assert( ( ( $read_state( $work, $opaque_id ) ?? [] )['state'] ?? null ) === 'failed', 'The opaque failed job is still failed after the patrol (AC5)' );
+	return $id;
+};
 
-// --- AC6: a resume never takes a slot the concurrency ceiling has already given away ---
+$stall_reason = 'The extraction stalled: 3 consecutive attempts ended without advancing.';
+$stale = time() - 86400;
+$shapes = [
+	'a failure carrying no diagnosis of its own' => $plant_failure( [ 'state' => 'failed', 'error' => null, 'updated_at' => $stale ], [] ),
+	'a stall this release diagnosed' => $plant_failure( [ 'state' => 'failed', 'attempts' => 3, 'error' => $stall_reason, 'updated_at' => $stale ], [] ),
+	'the record 0.5.1 wrote' => $plant_failure( [ 'state' => 'failed', 'attempts' => 3, 'error' => $stall_reason, 'updated_at' => $stale ], [ 'chunk_size', 'table_chunk_bytes', 'table_chunk_rows' ] ),
+];
 
-// A failed job is terminal and frees its slot, so a `POST /extractions` may have taken
-// it in the meantime. Re-entering `running` occupies it again, and doing that past the
-// ceiling would put two live builds on a site whose whole design says one. The same
-// job is ticked twice against two different ceilings, so the second result is the
-// control for the first: whatever refuses the resume under a full ceiling demonstrably
-// is the ceiling, and not some other property of the record.
-wp_set_current_user( $owner->ID );
-$c_response = $post_extractions( $selection );
-$c_id = is_array( $c_response->get_data() ) ? (string) ( $c_response->get_data()['id'] ?? '' ) : '';
-$c_secret = (string) ( ( $read_state( $work, $c_id ) ?? [] )['tick_secret'] ?? '' );
-$tick( $c_id, $c_secret );
-$c_state = $read_state( $work, $c_id ) ?? [];
-$c_state['state'] = 'failed';
-$c_state['attempts'] = 3;
-$c_state['error'] = 'The extraction stalled: 3 consecutive attempts to package a file ended without advancing.';
-unset( $c_state['chunk_size'], $c_state['table_chunk_bytes'], $c_state['table_chunk_rows'] );
-$write_state( $work, $c_id, $c_state );
+// The driver's own opportunity to re-drive one: a further tick against the job.
+foreach ( $shapes as $shape => $shape_id ) {
+	$tick( $shape_id, (string) ( ( $read_state( $work, $shape_id ) ?? [] )['tick_secret'] ?? '' ) );
+	kntnt_extractor_assert( ( ( $read_state( $work, $shape_id ) ?? [] )['state'] ?? null ) === 'failed', sprintf( 'A further tick leaves %s failed rather than re-entering it into running (AC4)', $shape ) );
+}
 
-// A live job now holds the only slot a ceiling of one allows.
-$rival_response = $post_extractions( $selection );
-$rival_id = is_array( $rival_response->get_data() ) ? (string) ( $rival_response->get_data()['id'] ?? '' ) : '';
-$full = static fn(): int => 1;
-add_filter( 'kntnt_extractor_config_max_active_jobs', $full, 20 );
-$tick( $c_id, $c_secret );
-kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['state'] ?? null ) === 'failed', 'A resume that would exceed the concurrency ceiling is declined (AC6)' );
-kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['error'] ?? null ) !== null, 'A declined resume leaves the failure reason intact, so the job is exactly as it was found (AC6)' );
+// The watchdog is the other actor, and the wider one: it walks every job on disk,
+// including the ones GET /extractions does not list.
+$patrolled = array_map( static fn( $job ): string => $job->id, $watchdog->patrol() );
+foreach ( $shapes as $shape => $shape_id ) {
+	kntnt_extractor_assert( ! in_array( $shape_id, $patrolled, true ), sprintf( 'The watchdog does not restart %s (AC4)', $shape ) );
+	kntnt_extractor_assert( ( ( $read_state( $work, $shape_id ) ?? [] )['state'] ?? null ) === 'failed', sprintf( 'A patrol leaves %s failed (AC4)', $shape ) );
+}
 
-// Control: the same record, the same tick, a ceiling with room in it.
-remove_filter( 'kntnt_extractor_config_max_active_jobs', $full, 20 );
-$tick( $c_id, $c_secret );
-kntnt_extractor_assert( ( ( $read_state( $work, $c_id ) ?? [] )['state'] ?? null ) !== 'failed', 'The same record resumes once the ceiling has room, so the refusal above was the ceiling (AC6)' );
-kntnt_extractor_assert( $rival_id !== '' && ( ( $read_state( $work, $rival_id ) ?? [] )['state'] ?? null ) !== null, 'The rival job that held the slot is untouched by the declined resume (AC6)' );
+// The one that used to be the exception degrades quietly rather than throwing: it
+// is skipped, which is why the two actors above could do nothing with it, and why
+// neither could be taken down by finding one on disk.
+kntnt_extractor_assert( $store->find( $shapes['the record 0.5.1 wrote'] ) === null, 'The record 0.5.1 wrote no longer reads back as a job at all (AC4)' );
+kntnt_extractor_assert( $store->find( $shapes['a stall this release diagnosed'] ) !== null, 'A record this release wrote still reads back beside it (AC4 control)' );
 
 // --- P3: a this-release stall that never adapts still discards staging ---
 
@@ -532,8 +427,7 @@ $so_failed = $read_state( $work, $so_id ) ?? [];
 kntnt_extractor_assert( ( $so_failed['state'] ?? null ) === 'failed', 'A structure-only stall fails the job (P3)' );
 kntnt_extractor_assert( ( $so_failed['chunk_size'] ?? 0 ) === 0 && ( $so_failed['table_chunk_bytes'] ?? 0 ) === 0, 'The structure-only stall never adapted a budget (P3)' );
 kntnt_extractor_assert( array_key_exists( 'chunk_size', $so_failed ) && array_key_exists( 'table_chunk_bytes', $so_failed ) && array_key_exists( 'table_chunk_rows', $so_failed ), 'A this-release stall still writes the schema-8 budget keys, even at zero (P3)' );
-$so_job_failed = $store->find( $so_id );
-kntnt_extractor_assert( $so_job_failed !== null && ! $so_job_failed->is_pre_adaptation_stall(), 'A this-release structure-only stall is not the pre-adaptation shape (P3)' );
+kntnt_extractor_assert( $store->find( $so_id ) !== null, 'The structure-only stall record still reads back after the failure (P3)' );
 kntnt_extractor_assert( $build_file_of( $work, $so_id ) === '', 'A this-release structure-only stall discards its container (P3)' );
 kntnt_extractor_assert( $sidecar_of( $work, $so_id ) === '', 'A this-release structure-only stall discards its index sidecar (P3)' );
 kntnt_extractor_assert( is_file( $work . '/' . $so_id . '/state.json' ), 'A this-release structure-only stall keeps the small record (P3)' );
@@ -596,9 +490,9 @@ kntnt_extractor_assert(
 	'A later tick\'s stall reason names the first tick\'s persisted pair, not the live process (P8.1)'
 );
 
-// A schema-8 record written before these fields existed still parses, and the
-// absence of the pair is not the pre-adaptation signal — that remains the
-// absence of the budget keys.
+// A schema-8 record written before these four fields existed still parses: an
+// absent limit pair is the ordinary shape of a job no tick has measured yet, and
+// says nothing about which release wrote the record.
 $p_legacy = [
 	'id' => 'legacy-schema-8-limits',
 	'state' => 'failed',
@@ -611,6 +505,7 @@ $p_legacy = [
 	'updated_at' => 1,
 	'tick_secret' => 'secret',
 	'artifact' => 'a.sealed',
+	'attempts' => 0,
 	'error' => 'The extraction stalled.',
 	'chunk_size' => 0,
 	'table_chunk_bytes' => 0,
@@ -626,12 +521,6 @@ kntnt_extractor_assert(
 	&& $p_parsed->raised_max_execution_time === null,
 	'Missing limit-pair fields read as absent rather than disqualifying the record (P8.1)'
 );
-kntnt_extractor_assert( $p_parsed !== null && ! $p_parsed->is_pre_adaptation_stall(), 'Absence of the limit pair is not the pre-adaptation stall (P8.1)' );
-
-$p_stranded = $p_legacy;
-unset( $p_stranded['chunk_size'], $p_stranded['table_chunk_bytes'], $p_stranded['table_chunk_rows'] );
-$p_stranded_job = Extraction_Job::from_array( $p_stranded );
-kntnt_extractor_assert( $p_stranded_job !== null && $p_stranded_job->is_pre_adaptation_stall(), 'A diagnosed stall with the budget keys absent is still the pre-adaptation shape (P8.1)' );
 
 // Leave the suite state clean for later files.
 remove_filter( 'pre_http_request', $intercept, 10 );
