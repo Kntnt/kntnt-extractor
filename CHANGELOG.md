@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+
+- ADR-0024 records that this plugin carries **no backwards compatibility with its own earlier releases below 1.0** — no migration, no tolerance branch for a record an older release wrote, no cleanup routine for what one left behind, and no deprecation cycle. The ground for it is a fact ADR-0015 assumed the opposite of: the plugin is installed on exactly one site, operated by the author, and distributed to nobody else, so the retirement condition ADR-0015 called uncheckable "because it ships to sites the author does not operate" is decidable after all. **This does not touch the sealed container's byte format or the REST contract**, whose lifecycles ADR-0017 and ADR-0018 govern and whose coordinated-release requirement with `kntnt-wp-skills` rests on a different fact — that the client is a separate program with its own cadence, so an installed copy can be older than the server it is pointed at. Compatibility with a concurrently-running client is a real constraint; compatibility with a record this plugin itself wrote three releases ago is not. The decision is revisited on reaching 1.0, and must be revisited **before** the plugin is ever installed anywhere the author does not operate, since a population of one is its whole ground.
+
+### Changed
+
+- The PHP coding standard no longer requires `@since` on a new symbol below 1.0, and the release procedure's §4 now says when the `Version:` header moves. The two were one fault. `@since` names the release a symbol first shipped in, but that number is derived from the changelog at release time, so nothing during a cycle can know it — the header names the version last released for the whole of a cycle, and reading a forthcoming version off it yields one that has already shipped. Stamping it anyway cost thirteen re-stamps and six verification rounds on the 0.7.0 cycle, for a tag nothing in this repository reads, `phpcs` does not check, and no behaviour depends on. Version history is also bookkeeping for exactly the compatibility question ADR-0024 defers. Existing stamps are correct for the releases they shipped in and are left alone; the requirement to document the why and the contract on every symbol is untouched.
+
 ## [0.7.0] – 2026-08-21
 
 ### Fixed

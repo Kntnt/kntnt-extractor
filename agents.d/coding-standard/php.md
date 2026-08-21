@@ -67,7 +67,9 @@ A single-file PHP script meant to run from the terminal uses the env-based sheba
 
 ### Doc comments
 
-Every file, class, trait, interface, enum, method, function, property, and constant has a PHPDoc block. Include `@since` from the first release. Document the why and the contract; the type system already shows the shape.
+Every file, class, trait, interface, enum, method, function, property, and constant has a PHPDoc block. Document the why and the contract; the type system already shows the shape.
+
+**Below 1.0 a new symbol carries no `@since`.** The release a symbol will ship in is derived from the changelog at release time and is not knowable while the code is written, so any number stamped during a cycle is a guess that a later version decision invalidates. Version history is also compatibility bookkeeping, which this project defers until 1.0 (ADR-0024). Existing stamps are correct for the releases they shipped in and are left alone; from 1.0 the tag returns and is included from the release a symbol first appeared in.
 
 ```php
 /**
@@ -76,8 +78,6 @@ Every file, class, trait, interface, enum, method, function, property, and const
  * Returns `null` for malformed tokens, expired tokens, or tokens that
  * point to a deleted user. Callers must distinguish "no such user"
  * from "no permission" themselves.
- *
- * @since 1.0.0
  *
  * @param string $token Opaque identifier from the authenticator.
  * @return User|null

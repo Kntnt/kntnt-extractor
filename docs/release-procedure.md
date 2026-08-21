@@ -28,7 +28,7 @@ These run against the commit that will be tagged, in this order, before the tag 
 
 Two numbers move independently, and a release may move one, the other, both, or neither.
 
-**The plugin version** (`kntnt-extractor.php:6`) follows Semantic Versioning (`CHANGELOG.md:3`: "the project uses Semantic Versioning"). It is bumped by hand in the one place it lives, to match whatever `CHANGELOG.md`'s `[Unreleased]` section, once resolved into a version heading (§5), actually contains.
+**The plugin version** (`kntnt-extractor.php:6`) follows Semantic Versioning (`CHANGELOG.md:3`: "the project uses Semantic Versioning"). It is bumped by hand in the one place it lives, to match whatever `CHANGELOG.md`'s `[Unreleased]` section, once resolved into a version heading (§5), actually contains. **That bump belongs to the release run and not to the cycle before it**: the number is derived from `[Unreleased]` at release time, so for the whole of a cycle the header names the version last released. Nothing during a cycle hand-bumps it, and nothing reads a forthcoming version off it — a symbol needing one is the signal something is wrong, not a licence to compute it (#45, ADR-0024). §7 records that the maintainer's `/release` tooling performs this step together with §5's resolution.
 
 **`API_VERSION`** (`classes/Rest/Status_Controller.php:112`) moves only on the two grounds ADR-0017 and ADR-0018 establish, and this document does not restate their arguments:
 

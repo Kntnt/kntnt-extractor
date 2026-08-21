@@ -130,7 +130,7 @@ The record and the trailer, `:502-503` and `:553`:
 
 ### Conventions to match
 
-Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; `declare( strict_types = 1 )`; a `//` comment above each paragraph stating its *purpose*; tabs and WordPress surface style; a full docblock on the class and on every method, with an `@since` on new symbols naming the version this cycle will ship as, which is the version the `Version:` header in `kntnt-extractor.php` carries while the work is unreleased — read it off that header when you write the code, never off a literal in this plan. §4 of `docs/release-procedure.md` is what decides that number, and it has already moved once this cycle, from the 0.6.1 `3084e81` stamped to the 0.7.0 `771bb59` resolved. It is why the sample docblocks in step 2 carry `X.Y.Z` rather than a version, and why that placeholder is the one thing in them you do not copy as written. In Markdown, each paragraph is one physical line — never hard-wrapped.
+Read `agents.d/coding-standard/general.md` and `agents.d/coding-standard/php.md` before writing. Load-bearing here: English throughout; `declare( strict_types = 1 )`; a `//` comment above each paragraph stating its *purpose*; tabs and WordPress surface style; a full docblock on the class and on every method. Below 1.0 a new symbol carries no `@since`; do not stamp one and do not read a version off the `Version:` header (ADR-0024). In Markdown, each paragraph is one physical line — never hard-wrapped.
 
 ## Commands you will need
 
@@ -197,7 +197,6 @@ git rev-parse v0.5.1:classes/Crypto/Invalid_Public_Key.php  # df400effe12b5120fd
  * The recipe the golden container was built from.
  *
  * @package Kntnt\Extractor
- * @since   X.Y.Z
  */
 
 declare( strict_types = 1 );
@@ -212,8 +211,6 @@ declare( strict_types = 1 );
  * segments (the reassembly rule), a zero-byte file (an empty segment is legal), a
  * non-ASCII path holding every byte value (names and plaintexts are raw bytes), and two
  * segments with identical plaintext (a fresh key and nonce per segment).
- *
- * @since X.Y.Z
  *
  * @return array<int, array{0: string, 1: string}> The segments, in container order.
  */
@@ -245,8 +242,6 @@ function kntnt_extractor_golden_recipe(): array {
  * The seed is the one `tests/Integration/sealed-writer-test.php` already uses, so the
  * suite has one test key pair rather than two. It is a constant in a public repository
  * and protects nothing; it exists so the fixture is reproducible and openable in-process.
- *
- * @since X.Y.Z
  *
  * @return string The key pair, as `sodium_crypto_box_keypair()` returns one.
  */
