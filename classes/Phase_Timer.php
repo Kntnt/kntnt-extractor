@@ -55,6 +55,13 @@ final class Phase_Timer {
 	 * and the second of those is the write that carries this very entry, so it can
 	 * only be measured from outside itself. What is recorded here is the first save,
 	 * and a reader attributing a whole chunk doubles it.
+	 *
+	 * The doubling holds only where both writes are {@see Job_Store::save()}. On a
+	 * chunk that skipped a vanished file, the driver routes the second one to
+	 * {@see Job_Store::save_with_selection()}, which rewrites the unbounded selection
+	 * half as well — a full record write, paid per *skip* and deliberately unlike the
+	 * bounded state-file save recorded here (ADR-0026). On such a chunk the doubled
+	 * figure understates what was spent.
 	 */
 	public const string SAVE = 'save';
 

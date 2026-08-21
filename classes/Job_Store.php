@@ -99,10 +99,13 @@ final class Job_Store {
 	/**
 	 * Basename of the per-job selection file inside each job's directory.
 	 *
-	 * Holds the unbounded, never-changing half of the record — the requested tables
-	 * and files — and is written exactly once, by {@see create()}. Keeping it out of
-	 * the file every save rewrites is what makes a save's cost independent of the
-	 * selection's size (ADR-0014).
+	 * Holds the unbounded half of the record — the requested tables and files — and is
+	 * written at create, by {@see create()}, and by nothing else except a tick that
+	 * skipped a vanished file, through {@see save_with_selection()} (ADR-0026). The
+	 * line drawn here is unboundedness and not immutability, which used to amount to
+	 * the same thing and no longer does. Keeping this half out of the file every save
+	 * rewrites is what makes a save's cost independent of the selection's size
+	 * (ADR-0014).
 	 *
 	 * @since 0.1.0
 	 */
