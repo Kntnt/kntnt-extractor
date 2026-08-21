@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.7.0] – 2026-08-21
+
 ### Fixed
 
 - `POST /extractions` enforced the concurrency ceiling as a check-then-act: it asked `Job_Store::has_free_slot()` whether the slot was free and then, as a separate step, wrote the job that takes it. Two creates arriving inside that window both read a free slot and both took it, putting two live builds on a site whose whole design says one (ADR-0004) — and the surplus job then held a slot nothing had admitted it to until it finished or the TTL sweep reclaimed it. The create path now takes the slot and re-checks it afterwards, which is the sequence the resume path has used since it was written (`Dispatcher::resume_failed()`, ADR-0015) rather than a second pattern invented for this: the job is persisted first, `has_free_slot( 1 )` then confirms nothing else claimed the same slot in the window between, and a create that lost that race purges the job it just wrote and is refused. That release is a purge like any other, so it takes the job's own tick lock first and releases it in a `finally`, exactly as consume, cancel and the TTL sweep do (ADR-0019). Having handed the id to nobody does not make the losing job unreachable: it is queued, and `Watchdog::patrol()` reaches a queued job by enumerating `Job_Store::all()`, needing neither an id nor a scheduled continuation, so a patrol landing inside that same window can already be building through it — and an unlocked purge would delete that build's directory underneath it. A lock that cannot be taken is precisely that case, and the job is then left standing for the TTL sweep to reclaim once it falls silent rather than deleted out from under whatever holds the lock. The refusal is unchanged in every byte — the same `429 kntnt_extractor_too_many_jobs` with the same message the check ahead of it has always sent, because what a 429 discloses about the occupied slot is a settled question this fix does not reopen. Nothing on the wire moves: `API_VERSION` stays 7 and `honours` gains no entry, since the endpoint's contract is what it always claimed to be and only the enforcement caught up with it.
@@ -173,7 +175,8 @@ All notable changes to this project are documented here. The format follows [Kee
 - Uninstall cleanup: removing the plugin purges the audit log and every working directory, leaving no residue behind.
 - Self-hosted update checker: bundles the YahnisElsts Plugin Update Checker (under `lib/`) pointed at the plugin's own GitHub releases, so an available update shows on the Plugins screen and installs in place with no manual file replacement. The release asset is matched by name, and `build-release-zip.sh` produces the distributable `kntnt-extractor.zip` under that same name.
 
-[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Kntnt/kntnt-extractor/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Kntnt/kntnt-extractor/releases/tag/v0.5.0
