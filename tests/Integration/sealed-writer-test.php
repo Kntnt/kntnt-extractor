@@ -426,7 +426,8 @@ kntnt_extractor_assert( $plan004_idempotent_ok, 'discard_index() is idempotent �
 // above the stream's ~2 MB in-memory spill ceiling no longer has any reason to
 // touch disk on its way in. Prove the round trip still holds above that
 // ceiling — before this change every chunk this large went through a real
-// spilled file — and below the 8 MiB default file-part chunk size.
+// spilled file — and below the 4 MiB default table-slice byte budget, which is
+// now the larger of the two default chunk bounds (ADR-0023).
 $large_plaintext = random_bytes( 3 * 1024 * 1024 );
 $large_path = tempnam( sys_get_temp_dir(), 'kntnt-large-' );
 $large_writer = new Sealed_Writer( $large_path );

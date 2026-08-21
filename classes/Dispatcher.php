@@ -108,8 +108,10 @@ final class Dispatcher {
 	 * fail the job outright, so a false positive cost the whole run and being cautious
 	 * was worth several attempts. It now halves the chunk and carries on (ADR-0015), so
 	 * a false positive costs throughput for the rest of the run and nothing else, while
-	 * every extra attempt costs a full execution-time limit — paid 23 times over on the
-	 * way from 8 MiB to the floor, and paid only on a host that is already failing.
+	 * every extra attempt costs a full execution-time limit — paid 18 times over on the
+	 * way from the 256 KB default file part to the floor, and paid only on a host that
+	 * is already failing. That walk was 23 halvings long while the default was 8 MiB
+	 * (ADR-0023); the argument is unchanged and only its arithmetic moved.
 	 *
 	 * Not one, which the same reasoning nearly reaches. The kill is usually
 	 * deterministic and a second attempt at the same size usually dies the same way, but

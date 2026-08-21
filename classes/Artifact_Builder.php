@@ -48,9 +48,20 @@ final class Artifact_Builder {
 	 * or its filter, and tests force multi-chunk behaviour on small fixtures. This is
 	 * only the fallback when neither is set.
 	 *
+	 * 256 KB, read off `docs/measurements/2026-08-19-chunk-size-curve.md` rather than
+	 * chosen (ADR-0023). It is the only value this project has watched complete a real
+	 * clone — 48,578 files and 186 tables in 3.56 h — and the fastest of the four sizes
+	 * that controlled experiment measured; the 8 MiB this replaces sits far past a
+	 * threshold between 2 and 4 MiB that turns a slow run into an impossible one, and
+	 * the production host was never once asked for a part that size until the run it
+	 * killed. It is **not** claimed optimal: nothing below 256 KB was tested, and the
+	 * curve's shape suggests smaller may be faster still, traded against a per-chunk
+	 * overhead those numbers do not resolve. Nor does it generalise — every figure is
+	 * one host, and the knob above is what answers a different one.
+	 *
 	 * @since 0.1.0
 	 */
-	private const int DEFAULT_CHUNK_SIZE = 8388608;
+	private const int DEFAULT_CHUNK_SIZE = 262144;
 
 	/**
 	 * Rows of a table packaged per bounded slice when the knob does not override it.
@@ -80,17 +91,19 @@ final class Artifact_Builder {
 	 * while a 100,890-row table of small rows went through in a hundred slices without
 	 * trouble. It is not a table's size that decides this, it is its rows'.
 	 *
-	 * Four MiB, deliberately half the file-part {@see DEFAULT_CHUNK_SIZE}. That host
-	 * packaged 8 MiB file parts without complaint, so 8 MiB of segment is demonstrably
-	 * survivable there; a table slice of the same size costs more, since it is fetched
-	 * as PHP row arrays, escaped into SQL, and copied again through the seal, so the
-	 * default takes the file part's known-good figure and halves it. Which of the host's
-	 * two limits actually broke is not known and could not be measured without another
-	 * production run, so the margin stands in for the measurement. A table of ordinary
-	 * rows never reaches this bound at all — the row budget is spent long first — so it
-	 * costs nothing on the tables that already worked. Resolved through the Config seam
-	 * under the knob `table_chunk_bytes`, so a site tunes it with the
-	 * `KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` constant or its filter.
+	 * Four MiB, which was originally derived as half the file-part
+	 * {@see DEFAULT_CHUNK_SIZE} on the belief that the host packaged 8 MiB file parts
+	 * without complaint. The chunk-size curve then measured that belief false, and the
+	 * file-part default has moved to 256 KB (ADR-0023), so the derivation is gone and
+	 * this figure now stands on its own. It is left where it is deliberately: nothing
+	 * has measured the table side, a slice is a different cost from a part — fetched as
+	 * PHP row arrays, escaped into SQL, and copied again through the seal — and the one
+	 * production clone that completed took all 186 of its tables at this value. Moving
+	 * it on the strength of a file-part measurement would be inference, not evidence. A
+	 * table of ordinary rows never reaches this bound at all — the row budget is spent
+	 * long first — so it costs nothing on the tables that already worked. Resolved
+	 * through the Config seam under the knob `table_chunk_bytes`, so a site tunes it
+	 * with the `KNTNT_EXTRACTOR_TABLE_CHUNK_BYTES` constant or its filter.
 	 *
 	 * @since 0.5.0
 	 */
