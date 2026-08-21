@@ -113,7 +113,7 @@ If a run is slow and `chunks_done` is moving, the next question is where each ch
 { "at": 1755772800, "phases": { "total": 229431, "resume": 4210, "resolve": 88300, "read": 61200, "seal": 1180, "suspend": 39400, "save": 9700 } }
 ```
 
-`total` is the whole chunk, so whatever the named phases do not add up to is the part nothing has attributed yet. `save` is measured once although a chunk pays it twice — the second save is the one that writes the entry, and it cannot time its own write. A chunk that packages a table records no `resolve` or `read`, having run neither.
+`total` is the whole chunk, so whatever the named phases do not add up to is the part nothing has attributed yet. `save` is measured once although a chunk pays it twice — the second save is the one that writes the entry, and it cannot time its own write. Doubling it to attribute a whole chunk is right only where both writes are the ordinary bounded one: on a chunk that skipped a vanished file the second write rewrites the selection as well, so the doubled figure understates what was spent. A chunk that packages a table records no `resolve` or `read`, having run neither.
 
 **It is off by default and costs nothing when off**: with the knob unset no clock is read at all and the job record is unchanged. It is a debug surface rather than something to leave running — turn it on to answer a question about a specific host, read the answer, and turn it off again.
 

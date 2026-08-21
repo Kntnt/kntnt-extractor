@@ -25,10 +25,10 @@ The client reported `skipped_files: []`, `poll_transport_failures: 0`, `poll_wal
 
 **The moving rate barely moved: 257 → 229 ms per chunk.** That is the cost of an ordinary small file, and it is untouched by this setting because a 44 KB file is smaller than any part size. It remains unattributed. On a selection of tens of thousands of small files it is still what the run costs, and halving *it* would be worth more than everything measured here — 48,578 files at ~230 ms is about three hours, which is essentially the whole run.
 
-**A run of this length is survivable but the margin is thin.** The previous attempt died to a file deleted mid-packaging; `plans/018` covers that and is not yet implemented. Three and a half hours on a live client site is still three and a half hours of exposure to the same class of failure.
+**A run of this length is survivable but the margin is thin.** The previous attempt died to a file deleted mid-packaging; `plans/018` covers that and is not yet implemented. Three and a half hours on a live client site is still three and a half hours of exposure to the same class of failure. **Since acted on**: plan 018 landed as issue #31 and [ADR-0026](../adr/0026-strict-false-covers-the-whole-run-and-a-partly-packaged-file-is-never-skipped.md), so a file that is gone when its chunk is packaged is now a reported skip under `strict: false` rather than a fatal error; a file that vanishes between two of its own parts still ends the run.
 
 ## What it does not establish
 
 - **That 256 KB is optimal.** It is measured against 1, 2 and 4 MiB on one file, and nothing below it was tried.
 - **Anything about other hosts.** One site, LiteSpeed, PHP 8.4.21.
-- **That the run is now reliable.** One success after one failure is not a rate. The failure mode that ended the previous attempt is unchanged in the code.
+- **That the run is now reliable.** One success after one failure is not a rate. The failure mode that ended the previous attempt is unchanged in the code. **Since acted on**: [ADR-0026](../adr/0026-strict-false-covers-the-whole-run-and-a-partly-packaged-file-is-never-skipped.md) changed that failure mode (issue #31) — under `strict: false` a file that has vanished when its chunk is packaged is now skipped and reported rather than fatal, leaving only the file that vanishes between two of its own parts.
