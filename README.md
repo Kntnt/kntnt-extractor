@@ -89,7 +89,7 @@ Only a chunk whose bounds have all reached their floor — one byte, one row —
 `POST /extractions` is validated before the caller's capability is checked — that is what lets it answer "no such table" rather than "not permitted" to a request for something that does not exist — so two caps bound what an anonymous request can cost before it is bounded by anything else. Both are settable as a `wp-config.php` constant or through the matching `kntnt_extractor_config_*` filter:
 
 - `KNTNT_EXTRACTOR_MAX_SELECTION_ELEMENTS` — combined entries across `tables`, `tables_structure_only` and `files`, default 500,000. Over it, the request is `422 kntnt_extractor_selection_too_large`.
-- `KNTNT_EXTRACTOR_MAX_BODY_BYTES` — raw request body size, default 50 MiB. Over it, the request is `413 kntnt_extractor_payload_too_large`, decided before the body is parsed.
+- `KNTNT_EXTRACTOR_MAX_BODY_BYTES` — raw request body size, default 50 MiB. Over it, the request is `413 kntnt_extractor_payload_too_large`, decided before the plugin parses the body. WordPress itself parses an `application/json` body earlier still, so an oversized body that is not valid JSON is refused `400 rest_invalid_json` by WordPress and never reaches this cap.
 
 Both defaults are about ten times a real production selection (186 tables and 49,116 files, encoding to 4.47 MiB), so no ordinary clone should ever meet either. If one does, raise the constant on that site — each refusal reports the `limit` it was measured against and your own `count` or `bytes` in the error's `data`, so you can split the selection or raise the knob knowing the exact number. An authenticated `GET /status` names `selection_limits` in `honours`, which is how a client tells a build that enforces these caps from one that does not.
 

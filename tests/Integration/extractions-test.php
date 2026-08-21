@@ -190,7 +190,7 @@ $force_bytes = static fn(): int => $sized_bytes - 1;
 add_filter( 'kntnt_extractor_config_max_body_bytes', $force_bytes );
 $oversized_body = $post_extractions( $sized_body );
 $oversized_body_data = $oversized_body->get_data();
-kntnt_extractor_assert( $oversized_body->get_status() === 413, 'A body over the byte cap is rejected 413 before it is decoded, before the capability check' );
+kntnt_extractor_assert( $oversized_body->get_status() === 413, 'A body over the byte cap is rejected 413 before the plugin decodes it, before the capability check' );
 kntnt_extractor_assert( is_array( $oversized_body_data ) && ( $oversized_body_data['code'] ?? null ) === 'kntnt_extractor_payload_too_large', 'The body-cap refusal names its own cause' );
 kntnt_extractor_assert( is_array( $oversized_body_data ) && ( $oversized_body_data['data']['limit'] ?? null ) === $sized_bytes - 1 && ( $oversized_body_data['data']['bytes'] ?? null ) === $sized_bytes, 'The body-cap refusal reports the limit and the caller\'s own size, so a client can shrink its request' );
 remove_filter( 'kntnt_extractor_config_max_body_bytes', $force_bytes );

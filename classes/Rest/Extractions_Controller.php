@@ -59,13 +59,17 @@ use WP_REST_Server;
  * wait (ADR-0019).
  *
  * Two caps stand ahead of that whole ladder, and ahead of the capability gate with
- * it (ADR-0020): a raw body larger than `max_body_bytes` is a 413 refused before the
- * body is decoded, and a combined `tables` + `tables_structure_only` + `files`
- * selection larger than `max_selection_elements` is a 422 refused before any element
- * of it reaches a `realpath()` call or the table catalog. They exist because the
- * order below is what an unauthenticated caller gets to provoke for free, and they
- * bound what that costs; a request inside both is validated in exactly the order
- * this paragraph describes, unchanged.
+ * it (ADR-0020): a raw body larger than `max_body_bytes` is a 413 refused before
+ * this plugin decodes it, and a combined `tables` + `tables_structure_only` +
+ * `files` selection larger than `max_selection_elements` is a 422 refused before
+ * any element of it reaches a `realpath()` call or the table catalog. They exist
+ * because the order below is what an unauthenticated caller gets to provoke for
+ * free, and they bound what that costs; a request inside both is validated in
+ * exactly the order this paragraph describes, unchanged. The body cap is narrower
+ * than it reads, and this was measured rather than reasoned: core decodes an
+ * `application/json` body in `WP_REST_Request::has_valid_params()` before any
+ * `permission_callback` runs, so the cap bounds this plugin's own second decode
+ * and the ladder after it, never core's first (ADR-0020's addendum).
  *
  * The order the create request is validated in is a security property, not an
  * incidental one (ADR-0003): a malformed body is a 422, an absent or malformed
@@ -121,7 +125,9 @@ final class Extractions_Controller {
 	 * to 4,687,437 bytes; this is roughly eleven times that. It is a separate knob
 	 * from the element cap because it bounds a different cost: a body carrying few
 	 * elements of enormous individual strings passes the count and still has to be
-	 * decoded. Resolved through the Config seam under `max_body_bytes`, so a site
+	 * decoded — by this plugin, core having already decoded an `application/json`
+	 * body once before the cap runs at all (ADR-0020's addendum). Resolved through
+	 * the Config seam under `max_body_bytes`, so a site
 	 * raises it with the `KNTNT_EXTRACTOR_MAX_BODY_BYTES` constant or the
 	 * `kntnt_extractor_config_max_body_bytes` filter.
 	 *
@@ -916,9 +922,11 @@ final class Extractions_Controller {
 	 *
 	 * The checks run in the contract's fixed precedence, and the two size caps run
 	 * ahead of all of them (ADR-0020): a raw body over `max_body_bytes` is a 413
-	 * decided before `json_decode()` sees it, and a combined selection over
-	 * `max_selection_elements` is a 422 decided as soon as the three arrays are
-	 * shape-checked, before the overlap check and everything after it.
+	 * decided before this method's own `json_decode()` sees it — core's, in
+	 * `has_valid_params()`, has already run on an `application/json` body before
+	 * any `permission_callback` (ADR-0020's addendum) — and a combined selection
+	 * over `max_selection_elements` is a 422 decided as soon as the three arrays
+	 * are shape-checked, before the overlap check and everything after it.
 	 *
 	 * Then the ladder proper: a body that is not a JSON object, or a selection that is
 	 * not a list of non-empty strings, or one that selects nothing, or one that lists
@@ -958,11 +966,16 @@ final class Extractions_Controller {
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
-		// Refuse an oversized body before it is decoded: an unauthenticated caller
-		// must not be able to spend json_decode() time and memory proportional to a
-		// body of unbounded size (ADR-0020). The refusal reports the limit and
-		// the caller's own size, because a client that hits this needs the number to
-		// shrink its request by, not merely the news that a number exists.
+		// Refuse an oversized body before this method decodes it: an unauthenticated
+		// caller must not be able to spend json_decode() time and memory proportional
+		// to a body of unbounded size, nor the realpath() walk and catalog queries
+		// the ladder below spends after it (ADR-0020). Measured, and narrower than
+		// it reads: core decodes an application/json body in has_valid_params()
+		// before this permission_callback runs, so what is saved here is the second
+		// decode and everything downstream of it, never core's first (ADR-0020's
+		// addendum). The refusal reports the limit and the caller's own size,
+		// because a client that hits this needs the number to shrink its request
+		// by, not merely the news that a number exists.
 		$body = (string) $request->get_body();
 		$body_bytes = strlen( $body );
 		$max_body_bytes = $this->max_body_bytes();
