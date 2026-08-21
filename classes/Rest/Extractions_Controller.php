@@ -561,16 +561,30 @@ final class Extractions_Controller {
 	/**
 	 * Reports the poll contract's `error?` for a failed job, or null for any other state.
 	 *
-	 * The field's shape is unchanged — a `message` and nothing more — but the message is
-	 * the reason the job recorded when the plugin diagnosed the failure itself, falling
-	 * back to a generic one otherwise. Both failures the plugin can see write a reason:
-	 * the stalled build (ADR-0013) composes one from the caller's own selection and two
+	 * The field's shape is unchanged — a `message` and nothing more — and so is the
+	 * promise that it carries exactly one string. What has grown is the number of places
+	 * that string can come from, resolved here in one expression: the reason the plugin
+	 * diagnosed itself, then the reason it composed around a throwable it merely caught,
+	 * then the generic fallback. Both failures the plugin can see write a reason — the
+	 * stalled build (ADR-0013) composes one from the caller's own selection and two
 	 * runtime settings, and an unexpected throw composes one naming the throwable,
-	 * bounded and trace-free so the arbitrary string it relays cannot carry a whole
-	 * query or a call stack out to the caller (ADR-0007). The fallback is therefore no
-	 * longer the ordinary case but a diagnosis of its own: a failed job reporting it
-	 * reached no `catch` at all, so the PHP process was killed rather than throwing.
-	 * Every non-failed state omits the field.
+	 * bounded and trace-free (issue #25) — and they are separate fields on the record
+	 * because the resume path reads the nullity of the first one as a signal
+	 * ({@see Extraction_Job::with_thrown_failure()}), not because the poll distinguishes
+	 * them. It does not, and no caller learns a second shape.
+	 *
+	 * What the second of those may contain is decided rather than assumed (ADR-0022).
+	 * The plugin's own composition — the throwable's class, the origin named relative
+	 * to the installation root, the line, the chunk — discloses nothing it did not
+	 * write. The throwable's own message, relayed inside it, **may carry a filesystem
+	 * path or a fragment of SQL**, because it is arbitrary by construction and
+	 * `Dispatcher::THROWN_MESSAGE_BOUND` bounds the size of that disclosure and not its
+	 * kind. The reader is the owner, authenticated and holding `operate` plus
+	 * `manage_options` (ADR-0002), and the diagnosis is judged to be worth it there.
+	 *
+	 * The fallback is therefore no longer the ordinary case but a diagnosis of its own:
+	 * a failed job reporting it reached no `catch` at all, so the PHP process was killed
+	 * rather than throwing. Every non-failed state omits the field.
 	 *
 	 * @since 0.1.0
 	 *
@@ -580,7 +594,7 @@ final class Extractions_Controller {
 	private function error_of( Extraction_Job $job ): ?array {
 
 		return $job->state === Job_State::Failed
-			? [ 'message' => $job->error ?? __( 'The extraction failed.', 'kntnt-extractor' ) ]
+			? [ 'message' => $job->error ?? $job->thrown ?? __( 'The extraction failed.', 'kntnt-extractor' ) ]
 			: null;
 
 	}

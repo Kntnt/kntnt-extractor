@@ -382,12 +382,14 @@ final class Dispatcher {
 		}
 
 		// Package exactly one bounded chunk; a build that throws drops the job to failed
-		// rather than leaving it stuck in running, carrying what threw so the failure is
-		// readable from the poll alone rather than reconstructed afterwards (issue #25).
+		// rather than leaving it stuck in running, carrying what threw in a field of its
+		// own so the failure is readable from the poll alone rather than reconstructed
+		// afterwards, and without the record starting to look like the one failure this
+		// release re-drives (issue #25).
 		try {
 			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
 		} catch ( Throwable $thrown ) {
-			return $this->persist_failure( $running->with_failure( $this->thrown_reason( $running, $thrown ) ) );
+			return $this->persist_failure( $running->with_thrown_failure( $this->thrown_reason( $running, $thrown ) ) );
 		}
 
 		// A complete step means the last chunk finalized and published the container, so
@@ -629,9 +631,10 @@ final class Dispatcher {
 	 * killed by, but both of which it can report. The two pairs come from the job
 	 * record — the first tick's measurement — not from this process, so a stall
 	 * written hours later still describes the limits in force when the chunk died.
-	 * Everything in it is either the
-	 * caller's own selection or a runtime setting `GET /environment` already discloses
-	 * to the same capability, so it leaks nothing the opacity rule (ADR-0007) protects.
+	 * Everything in it is either the caller's own selection or a runtime setting
+	 * `GET /environment` already discloses to the same capability, so this reason —
+	 * unlike the one a throw relays — discloses nothing the plugin did not write
+	 * (ADR-0022).
 	 *
 	 * @since 0.4.0
 	 *
@@ -716,6 +719,13 @@ final class Dispatcher {
 	 * never re-driven (ADR-0015), and has already had its part-built container
 	 * discarded.
 	 *
+	 * The origin is named relative to the installation root, the same way the chunk it
+	 * names beside it already is ({@see stalled_chunk()}) and the same way
+	 * `GET /environment` reports every path it discloses. One sentence disclosing one
+	 * file root-relative and another absolutely would be two rules with a reason for
+	 * neither, and the plugin's own composition is the half of this string it fully
+	 * controls.
+	 *
 	 * What it deliberately does not carry is a stack trace, and what it bounds is the
 	 * throwable's own message — see {@see THROWN_MESSAGE_BOUND} for why that string,
 	 * alone among the parts, is the one the plugin cannot vouch for.
@@ -741,14 +751,63 @@ final class Dispatcher {
 		}
 
 		return sprintf(
-			/* translators: 1: the class name of the throwable, 2: the throwable's own message, truncated, 3: the source file the throw came from, 4: the line number in that file, 5: a description of the chunk being packaged. */
+			/* translators: 1: the class name of the throwable, 2: the throwable's own message, truncated, 3: the source file the throw came from, relative to the installation root, 4: the line number in that file, 5: a description of the chunk being packaged. */
 			__( 'The extraction failed with an unexpected error rather than by exhausting its budgets: %1$s — “%2$s” — thrown at %3$s line %4$d while packaging %5$s. Nothing here is a host limit the run can adapt to, so this is not a resumable state and the part-built container has already been discarded. Address what the error names — a file or table that changed or disappeared mid-run, a permission, or a fault in code hooked into the packaging — and request the extraction again.', 'kntnt-extractor' ),
 			$thrown::class,
 			$message,
-			$thrown->getFile(),
+			$this->relative_to_root( $thrown->getFile() ),
 			$thrown->getLine(),
 			$this->stalled_chunk( $job ),
 		);
+
+	}
+
+	/**
+	 * Expresses an absolute path relative to the installation root.
+	 *
+	 * A path at or under the root loses the root prefix; one outside it — a
+	 * `WP_CONTENT_DIR` moved elsewhere, a mu-plugin loaded from a sibling directory —
+	 * is expressed with leading `../` segments, so it is still relative and still
+	 * discloses no absolute prefix. Both sides are normalised to forward slashes with
+	 * no trailing slash first, so the comparison holds on Windows/IIS too.
+	 *
+	 * This is the same rule `Rest\Environment_Controller::relative_to_root()` applies
+	 * to every path that endpoint discloses. It is restated here rather than shared
+	 * because the two have no seam in common and one small algorithm in two places is
+	 * cheaper than a utility layer built for two callers; a third caller is the point
+	 * at which extracting it is worth the indirection.
+	 *
+	 * @since 0.6.1
+	 *
+	 * @param string $absolute_path An absolute filesystem path to relativise.
+	 * @return string The path relative to the installation root.
+	 */
+	private function relative_to_root( string $absolute_path ): string {
+
+		// Normalise both paths to a comparable, slash-consistent, untrailed form.
+		$root = untrailingslashit( wp_normalize_path( ABSPATH ) );
+		$target = untrailingslashit( wp_normalize_path( $absolute_path ) );
+
+		// A path at or under the root is the root prefix stripped away.
+		if ( $target === $root ) {
+			return '';
+		}
+		if ( str_starts_with( $target, $root . '/' ) ) {
+			return substr( $target, strlen( $root ) + 1 );
+		}
+
+		// A path outside the root is expressed by walking up past the divergent tail of
+		// the root, then down into the target's own tail.
+		$root_parts = explode( '/', trim( $root, '/' ) );
+		$target_parts = explode( '/', trim( $target, '/' ) );
+		$common = 0;
+		while ( isset( $root_parts[ $common ], $target_parts[ $common ] ) && $root_parts[ $common ] === $target_parts[ $common ] ) {
+			++$common;
+		}
+		$up = array_fill( 0, count( $root_parts ) - $common, '..' );
+		$down = array_slice( $target_parts, $common );
+
+		return implode( '/', [ ...$up, ...$down ] );
 
 	}
 
@@ -827,7 +886,10 @@ final class Dispatcher {
 	 *
 	 * The failure must be one the plugin diagnosed. An unexpected throw leaves `error`
 	 * null and must stay dead, or a permanent bug — a file that changed mid-build, a
-	 * path that no longer resolves — would retry forever.
+	 * path that no longer resolves — would retry forever. That a throw now records what
+	 * it was does not soften this: the reason it records lives in a field of its own
+	 * precisely so this predicate keeps reading the nullity of `error` as "no stall was
+	 * diagnosed here" (issue #25).
 	 *
 	 * The job's budgets must be untouched. This is the condition that decides what
 	 * automatic resume is actually *for*, and it is narrower than it first looks. A
@@ -872,10 +934,12 @@ final class Dispatcher {
 	 *
 	 * This method is reached only by a failure this release just recorded — a
 	 * floor stall, a structure-only or index stall that cannot shrink, or an
-	 * opaque throw. None of those are resumable, so the staging is residue.
+	 * unexpected throw. None of those are resumable, so the staging is residue.
 	 * A pre-adaptation record never enters here: it is planted on disk by an
 	 * older release and re-driven by {@see resume_failed()}, which does not
-	 * call this.
+	 * call this. A throw is not one either, however old the record it happens
+	 * to fail — it leaves `error` null, which is the first thing
+	 * {@see Extraction_Job::is_pre_adaptation_stall()} tests.
 	 *
 	 * The record is saved first so a poll still reports `failed` with its reason.
 	 *
