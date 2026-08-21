@@ -241,11 +241,11 @@ $expected_slices = (int) ceil( $fixture_rows / $slice_rows );
 // --- AC9: the catalog facts are read once per request, by a memo that re-reads ---
 
 // This section drives the dumper directly and runs ahead of the REST-driven cases
-// below deliberately. A memo that refused on a miss would break the one dumper the
-// plugin shares across this whole process, and this file would then abort on the
-// empty artifact of a failed job long before any assertion about the memo itself
-// was reached — so the assertions that discriminate between the two designs have to
-// stand where a run under the wrong one can still emit them.
+// below deliberately. A memo that refused on a miss would break the dumper every
+// REST-driven case here builds, and this file would then abort on the empty artifact
+// of a failed job long before any assertion about the memo itself was reached — so
+// the assertions that discriminate between the two designs have to stand where a run
+// under the wrong one can still emit them.
 
 // Counts the two catalog round trips a stretch of dumping issues. Every statement
 // $wpdb runs passes the `query` filter, which is what lets these round trips be

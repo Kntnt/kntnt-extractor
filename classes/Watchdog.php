@@ -148,12 +148,17 @@ final class Watchdog {
 	 * Registered on the `cron_schedules` filter so {@see WATCHDOG_SCHEDULE} is a known
 	 * recurrence by the time the {@see Installer} schedules the event at activation.
 	 *
+	 * Static because it answers out of two constants and needs neither the store nor
+	 * the driver. The filter fires on ordinary requests that drive nothing, and a
+	 * watchdog built to answer it would drag along the request-scoped Table_Dumper at
+	 * the end of its driver — the one thing the Plugin no longer builds at load.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param array<string, array{interval: int, display: string}> $schedules The existing cron schedules.
 	 * @return array<string, array{interval: int, display: string}> The schedules with the watchdog interval added.
 	 */
-	public function register_schedule( array $schedules ): array {
+	public static function register_schedule( array $schedules ): array {
 
 		$schedules[ self::WATCHDOG_SCHEDULE ] = [
 			'interval' => self::WATCHDOG_INTERVAL,
