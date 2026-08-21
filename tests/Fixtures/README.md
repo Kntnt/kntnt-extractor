@@ -61,7 +61,7 @@ Every number the test expects is computed from the recipe by the specification's
 **A red golden test has exactly two causes, and neither of them is "the fixture is stale":**
 
 1. The current code no longer honours the format `docs/container-format.md` specifies. Fix the code, or discover that the format moved without anyone deciding it should.
-2. The format was moved deliberately — which moves `FORMAT_VERSION` and `api_version` and is a coordinated release of this repository and `kntnt-wp-skills` — and the second fixture that change owes has not been added yet.
+2. The format was moved deliberately — which moves `FORMAT_VERSION` and `api_version` and obliges a coordinated release of this repository and every client that pins a verified ceiling (`docs/release-procedure.md` §8) — and the second fixture that change owes has not been added yet.
 
 When the format legitimately moves: this fixture's bytes stay exactly as they are, a `container-<release>.b64` is added for the release that first shipped the new version, with its own recipe and its own spec-derived arithmetic, and what the reader does with *this* one is decided by the change that moves the version — either it still opens version-1 containers and these assertions stand, or it refuses them and these assertions become an asserted refusal naming the version. Both outcomes are assertions. Deleting the fixture is neither.
 
