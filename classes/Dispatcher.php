@@ -123,6 +123,18 @@ final class Dispatcher {
 	private const int DEFAULT_MAX_STALL_ATTEMPTS = 2;
 
 	/**
+	 * Whether a packaging chunk times the phases it spends its wall clock in.
+	 *
+	 * Off, and off is what a production run gets unless it asks: a run that did not
+	 * ask for measurement must not pay for it, and with this false no timer is
+	 * constructed, no clock is read, and the job record keeps the shape it has always
+	 * had. Resolved through the Config seam under the knob `phase_timing`, so a site
+	 * turns it on with the `KNTNT_EXTRACTOR_PHASE_TIMING` constant or its filter for
+	 * as long as it takes to answer the question, then turns it off again (issue #39).
+	 */
+	private const bool DEFAULT_PHASE_TIMING = false;
+
+	/**
 	 * Seconds of execution time a tick asks the host for before it packages anything.
 	 *
 	 * The counterpart to shrinking the chunk (ADR-0015), and the cheaper half: where
@@ -333,6 +345,15 @@ final class Dispatcher {
 	 * that cannot shrink further fail the job, with a reason naming the chunk
 	 * (ADR-0013/0015).
 	 *
+	 * It is also where a chunk is timed, when a site has asked to be told where its
+	 * time goes (issue #39). The clock is started here rather than inside the builder
+	 * because two of the phases worth attributing are the driver's own: the
+	 * record-split save that brackets the packaging work, and the remainder that
+	 * neither that save nor any of the builder's phases accounts for. It starts on
+	 * the ordinary chunk's first act, after the stall branch above, so an adaptation
+	 * — which is rare, and is not what a per-chunk cost is made of — is not folded
+	 * into the series.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job $job The job, freshly read under the tick lock.
@@ -356,13 +377,21 @@ final class Dispatcher {
 			$this->store->save( $job );
 		}
 
+		// Start this chunk's clock when — and only when — the site asked to be told
+		// where a chunk's time goes. Off, nothing here is constructed and no phase
+		// below reads a clock at all (issue #39).
+		$timer = $this->phase_timing() ? new Phase_Timer() : null;
+		$timer?->start( Phase_Timer::TOTAL );
+
 		// Stamp the job running with a fresh heartbeat before any heavy work, so a
 		// concurrent poll sees it as actively progressing (ADR-0007), count the attempt
 		// while a record of it can still be written, and announce the queued -> running
 		// transition once so observers can react to it.
 		$was_queued = $job->state === Job_State::Queued;
 		$running = $job->with_state( Job_State::Running )->with_attempt();
+		$timer?->start( Phase_Timer::SAVE );
 		$this->store->save( $running );
+		$timer?->stop( Phase_Timer::SAVE );
 		if ( $was_queued ) {
 			do_action( 'kntnt_extractor_job_running', $running );
 		}
@@ -373,10 +402,16 @@ final class Dispatcher {
 		// afterwards, and leaving the plugin's own diagnosis field to strings the plugin
 		// itself wrote (issue #25, ADR-0022).
 		try {
-			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ) );
+			$step = $this->builder->advance( $running, $this->store->container_build_path( $running ), $this->store->artifact_path( $running ), $timer );
 		} catch ( Throwable $thrown ) {
 			return $this->persist_failure( $running->with_thrown_failure( $this->thrown_reason( $running, $thrown ) ) );
 		}
+
+		// Close the chunk's clock and fold what it spent into the record, before either
+		// branch below composes the save that persists it — which is why that save is
+		// the one phase measured from outside rather than by itself.
+		$timer?->stop( Phase_Timer::TOTAL );
+		$measured = $timer === null ? $running : $running->with_timing( $timer->timing() );
 
 		// A complete step means the last chunk finalized and published the container, so
 		// the job is ready for download and its completion is announced. Its progress is
@@ -384,7 +419,7 @@ final class Dispatcher {
 		// a segment like any other, and dropping its record would leave a ready job
 		// reporting one chunk fewer than its artifact holds.
 		if ( $step->complete ) {
-			$ready = $running->with_progress( $step->progress )->with_state( Job_State::Ready );
+			$ready = $measured->with_progress( $step->progress )->with_state( Job_State::Ready );
 			$this->store->save( $ready );
 			do_action( 'kntnt_extractor_job_ready', $ready );
 			return $ready;
@@ -393,7 +428,7 @@ final class Dispatcher {
 		// Work remains: persist the advanced progress and keep the job running with a
 		// fresh heartbeat. The continuation loopback for the next chunk is fired once by
 		// the budgeted loop in tick() after the lock is released, not per chunk here.
-		$advanced = $running->with_progress( $step->progress );
+		$advanced = $measured->with_progress( $step->progress );
 		$this->store->save( $advanced );
 
 		return $advanced;
@@ -855,6 +890,23 @@ final class Dispatcher {
 		$configured = $this->config->get( 'max_stall_attempts', self::DEFAULT_MAX_STALL_ATTEMPTS );
 
 		return max( 1, is_numeric( $configured ) ? (int) $configured : self::DEFAULT_MAX_STALL_ATTEMPTS );
+
+	}
+
+	/**
+	 * Resolves whether a chunk times its own phases, through the Config seam.
+	 *
+	 * Read once per chunk and answered before anything is constructed, so the whole
+	 * cost of the instrument on a run that did not ask for it is this one lookup.
+	 * Coerced the permissive way a wp-config flag is written in practice — `true`,
+	 * `1`, `'yes'`, `'on'` all turn it on — because a knob that silently ignores the
+	 * spelling a site chose would look like a broken feature rather than a typo.
+	 *
+	 * @return bool Whether to record a phase timing for each completed chunk.
+	 */
+	private function phase_timing(): bool {
+
+		return filter_var( $this->config->get( 'phase_timing', self::DEFAULT_PHASE_TIMING ), FILTER_VALIDATE_BOOLEAN );
 
 	}
 

@@ -150,7 +150,15 @@ final class Status_Controller {
 	 * and worth naming precisely because the value a host survives is measured
 	 * rather than universal (`docs/measurements/2026-08-19-chunk-size-curve.md`), so
 	 * a client that cannot see the name is stuck with whatever constant the site
-	 * happens to carry.
+	 * happens to carry. `timings` is `GET /extractions/{id}`' bounded per-phase
+	 * chunk timings (issue #39), and it is the one name here that reports a
+	 * capability rather than an unconditional behaviour: the member appears only
+	 * once the site's own `phase_timing` knob has asked for the measurement, which
+	 * it does not by default. That is deliberate and is the same shape as
+	 * `chunk_size`, whose presence likewise says the build understands the member
+	 * rather than that any particular value is in force — a client checks the name
+	 * to know whether asking is even possible, and reads the poll to know whether
+	 * anyone asked.
 	 *
 	 * @since 0.6.0
 	 */
@@ -163,6 +171,7 @@ final class Status_Controller {
 		'skipped_files',
 		'state',
 		'strict',
+		'timings',
 		'unknown_resource_names',
 	];
 

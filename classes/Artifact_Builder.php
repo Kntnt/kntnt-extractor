@@ -144,16 +144,17 @@ final class Artifact_Builder {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param Extraction_Job $job           The running job whose selection to package.
-	 * @param string         $build_path    Absolute path of the in-progress container in the job's state directory.
-	 * @param string         $download_path Absolute path the finished container is published to.
+	 * @param Extraction_Job   $job           The running job whose selection to package.
+	 * @param string           $build_path    Absolute path of the in-progress container in the job's state directory.
+	 * @param string           $download_path Absolute path the finished container is published to.
+	 * @param Phase_Timer|null $timer         Instrument to mark this chunk's phases on, or null — the default and the production case — to package without reading a clock at all (issue #39).
 	 * @return Build_Step The progress to persist, and whether the build is complete.
 	 *
 	 * @throws RuntimeException When the public key is undecodable, a file resolves outside
 	 *                          the root or cannot be read, or the container cannot be
 	 *                          written or published.
 	 */
-	public function advance( Extraction_Job $job, string $build_path, string $download_path ): Build_Step {
+	public function advance( Extraction_Job $job, string $build_path, string $download_path, ?Phase_Timer $timer = null ): Build_Step {
 
 		// Recover the 32 raw bytes the seal draws each segment's key against from the
 		// canonical base64 the job persisted; an undecodable key is a corrupt record.
@@ -179,7 +180,9 @@ final class Artifact_Builder {
 			$segment_count = 0;
 			$container_bytes = 0;
 			$index_bytes = 0;
+			$timer?->start( Phase_Timer::OPEN );
 			$writer->open( $public_key );
+			$timer?->stop( Phase_Timer::OPEN );
 		} else {
 
 			// A prior tick may have finalized and published the container, then died in
@@ -203,7 +206,9 @@ final class Artifact_Builder {
 
 			// Reopen the container and its sidecar at the two offsets the last clean tick
 			// acknowledged, which is what discards a crashed tick's uncommitted tail.
+			$timer?->start( Phase_Timer::RESUME );
 			$writer->resume( $public_key, $container_bytes, $index_bytes );
+			$timer?->stop( Phase_Timer::RESUME );
 		}
 
 		// Resolve the size bounds this chunk may spend once, so the per-job budgets a
@@ -218,7 +223,9 @@ final class Artifact_Builder {
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
 			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $budgets->table_rows, $budgets->table_bytes );
+			$timer?->start( Phase_Timer::SEAL );
 			$writer->add_segment( $table, $slice );
+			$timer?->stop( Phase_Timer::SEAL );
 			++$segment_count;
 			if ( $table_complete ) {
 				++$tables_done;
@@ -230,13 +237,18 @@ final class Artifact_Builder {
 			}
 		} elseif ( $structure_done < count( $job->structure_only ) ) {
 			$table = $job->structure_only[ $structure_done ];
-			$writer->add_segment( $table, $this->dumper->dump_structure( $table ) );
+			$ddl = $this->dumper->dump_structure( $table );
+			$timer?->start( Phase_Timer::SEAL );
+			$writer->add_segment( $table, $ddl );
+			$timer?->stop( Phase_Timer::SEAL );
 			++$segment_count;
 			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
-			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $budgets->file_bytes );
+			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $budgets->file_bytes, $timer );
+			$timer?->start( Phase_Timer::SEAL );
 			$writer->add_segment( $file, $part );
+			$timer?->stop( Phase_Timer::SEAL );
 			++$segment_count;
 			if ( $file_done ) {
 				++$file_index;
@@ -275,7 +287,9 @@ final class Artifact_Builder {
 			$writer->discard_index();
 			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
 		}
+		$timer?->start( Phase_Timer::SUSPEND );
 		[ $container_bytes, $index_bytes ] = $writer->suspend();
+		$timer?->stop( Phase_Timer::SUSPEND );
 
 		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), false );
 
@@ -300,25 +314,30 @@ final class Artifact_Builder {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @param string   $file           The installation-root-relative file path.
-	 * @param int      $offset         Byte offset the part starts at.
-	 * @param int|null $expected_size  Pinned size from the first part, or null on the first part.
-	 * @param int|null $expected_mtime Pinned mtime from the first part, or null on the first part.
-	 * @param int      $max_bytes      The resolved file-part budget, already adapted for this job (ADR-0015).
+	 * @param string           $file           The installation-root-relative file path.
+	 * @param int              $offset         Byte offset the part starts at.
+	 * @param int|null         $expected_size  Pinned size from the first part, or null on the first part.
+	 * @param int|null         $expected_mtime Pinned mtime from the first part, or null on the first part.
+	 * @param int              $max_bytes      The resolved file-part budget, already adapted for this job (ADR-0015).
+	 * @param Phase_Timer|null $timer          Instrument to mark the resolution and the read on, or null to read no clock.
 	 * @return array{0: string, 1: int, 2: bool, 3: int, 4: int} The part bytes, the offset
 	 *         after it, whether the file is now fully packaged, and the pinned size and mtime.
 	 *
 	 * @throws RuntimeException When the path resolves outside the root, cannot be opened,
 	 *                          seeked, or read, or changed since its first part was sealed.
 	 */
-	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime, int $max_bytes ): array {
+	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime, int $max_bytes, ?Phase_Timer $timer ): array {
 
 		// Re-resolve the path inside the root every time (defence in depth against a
 		// record altered after create-time validation), then measure the file so the
-		// end-of-file decision does not depend on a short read alone.
+		// end-of-file decision does not depend on a short read alone. This is the
+		// `realpath` walk and the two stats a per-chunk cost is most often blamed on,
+		// so it is measured apart from the read that follows it (issue #39).
+		$timer?->start( Phase_Timer::RESOLVE );
 		$abs = $this->resolve_in_root( $file );
 		$size = filesize( $abs );
 		$mtime = filemtime( $abs );
+		$timer?->stop( Phase_Timer::RESOLVE );
 		if ( $size === false || $mtime === false ) {
 			throw new RuntimeException( 'Unable to size a requested file for packaging.' );
 		}
@@ -334,6 +353,9 @@ final class Artifact_Builder {
 		// Open the validated path, seek to the part's offset, and read one bounded chunk;
 		// past the end this reads nothing, which still yields a single empty part for an
 		// empty file. Direct stream I/O is required because a part is read incrementally.
+		// The clock runs from here to the close: every failure below leaves the chunk
+		// throwing, and a chunk that throws records no timing at all.
+		$timer?->start( Phase_Timer::READ );
 		$handle = fopen( $abs, 'rb' ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- streaming a bounded file part into the sealed writer; WP_Filesystem has no incremental-read API.
 		if ( $handle === false ) {
 			throw new RuntimeException( 'Unable to open a requested file for packaging.' );
@@ -363,6 +385,7 @@ final class Artifact_Builder {
 			$part = $read;
 		}
 		fclose( $handle ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- closing the read handle after one bounded part; see the fopen above.
+		$timer?->stop( Phase_Timer::READ );
 
 		// Report the offset after this part and whether it reached the file's end, so the
 		// caller advances to the next file only once the whole file is packaged.

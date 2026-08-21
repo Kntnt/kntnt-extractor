@@ -488,9 +488,11 @@ final class Extractions_Controller {
 	 *                                   `progress` while running or ready, `error`
 	 *                                   once failed, `skipped_files` when a
 	 *                                   `strict: false` create dropped vanished
-	 *                                   files, and `attempts` once any chunk has
-	 *                                   been begun; a 404 for an unknown job, or a
-	 *                                   403 for a non-owner.
+	 *                                   files, `attempts` once any chunk has
+	 *                                   been begun, and `timings` once a chunk has
+	 *                                   completed under a knob that asked to time
+	 *                                   it; a 404 for an unknown job, or a 403 for
+	 *                                   a non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -517,10 +519,11 @@ final class Extractions_Controller {
 		// Append the state-scoped optional fields of the v1 poll contract: progress while
 		// the build is advancing (and complete once ready), a reason once it failed,
 		// skipped files when a strict: false create dropped vanished paths, and the
-		// bounded attempt log once any chunk has been begun (ADR-0016). Missing-key
-		// optionality — a field the contract marks absent is omitted, never sent as
-		// null — so `progress?`/`error?`/`skipped_files?`/`attempts?` read exactly as
-		// the spec defines.
+		// bounded attempt log once any chunk has been begun (ADR-0016), and the bounded
+		// phase timings once a chunk has completed under a knob that asked for them
+		// (issue #39). Missing-key optionality — a field the contract marks absent is
+		// omitted, never sent as null — so `progress?`/`error?`/`skipped_files?`/
+		// `attempts?`/`timings?` read exactly as the spec defines.
 		$progress = $this->progress_of( $job );
 		if ( $progress !== null ) {
 			$response['progress'] = $progress;
@@ -535,6 +538,10 @@ final class Extractions_Controller {
 		$attempts = $this->attempts_of( $job );
 		if ( $attempts !== [] ) {
 			$response['attempts'] = $attempts;
+		}
+		$timings = $this->timings_of( $job );
+		if ( $timings !== [] ) {
+			$response['timings'] = $timings;
 		}
 
 		return new WP_REST_Response( $response );
@@ -690,6 +697,38 @@ final class Extractions_Controller {
 		}
 
 		return $attempts;
+
+	}
+
+	/**
+	 * Reports the poll contract's `timings?` — the bounded last-N of timed chunks.
+	 *
+	 * A debug surface like `attempts?` beside it, answering the other question about a
+	 * slow run: not which chunk was begun, but where the time inside a chunk went
+	 * (issue #39). Empty unless the site's `phase_timing` knob asked for the
+	 * measurement, which it does not by default, so an ordinary poll omits the member
+	 * entirely. Each entry is the moment the chunk finished and a map of phase name to
+	 * **microseconds**; `total` is the chunk itself, so what the named phases leave
+	 * over is the part nothing has attributed yet, which is the number the surface
+	 * exists to shrink.
+	 *
+	 * The map is projected verbatim rather than curated: the phase names are the
+	 * instrument's own ({@see \Kntnt\Extractor\Phase_Timer}), a client is expected
+	 * to ignore a name it does not know exactly as it ignores an unknown response
+	 * key (ADR-0017), and none of them is a path or a secret — the persisted series
+	 * never held one.
+	 *
+	 * @param Extraction_Job $job The polled job.
+	 * @return list<array{at: int, phases: array<string, int>}>
+	 */
+	private function timings_of( Extraction_Job $job ): array {
+
+		$timings = [];
+		foreach ( $job->timing_log as $timing ) {
+			$timings[] = $timing->to_array();
+		}
+
+		return $timings;
 
 	}
 
