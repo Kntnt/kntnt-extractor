@@ -110,6 +110,21 @@ kntnt_extractor_assert( is_array( $honours ) && in_array( 'state', $honours, tru
 // constant happens to be.
 kntnt_extractor_assert( is_array( $honours ) && in_array( 'chunk_size', $honours, true ), 'GET /status reports honours naming chunk_size' );
 
+// `selection_limits` — the name a caller checks before assuming an arbitrarily
+// large selection or an arbitrarily large body will be accepted: a build
+// carrying it refuses either with `422 kntnt_extractor_selection_too_large` or
+// `413 kntnt_extractor_payload_too_large` rather than working through it
+// (ADR-0020). Presence-only like every other name here — the limits themselves
+// travel on the refusal's `data`, where a client needs them, not on `honours`.
+kntnt_extractor_assert( is_array( $honours ) && in_array( 'selection_limits', $honours, true ), 'GET /status reports honours naming selection_limits' );
+
+// `unknown_resource_names` — POST /extractions naming every offender in
+// `data.tables` and `data.files` on a `404 kntnt_extractor_unknown_resource`
+// rather than refusing without saying what was missing. It is the one name here
+// a caller would otherwise have to infer from `api_version`, which is the
+// inference ADR-0017 exists to remove.
+kntnt_extractor_assert( is_array( $honours ) && in_array( 'unknown_resource_names', $honours, true ), 'GET /status reports honours naming unknown_resource_names' );
+
 // A user login that is itself an email address round-trips verbatim, since that
 // is the shape the primary consumer's credential convention has to split.
 $email_login = wp_insert_user( [ 'user_login' => 'status@example.com', 'user_pass' => wp_generate_password(), 'user_email' => 'status@example.com', 'role' => 'subscriber' ] );
