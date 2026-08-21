@@ -108,7 +108,7 @@ final class Extractions_Controller {
 	 * with the `KNTNT_EXTRACTOR_MAX_SELECTION_ELEMENTS` constant or the
 	 * `kntnt_extractor_config_max_selection_elements` filter.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 */
 	private const int DEFAULT_MAX_SELECTION_ELEMENTS = 500_000;
 
@@ -125,7 +125,7 @@ final class Extractions_Controller {
 	 * raises it with the `KNTNT_EXTRACTOR_MAX_BODY_BYTES` constant or the
 	 * `kntnt_extractor_config_max_body_bytes` filter.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 */
 	private const int DEFAULT_MAX_BODY_BYTES = 52_428_800;
 
@@ -372,7 +372,7 @@ final class Extractions_Controller {
 	 * occupied slot is a settled question of its own, and closing the race between
 	 * them did not reopen it.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @return WP_Error A 429 naming the concurrency ceiling as the cause.
 	 */
@@ -1116,7 +1116,7 @@ final class Extractions_Controller {
 	 * `tables_structure_only` already use, an explicitly null one — resolves to
 	 * zero, the record's own "package at the Config default".
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @param mixed $value The decoded `chunk_size` value, or null when absent.
 	 * @return int|null The per-job file-part budget in bytes, 0 when unrequested,
@@ -1145,7 +1145,7 @@ final class Extractions_Controller {
 	 * the knob is misconfigured — the same discipline
 	 * {@see Job_Store::max_active_jobs()} applies to its own ceiling.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @return int The most combined elements one selection may carry across tables,
 	 *             tables_structure_only, and files.
@@ -1162,7 +1162,7 @@ final class Extractions_Controller {
 	 * Resolves the request-body byte cap through the Config seam, clamped to at
 	 * least one.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @return int The largest raw request body, in bytes, this endpoint will decode.
 	 */

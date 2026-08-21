@@ -186,7 +186,7 @@ final class Dispatcher {
 	 * a decision about the REST contract rather than a tuning choice, and lowering it
 	 * only breaks the diagnosis this exists to provide.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 */
 	private const int THROWN_MESSAGE_BOUND = 300;
 
@@ -737,7 +737,7 @@ final class Dispatcher {
 	 * fallback: after this, a failed job still polling as the fallback sentence is one
 	 * PHP died on rather than threw, and those two were previously indistinguishable.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @param Extraction_Job $job    The job whose chunk threw, as it stood when the throw happened.
 	 * @param Throwable      $thrown The throwable the packaging died on.
@@ -779,7 +779,7 @@ final class Dispatcher {
 	 * cheaper than a utility layer built for two callers; a third caller is the point
 	 * at which extracting it is worth the indirection.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @param string $absolute_path An absolute filesystem path to relativise.
 	 * @return string The path relative to the installation root.

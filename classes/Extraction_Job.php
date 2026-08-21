@@ -254,7 +254,7 @@ final readonly class Extraction_Job {
 	 * resolves the plugin's own diagnosis first, then this one, then its fallback
 	 * sentence, so `error.message` still carries exactly one string.
 	 *
-	 * @since 0.6.1
+	 * @since 0.7.0
 	 *
 	 * @param string $thrown Why the job failed, composed around the throwable that killed it.
 	 * @return self A new record identical to this one but failed and carrying the thrown reason.
