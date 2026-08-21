@@ -2,7 +2,7 @@
 
 ## 1. Scope and status
 
-This document is the durable, evidence-based statement of how a release of this plugin is cut, verified, and published. Every step below is traceable to a file and line in this repository or to a settled ADR; where the repository is silent on a step a real release needs, that is recorded under §9 rather than invented. Nothing here changes code or behaviour — it describes what the repository already does and what its own decisions already require.
+This document is the durable, evidence-based statement of how a release of this plugin is cut, verified, and published. Every step below is traceable to a file and line in this repository or to a settled ADR; where the repository is silent on a step a real release needs, that is recorded under §10 rather than invented. Nothing here changes code or behaviour — it describes what the repository already does and what its own decisions already require.
 
 Before this document existed, the procedure lived only in the maintainer's head. Two guards identified during a recent review had nowhere to be written down — §3 steps 2 and 3 — which is the immediate reason this document was written.
 
@@ -57,7 +57,7 @@ No tooling in this repository automates any of these three steps; they are hand 
 
 (Mechanical, given §4–§6 are settled.) Tag the release commit `vX.Y.Z` — every existing tag in this repository follows that form (`v0.1.0` through `v0.7.0`), matching the release links `CHANGELOG.md` already writes (e.g. `CHANGELOG.md:181`). Push the tag. Create the GitHub release from it, with `dist/kntnt-extractor.zip` (§6) attached under exactly that filename — the update checker's `REQUIRE_RELEASE_ASSETS` selection (§2) will not find it under any other name — and release notes drawn from the `CHANGELOG.md` entry just closed (§5).
 
-**Who runs this step, and how** (settled 2026-08-16, previously open under §9): the maintainer runs it by hand from a local clone, with the GitHub CLI. There is deliberately no release workflow — `.github/workflows/` holds only `gate.yml`, and this project releases infrequently and by decision rather than continuously, so the two judgement calls this procedure actually turns on (§3 step 3 and §4) have no automated form anyway.
+**Who runs this step, and how** (settled 2026-08-16, previously open under §10): the maintainer runs it by hand from a local clone, with the GitHub CLI. There is deliberately no release workflow — `.github/workflows/` holds only `gate.yml`, and this project releases infrequently and by decision rather than continuously, so the two judgement calls this procedure actually turns on (§3 step 3 and §4) have no automated form anyway.
 
 The commands, in order, on the tagged commit:
 
@@ -82,18 +82,40 @@ Concretely, for the change that last moved `API_VERSION` (6 → 7, ADR-0018): `k
 
 The ordering that must hold, therefore: decide whether §4 moves `API_VERSION`; if it does, do not install this plugin's release into any environment that will run an extraction until the corresponding `kntnt-wp-skills` release, with its ceiling raised and its own compatibility fix landed, is also installed there.
 
-**How the production site receives the update** (settled 2026-08-16, previously open under §9): by hand, by the maintainer, through wp-admin — never by auto-update, and never by anyone at the client. This is not a preference; it is what makes the ordering above enforceable. An auto-updating production site chooses its own moment, which would mean a server carrying a new `API_VERSION` could meet a client that has not been updated yet, and the coordinated ordering would stop being something anyone controls.
+**How the production site receives the update** (settled 2026-08-16, previously open under §10): by hand, by the maintainer, through wp-admin — never by auto-update, and never by anyone at the client. This is not a preference; it is what makes the ordering above enforceable. An auto-updating production site chooses its own moment, which would mean a server carrying a new `API_VERSION` could meet a client that has not been updated yet, and the coordinated ordering would stop being something anyone controls.
 
 The install sequence, in order:
 
 1. Confirm no extraction is in flight: `GET /extractions` must list nothing. An install mid-extraction replaces the code a live build is running.
-2. Upload `kntnt-extractor.zip` from the GitHub release through wp-admin's plugin upload.
-3. Verify with `GET /status` that the reported plugin version and `api_version` are the released ones.
-4. Only then update the client, and only then run an extraction.
+2. Read §9 against this site: an override pinning `chunk_size` away from what the release ships is either removed or justified in writing, before the code under it changes.
+3. Upload `kntnt-extractor.zip` from the GitHub release through wp-admin's plugin upload.
+4. Verify with `GET /status` that the reported plugin version and `api_version` are the released ones.
+5. Only then update the client, and only then run an extraction.
 
 The bundled update checker (`README.md:28`) makes the new release *visible* on the Plugins screen; it is not the mechanism by which this site is updated, and nothing in this procedure should be read as delegating the decision to it.
 
-## 9. Questions this document could not answer from the repository
+## 9. Site overrides that pin a knob away from the shipped default
+
+(Judgement call, and the one step in this document run against a site rather than against the commit being tagged — it needs access to that site, not to this repository.) Run it on every site that will receive the release, at step 2 of §8's install sequence. It answers one question: **is this site's file-part budget still the one this build ships, and where it is not, does the deviation still have a reason?** The knob is `chunk_size`. The same reading applies to any other knob a site has pinned, but this is the one with a measured history of deciding whether a run finishes at all.
+
+**Why an override may be there at all.** `chunk_size` is the one bound whose wrong value does not merely slow an extraction down: one value of it made a full clone impossible rather than slow. The shipped default was 8 MiB until ADR-0023 and had never been measured. The controlled experiment that replaced it, `docs/measurements/2026-08-19-chunk-size-curve.md`, packaged a 36 MB file in 85 s at 256 KB; at 4 MiB — half that old default, and the size the failing production run's own stall-halving (ADR-0015) had already adapted down to — the same file managed two parts in twelve minutes before the run was abandoned, about forty minutes for the one file extrapolated. The asymmetry that follows from those numbers is stated on the knob's own row in `README.md` (#27, ADR-0023) and is not restated here. What matters for this step is the other half of ADR-0023's finding: **the right value is host-specific, and a shipped constant cannot be host-specific by construction** (ADR-0023, "What 256 KB is, and what it is not"). An override is therefore a legitimate thing for a site to carry — and, since ADR-0023 moved the default to the value production had already pinned, an override written before that release may now be pinning exactly what the plugin ships anyway.
+
+**Where an override can hide.** Two places, and only one of them is a file:
+
+- **`KNTNT_EXTRACTOR_CHUNK_SIZE`, defined in `wp-config.php`.** The constant supplies the base value wherever it is defined (`classes/Config.php:69-70`), and reading `wp-config.php` finds it.
+- **A filter on `kntnt_extractor_config_chunk_size`.** The filter runs on that base value and its return is authoritative, so a filter always beats the constant (`classes/Config.php:72-73`). It can be registered from anywhere that loads early enough: a theme's `functions.php`, an mu-plugin — **or a snippet-manager plugin's collection**, where the code is a row in the database that the manager materialises at runtime. On the production site it is exactly that: a Perfmatters code snippet, materialised as an mu-plugin. **No file search of the site's plugins finds that one**, because there is no file in the plugin tree to find; it is found by opening the snippet manager's own screen and reading the collection.
+
+The second place is why this step is written down. The 256 KB that separated a clone which died after six hours from one that completed in 3.56 h (`docs/measurements/2026-08-19-successful-run.md`) lived in a snippet collection and nowhere else for the whole of this project's only completed clone — a fact the system's survival turned on, invisible to every check in this repository (#32).
+
+**What to do with what you find.**
+
+- **An override matching the shipped default is removed.** `Artifact_Builder::DEFAULT_CHUNK_SIZE` is 262,144 bytes (`classes/Artifact_Builder.php:64`). A pin at that value changes nothing today and is a second copy of a number that will silently override any future change to the default, in a place no grep of this repository reaches.
+- **An override that deviates from it is justified in writing, or removed.** The justification belongs beside the override — a comment in `wp-config.php`, or the snippet's own description — and names the measurement that produced the value rather than the intuition that chose it. The method is in `docs/measurements/2026-08-19-chunk-size-curve.md` and took under ten minutes per point: vary the size against one large file and read the part count.
+- **A one-off measurement needs no pin at all.** `POST /extractions` carries an optional `chunk_size` for a single run (ADR-0021), and an authenticated `GET /status` names `chunk_size` in `honours`, which is how a client tells a build that accepts the member from one that ignores it. Probing a host is not a reason to leave a permanent override behind.
+
+**How to confirm what a run actually spends: read the part count, not the configuration.** The configuration cannot answer it — the seam is constant-then-filter with the filter having the last word (`classes/Config.php:69-73`), so a snippet registered after the filter has already fired reads as configured and was never in force. The part count is what the run did spend. Submit a single-file extraction against a file large enough to need several parts and read `chunks_done` off `GET /extractions/{id}` (`classes/Rest/Extractions_Controller.php:592`); on a job of one file and no tables every segment is a part of that file, so the counter is the part count. The 36,248,482-byte file the curve was measured on yields **139 parts at 256 KB** — measured, and repeated — against **9 parts at 4 MiB**, which is arithmetic rather than measurement, since that run was abandoned after two. Either way the count names the size unambiguously, which is why the experiment used it to confirm the filter was in force between runs (`docs/measurements/2026-08-19-chunk-size-curve.md`, "Method"). Reporting a resolved configuration over REST was considered for this step and rejected on the same ground: it would report what is configured, and what is configured and what a run spends can part company (#32).
+
+## 10. Questions this document could not answer from the repository
 
 When this document was first written, three steps a real release needs could not be established from anything in the repository, and were recorded here rather than guessed at. All three were settled by the maintainer on 2026-08-16 and are now written into the sections they belong to. They are kept here, with their answers, so a reader who wonders whether a step was decided or merely forgotten can tell the difference.
 

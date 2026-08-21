@@ -62,6 +62,33 @@ final class Table_Dumper {
 	private const int ROWS_PER_INSERT = 100;
 
 	/**
+	 * The site's table names keyed for lookup, or `null` before the first read.
+	 *
+	 * Filled by {@see require_known_table()} and no longer-lived than the request
+	 * that filled it: the plugin constructs one dumper per request, so this is
+	 * request scope by construction rather than by invalidation. It is an
+	 * optimisation and never an authority — a name it does not carry sends the
+	 * check back to the live catalog before anything is refused (ADR-0003's
+	 * addendum), which is what keeps the validation rule the same rule it was
+	 * when every slice read the listing for itself.
+	 *
+	 * @var array<string, true>|null
+	 */
+	private ?array $catalog = null;
+
+	/**
+	 * Each table's paging key in index order, keyed by the table's name.
+	 *
+	 * A table that resolves to no key at all is recorded as an empty list rather
+	 * than left absent, so the keyless tables — whose paging is already the
+	 * expensive kind — are not re-resolved on every slice. That distinction is why
+	 * {@see ordering_key()} reads this with `array_key_exists()` and not `isset()`.
+	 *
+	 * @var array<string, array<int, string>>
+	 */
+	private array $ordering_keys = [];
+
+	/**
 	 * Returns only the structure block for one table — DDL, no rows.
 	 *
 	 * The same `--` header, `DROP TABLE IF EXISTS`, and `CREATE TABLE` a table's first
@@ -194,6 +221,12 @@ final class Table_Dumper {
 	 * own catalog — never against caller-supplied SQL (ADR-0003) — is what keeps
 	 * that interpolation safe even if the job record was altered after it was created.
 	 *
+	 * The listing is read once per request and memoised. The memo is an optimisation
+	 * and never an authority: it answers a hit, and a miss re-reads the live catalog
+	 * before anything is refused, so a name is accepted or refused against a listing
+	 * this request took from the database either way — and a refusal is now decided
+	 * on one read after the name was seen rather than possibly before it.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param string $table The table name to validate.
@@ -211,9 +244,22 @@ final class Table_Dumper {
 		global $wpdb;
 
 		// The catalog is the authoritative allow-list; a name absent from it never
-		// reaches a query.
-		$existing = $wpdb->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- a schema listing is the authoritative existence check (ADR-0003); nothing to prepare or cache.
-		if ( ! in_array( $table, $existing, true ) ) {
+		// reaches a query. The memo is an optimisation and never an authority: it answers
+		// a hit, and a miss re-reads the live catalog before anything is refused, so a
+		// name is accepted or refused on a listing this request took from the database
+		// either way. A re-read also drops any key resolved for that name, since a name
+		// that has just reappeared may not be the table whose key was memoised.
+		if ( $this->catalog === null || ! isset( $this->catalog[ $table ] ) ) {
+			$existing = $wpdb->get_col( 'SHOW TABLES' ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching -- a schema listing is the authoritative existence check (ADR-0003); nothing to prepare or cache.
+			$this->catalog = [];
+			foreach ( $existing as $name ) {
+				if ( is_string( $name ) ) {
+					$this->catalog[ $name ] = true;
+				}
+			}
+			unset( $this->ordering_keys[ $table ] );
+		}
+		if ( ! isset( $this->catalog[ $table ] ) ) {
 			throw new RuntimeException( 'Refusing to dump a table that does not exist in the catalog.' );
 		}
 
@@ -290,12 +336,25 @@ final class Table_Dumper {
 	 * An empty result means the table has no primary key at all — a plugin table may
 	 * ship without one — and the caller falls back to an offset walk.
 	 *
+	 * The answer is resolved once per request and memoised, so the many slices one
+	 * tick takes of one table cost one index listing between them. That narrows
+	 * {@see dump_chunk()}'s cursor-arity check from per-slice to per-tick: a primary
+	 * key changed between two ticks is still caught, which is what a resumed build
+	 * actually rests on, and a change between two slices of one tick is not.
+	 *
 	 * @since 0.4.0
 	 *
 	 * @param string $table The validated table name.
 	 * @return array<int, string> The primary key's columns in index order, or an empty list.
 	 */
 	private function ordering_key( string $table ): array {
+
+		// A table's key is resolved once per request. Every slice of one table in one tick
+		// asks the same question of a schema that cannot answer differently without the
+		// table having been recreated underneath the dump.
+		if ( array_key_exists( $table, $this->ordering_keys ) ) {
+			return $this->ordering_keys[ $table ];
+		}
 
 		/**
 		 * The WordPress database access layer.
@@ -317,7 +376,11 @@ final class Table_Dumper {
 		}
 		ksort( $columns );
 
-		return array_values( $columns );
+		// Memoise before answering, so every later slice of this table in this request
+		// is served from here rather than from the engine.
+		$this->ordering_keys[ $table ] = array_values( $columns );
+
+		return $this->ordering_keys[ $table ];
 
 	}
 
