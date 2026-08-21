@@ -305,7 +305,7 @@ kntnt_extractor_assert( is_array( $lost_data ) && ( $lost_data['code'] ?? null )
 
 // The refusal is the one an ordinary second create already earns, byte for byte:
 // what a 429 tells the caller about the occupied slot is a settled question this fix
-// does not reopen (see "Findings considered and rejected" in plans/README.md).
+// does not reopen (ADR-0028).
 $plain_refusal = $post_extractions( $valid_body() );
 kntnt_extractor_assert( $plain_refusal->get_status() === $lost->get_status() && $plain_refusal->get_data() === $lost_data, 'The lost-race refusal is the ceiling refusal sent today, unchanged in status, code and body (#36)' );
 
