@@ -159,6 +159,14 @@ final class Status_Controller {
 	 * those two names and concluding a long `strict: false` run survives a
 	 * deletion would be wrong, with nothing on the wire to say so, which is the
 	 * `strict` discoverability failure ADR-0017 exists to close, one layer up.
+	 * `timings` is `GET /extractions/{id}`' bounded per-phase chunk timings
+	 * (issue #39), and it is the one name here that reports a capability rather
+	 * than an unconditional behaviour: the member appears only once the site's own
+	 * `phase_timing` knob has asked for the measurement, which it does not by
+	 * default. That is deliberate and is the same shape as `chunk_size`, whose
+	 * presence likewise says the build understands the member rather than that any
+	 * particular value is in force — a client checks the name to know whether
+	 * asking is even possible, and reads the poll to know whether anyone asked.
 	 *
 	 * @since 0.6.0
 	 */
@@ -172,6 +180,7 @@ final class Status_Controller {
 		'skipped_files',
 		'state',
 		'strict',
+		'timings',
 		'unknown_resource_names',
 	];
 

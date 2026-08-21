@@ -96,3 +96,7 @@ _Avoid_: extraction history, activity log
 The bounded last-N of packaging chunks an extraction job has begun, persisted on the job record and reported on `GET /extractions/{id}` as `attempts?`. A debug surface for a long or stuck run, not an audit trail and not the stall counter: it names what was started, drops the oldest entry past eight, and never grows with the selection. Distinct from the audit log, which records only a ready transition.
 _Avoid_: audit, history, observability
 
+**Phase timing**:
+The bounded last-N of per-phase wall-clock durations a packaging chunk recorded, persisted on the job record and reported on `GET /extractions/{id}` as `timings?` in microseconds. The attempt log's sibling and its mirror image: an attempt is written before a chunk so a host kill leaves evidence, a timing only once the chunk has finished, so it answers where a chunk's time went rather than which chunk was begun. Separates the phases it can be spent in — the container's open or resume, the path resolution and its stats, the source read, the seal, the container's suspend, and the record-split save — against the chunk's own total, so the unattributed remainder is visible instead of assumed. Off unless the site's `phase_timing` knob asks for it: a run that did not ask reads no clock and records nothing.
+_Avoid_: profiling, metrics, telemetry, instrumentation (as the name of the series)
+

@@ -105,6 +105,18 @@ A poll of a running or ready job carries `progress`:
 
 The four table and file counters advance only when a whole table or a whole file is finished, so a job working steadily through one large table reports the same counters for minutes at a time. `chunks_done` counts packaging chunks — one table slice, one structure-only table, or one file part — so it moves on every chunk the build seals. **Watch `chunks_done` for liveness and the other four for completion.** It has no total, because how many slices a table takes is not knowable before it is dumped; on a ready job it equals the number of segments the artifact holds.
 
+### Attributing a slow packaging chunk
+
+If a run is slow and `chunks_done` is moving, the next question is where each chunk's time goes. Define `KNTNT_EXTRACTOR_PHASE_TIMING` as `true` in `wp-config.php` (or return `true` from the `kntnt_extractor_config_phase_timing` filter), and every completed chunk records how long it spent in each of its phases: opening or resuming the container, resolving the path and stating the file, reading the part, sealing it, suspending the container, and saving the job record. A poll then carries `timings`, the newest eight chunks, each an `at` stamp and a map of phase name to **microseconds**:
+
+```json
+{ "at": 1755772800, "phases": { "total": 229431, "resume": 4210, "resolve": 88300, "read": 61200, "seal": 1180, "suspend": 39400, "save": 9700 } }
+```
+
+`total` is the whole chunk, so whatever the named phases do not add up to is the part nothing has attributed yet. `save` is measured once although a chunk pays it twice — the second save is the one that writes the entry, and it cannot time its own write. A chunk that packages a table records no `resolve` or `read`, having run neither.
+
+**It is off by default and costs nothing when off**: with the knob unset no clock is read at all and the job record is unchanged. It is a debug surface rather than something to leave running — turn it on to answer a question about a specific host, read the answer, and turn it off again.
+
 ### Checking what of yours is still on the site
 
 `GET /extractions` normally lists only your own live jobs — queued, running, or ready — so a stranded job can be found and cancelled. Add `?state=all` and the same call additionally lists your own terminal jobs: `consumed`, `cancelled`, `failed`, and `expired`. It answers "is there sealed data of mine still on this site", the question that matters before or after a run: a terminal entry carries only its id, state, and timestamps — never `progress`, never a `download_url`, since there is nothing left to fetch for it. Another user's job is never listed, terminal or not; the owner scope is exactly as narrow with `state=all` as it is by default.

@@ -56,9 +56,11 @@ final readonly class Extraction_Job {
 	 * not failed that way, and a release too old to know the key ignores it. Nor does
 	 * the `strict` flag the packaging path reads (issue #31, ADR-0026), which is that
 	 * shape again — written only when false, absent meaning the hard fail on a vanished
-	 * file that every earlier record already had. ADR-0024 settles the general case
-	 * behind all three: there is no earlier record to stay compatible with, so what a
-	 * bump would signal has no reader.
+	 * file that every earlier record already had. Nor does the `timing_log` a chunk
+	 * records when the `phase_timing` knob asks for it (issue #39), which joins on
+	 * exactly that footing: absent on every record the knob was off for, which is every
+	 * record by default. ADR-0024 settles the general case behind all four: there is no
+	 * earlier record to stay compatible with, so what a bump would signal has no reader.
 	 *
 	 * @since 0.1.0
 	 */
@@ -76,6 +78,23 @@ final readonly class Extraction_Job {
 	 * @since 0.6.0
 	 */
 	public const int ATTEMPT_LOG_BOUND = 8;
+
+	/**
+	 * Newest completed chunks the job record keeps a phase timing for.
+	 *
+	 * The same last-N shape as {@see ATTEMPT_LOG_BOUND}, for the same reason: a
+	 * debug series that grew with the selection would put the half-terabyte write
+	 * problem back (ADR-0014), and the question this one answers — where does a
+	 * chunk's time go — is answered by a sample rather than a census. Eight chunks
+	 * per poll over a run of tens of thousands is a far larger series than the
+	 * question needs, and it keeps `state.json` a few hundred bytes.
+	 *
+	 * A separate constant from the attempt bound although the number is the same:
+	 * the two surfaces are bounded for the same reason but are not the same surface,
+	 * and tying one to the other would make a change to either read as a change to
+	 * both.
+	 */
+	public const int TIMING_LOG_BOUND = 8;
 
 	/**
 	 * The record's keys that are persisted apart from the rest, in the selection file.
@@ -140,6 +159,7 @@ final readonly class Extraction_Job {
 	 * @param array<int, Chunk_Attempt> $attempt_log Newest begun chunk attempts, oldest first, capped at {@see ATTEMPT_LOG_BOUND}. Empty until the first tick. A debug surface, not the stall counter (ADR-0016).
 	 * @param string|null               $thrown Why the job failed, when an unexpected throw killed the build, or null. The counterpart of $error and deliberately not the same field: this one is composed around a string the plugin did not write and cannot vouch for, whereas $error is its own diagnosis (issue #25). Surfaced verbatim to the polling owner like $error, but under a deliberately wider rule: the relayed part **may** carry a filesystem path or a fragment of SQL, and the bound on it limits the size of that disclosure rather than its kind (ADR-0022).
 	 * @param bool                      $strict Whether a vanished file is fatal to this job. False is what the caller asked for on the create, and it is carried here rather than left at the door because the create filter closes only the gap up to the POST while the packaging path meets the much larger one after it (ADR-0026). True is the default in every direction: an omitted member, and an absent or ill-typed key on a record written before this field existed, all read as the hard fail that has always been the behaviour.
+	 * @param array<int, Chunk_Timing>  $timing_log Newest completed chunks' phase timings, oldest first, capped at {@see TIMING_LOG_BOUND}. Empty unless the `phase_timing` knob asked for the measurement, which it does not by default (issue #39). A debug surface like the attempt log beside it, and recorded on the opposite side of the work: an attempt is written before a chunk so a host kill leaves evidence, a timing only once the chunk it measures has finished.
 	 */
 	public function __construct(
 		public string $id,
@@ -168,6 +188,7 @@ final readonly class Extraction_Job {
 		public array $attempt_log = [],
 		public ?string $thrown = null,
 		public bool $strict = true,
+		public array $timing_log = [],
 	) {}
 
 	/**
@@ -194,7 +215,7 @@ final readonly class Extraction_Job {
 			return $this;
 		}
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, [ ...$this->skipped_files, $file ], $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, [ ...$this->skipped_files, $file ], $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -212,7 +233,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -243,7 +264,35 @@ final readonly class Extraction_Job {
 			$log = array_slice( $log, -self::ATTEMPT_LOG_BOUND );
 		}
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown, $this->strict );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown, $this->strict, $this->timing_log );
+
+	}
+
+	/**
+	 * Returns a copy carrying one more chunk's phase timing, stamped as just updated.
+	 *
+	 * The mirror image of {@see with_attempt()}, and deliberately on the other side of
+	 * the work: an attempt is recorded before a chunk runs so a kill outside PHP still
+	 * leaves evidence, while a timing is only meaningful once the chunk it measures has
+	 * finished, so a killed chunk records none. Reached only when the `phase_timing`
+	 * knob asked for the measurement (issue #39); a job that did not ask never calls
+	 * this and its record keeps the shape it has always had.
+	 *
+	 * The series is last-N for the reason the attempt log is (ADR-0014/0016): a debug
+	 * surface must not grow with the selection.
+	 *
+	 * @param Chunk_Timing $timing What the chunk just completed spent, phase by phase.
+	 * @return self A new record identical to this one but carrying the timing.
+	 */
+	public function with_timing( Chunk_Timing $timing ): self {
+
+		// Append this chunk onto the last-N series, dropping the oldest once full.
+		$series = [ ...$this->timing_log, $timing ];
+		if ( count( $series ) > self::TIMING_LOG_BOUND ) {
+			$series = array_slice( $series, -self::TIMING_LOG_BOUND );
+		}
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $series );
 
 	}
 
@@ -268,7 +317,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -292,7 +341,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_thrown_failure( string $thrown ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown, $this->strict );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -318,7 +367,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -338,7 +387,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -360,7 +409,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_host_limits( string $host_memory_limit, string $host_max_execution_time, string $raised_memory_limit, string $raised_max_execution_time ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict, $this->timing_log );
 
 	}
 
@@ -395,7 +444,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int, strict?: false, thrown?: string, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int, strict?: false, thrown?: string, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>, timing_log?: list<array{at: int, phases: array<string, int>}>}
 	 */
 	public function to_array(): array {
 
@@ -465,6 +514,17 @@ final readonly class Extraction_Job {
 				$serialized[] = $attempt->to_array();
 			}
 			$record['attempt_log'] = $serialized;
+		}
+
+		// Omit the timing series unless the measurement was asked for and a chunk has
+		// completed under it, so the default record is byte for byte what it was before
+		// the instrument existed (issue #39).
+		if ( $this->timing_log !== [] ) {
+			$timings = [];
+			foreach ( $this->timing_log as $timing ) {
+				$timings[] = $timing->to_array();
+			}
+			$record['timing_log'] = $timings;
 		}
 
 		return $record;
@@ -585,6 +645,22 @@ final readonly class Extraction_Job {
 			}
 		}
 
+		// The timing series is omitted unless the measurement was asked for, which it is
+		// not by default, so an absent or ill-typed value reads as nothing measured
+		// rather than disqualifying the record. A malformed entry is dropped, not fatal.
+		$timing_log = [];
+		if ( isset( $data['timing_log'] ) && is_array( $data['timing_log'] ) && array_is_list( $data['timing_log'] ) ) {
+			foreach ( $data['timing_log'] as $entry ) {
+				$timing = Chunk_Timing::from_array( $entry );
+				if ( $timing !== null ) {
+					$timing_log[] = $timing;
+				}
+			}
+			if ( count( $timing_log ) > self::TIMING_LOG_BOUND ) {
+				$timing_log = array_slice( $timing_log, -self::TIMING_LOG_BOUND );
+			}
+		}
+
 		// Reject the record unless every field this release writes is present and
 		// correctly typed. That includes the keys an older release never wrote: this
 		// release understands the shapes it writes and no others (ADR-0024), so such a
@@ -605,7 +681,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown, $strict );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown, $strict, $timing_log );
 
 	}
 
