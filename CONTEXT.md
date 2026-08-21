@@ -40,7 +40,7 @@ The stage an extraction job is in, reported verbatim to a polling caller. Seven 
 _Avoid_: status
 
 **Job record**:
-The extraction job's own persisted state, held as two files in its working directory rather than one: the *selection file* carries the requested tables and files — and, when a `strict: false` create dropped vanished paths, those skipped names — and is written once, and the *state file* carries everything a tick changes and is what every save rewrites. The split is on what is unbounded, not on what is immutable — a selection runs to tens of thousands of paths and a save happens twice per packaged chunk, so keeping the two apart is what makes a save's cost independent of how much was selected.
+The extraction job's own persisted state, held as two files in its working directory rather than one: the *selection file* carries the requested tables and files and the skipped names beside them, and the *state file* carries everything a tick changes and is what every save rewrites. The split is on what is unbounded, not on what is immutable — a selection runs to tens of thousands of paths and a save happens twice per packaged chunk, so keeping the two apart is what makes a save's cost independent of how much was selected. The selection file is written at create and rewritten only by a tick that skipped a file, which is the one mid-run mutation that reaches it; that write pays the full selection once per skip and never once per save, and it writes the two halves in create's own order so a tick killed between them leaves a skip recorded rather than a file silently absent from both the artifact and the report (ADR-0026).
 _Avoid_: job file, job.json
 
 **Orphaned artifact**:
@@ -48,7 +48,7 @@ A sealed artifact in the served downloads directory that no job record claims �
 _Avoid_: leftover file, dangling artifact
 
 **Skipped file**:
-A file named in a `strict: false` submission that no longer exists on disk at job creation. Dropped from the selection rather than failing the job, recorded on the job record, and reported on the create and poll responses so the caller can see what was omitted. A missing table is never skipped: silence there is data loss. A path that resolves outside the installation root is not vanished either, and still 404s.
+A file named in a `strict: false` submission that no longer exists on disk when the job reaches for it — at job creation, or at any point up to the packaging of its own chunk. Dropped from the selection rather than failing the job, recorded on the job record, and reported on the create and poll responses so the caller can see what was omitted; a file that vanishes after the create is added to the same list mid-run, so a poll may name more than the `201` did (ADR-0026). A missing table is never skipped: silence there is data loss. A path that resolves outside the installation root is not vanished either, and still 404s. Nor is a file that exists and cannot be read, or one that vanishes after part of it has already been packaged — the artifact would then hold it truncated, with nothing in the container format for a reader to notice that by, so the job fails instead.
 _Avoid_: ignored file, optional file
 
 **Segment**:

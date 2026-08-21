@@ -34,6 +34,13 @@ use RuntimeException;
  * cross-segment authentication state to serialise: resuming reopens the container
  * and appends, never re-encrypting a completed segment.
  *
+ * Because a build spans hours on a site that stays live, this is also where a file
+ * can be found gone that was there when the job was created. Under `strict: false`
+ * that is a reported skip rather than a fatal error, and the reach of the flag is
+ * the whole run rather than the create alone (ADR-0026); the two cases it must not
+ * absorb — a path out of bounds, and a file already half-packaged — are argued at
+ * {@see locate_in_root()} and in {@see advance()}'s file branch.
+ *
  * @since 0.1.0
  */
 final class Artifact_Builder {
@@ -142,17 +149,22 @@ final class Artifact_Builder {
 	 * reopening truncates the container back to the committed offset, so a partial write
 	 * a crashed tick left behind is discarded rather than sealed into the result (AC3).
 	 *
+	 * A `strict: false` job passes over a file that has gone since it was created rather
+	 * than failing, and the step names it so the caller can record the skip (ADR-0026).
+	 * Such a step seals no segment; it moves the build past one file, which is progress
+	 * of the ordinary kind and clears the stall counter like any other.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Extraction_Job   $job           The running job whose selection to package.
 	 * @param string           $build_path    Absolute path of the in-progress container in the job's state directory.
 	 * @param string           $download_path Absolute path the finished container is published to.
 	 * @param Phase_Timer|null $timer         Instrument to mark this chunk's phases on, or null — the default and the production case — to package without reading a clock at all (issue #39).
-	 * @return Build_Step The progress to persist, and whether the build is complete.
+	 * @return Build_Step The progress to persist, whether the build is complete, and any file skipped.
 	 *
-	 * @throws RuntimeException When the public key is undecodable, a file resolves outside
-	 *                          the root or cannot be read, or the container cannot be
-	 *                          written or published.
+	 * @throws RuntimeException When the public key is undecodable, a file is out of bounds,
+	 *                          is gone and not skippable, or cannot be read, or the
+	 *                          container cannot be written or published.
 	 */
 	public function advance( Extraction_Job $job, string $build_path, string $download_path, ?Phase_Timer $timer = null ): Build_Step {
 
@@ -219,7 +231,10 @@ final class Artifact_Builder {
 		// slices of rows under the table's name first, then every structure-only table as
 		// one DDL-only segment (issue #16), then each file as bounded parts under its
 		// relative path. When all three selections are exhausted there is no data segment
-		// left and only the trailer remains to be written.
+		// left and only the trailer remains to be written. A file branch that finds its
+		// file gone may pass over it instead of sealing anything, and names it here for
+		// the caller to record; no other branch can (ADR-0026).
+		$skipped_file = null;
 		if ( $tables_done < count( $job->tables ) ) {
 			$table = $job->tables[ $tables_done ];
 			[ $slice, $next_cursor, $next_rows, $table_complete ] = $this->dumper->dump_chunk( $table, $table_cursor, $table_offset, $budgets->table_rows, $budgets->table_bytes );
@@ -245,18 +260,49 @@ final class Artifact_Builder {
 			++$structure_done;
 		} elseif ( $file_index < count( $job->files ) ) {
 			$file = $job->files[ $file_index ];
-			[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $budgets->file_bytes, $timer );
-			$timer?->start( Phase_Timer::SEAL );
-			$writer->add_segment( $file, $part );
-			$timer?->stop( Phase_Timer::SEAL );
-			++$segment_count;
-			if ( $file_done ) {
+
+			// Under `strict: false` a file that has gone since the job was created is a
+			// reported skip rather than a fatal error, wherever in the run it is reached
+			// (ADR-0026) — but only while none of it has been sealed. `$file_size` is the
+			// identity pinned when the first part was written, so its nullity is exactly
+			// "nothing of this file is in the container yet". Once a part is in, skipping
+			// would publish the file truncated at whatever offset the deletion fell on,
+			// and `docs/container-format.md` gives a reader no way to tell that from a
+			// short file — so this is one of the places the project fails loudly instead.
+			// A path that is out of bounds rather than gone never reaches either branch:
+			// locate_in_root() throws on it, exactly as the create path 404s on it. The
+			// check is a `realpath` walk of its own, so it is marked on the same
+			// resolution phase the part read's own resolution accumulates into: a
+			// filesystem call left outside the instrument would be attributed to nothing,
+			// which is the remainder issue #39 exists to shrink.
+			$timer?->start( Phase_Timer::RESOLVE );
+			$vanished = ! $job->strict && $this->locate_in_root( $file ) === null;
+			$timer?->stop( Phase_Timer::RESOLVE );
+			if ( $vanished ) {
+				if ( $file_size !== null ) {
+					throw new RuntimeException( 'A requested file was deleted after part of it had been packaged.' );
+				}
+				$skipped_file = $file;
 				++$file_index;
 				$file_offset = 0;
-				$file_size = null;
-				$file_mtime = null;
-			} else {
-				$file_offset = $next_offset;
+			}
+
+			// Seal the next bounded part of the file the build is on, unless the branch
+			// above has just passed over it.
+			if ( $skipped_file === null ) {
+				[ $part, $next_offset, $file_done, $file_size, $file_mtime ] = $this->read_part( $file, $file_offset, $file_size, $file_mtime, $budgets->file_bytes, $timer );
+				$timer?->start( Phase_Timer::SEAL );
+				$writer->add_segment( $file, $part );
+				$timer?->stop( Phase_Timer::SEAL );
+				++$segment_count;
+				if ( $file_done ) {
+					++$file_index;
+					$file_offset = 0;
+					$file_size = null;
+					$file_mtime = null;
+				} else {
+					$file_offset = $next_offset;
+				}
 			}
 		} else {
 
@@ -268,7 +314,7 @@ final class Artifact_Builder {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
 			$writer->discard_index();
-			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true, $skipped_file );
 		}
 
 		// The build is complete once the last table and the last file part are sealed:
@@ -285,13 +331,13 @@ final class Artifact_Builder {
 			$writer->finalize();
 			$this->publish( $build_path, $download_path );
 			$writer->discard_index();
-			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true );
+			return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), true, $skipped_file );
 		}
 		$timer?->start( Phase_Timer::SUSPEND );
 		[ $container_bytes, $index_bytes ] = $writer->suspend();
 		$timer?->stop( Phase_Timer::SUSPEND );
 
-		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), false );
+		return new Build_Step( new Build_Progress( $tables_done, $structure_done, $file_index, $file_offset, $container_bytes, $index_bytes, $segment_count, $file_size, $file_mtime, $table_offset, $table_cursor ), false, $skipped_file );
 
 	}
 
@@ -323,7 +369,7 @@ final class Artifact_Builder {
 	 * @return array{0: string, 1: int, 2: bool, 3: int, 4: int} The part bytes, the offset
 	 *         after it, whether the file is now fully packaged, and the pinned size and mtime.
 	 *
-	 * @throws RuntimeException When the path resolves outside the root, cannot be opened,
+	 * @throws RuntimeException When the path is out of bounds or gone, cannot be opened,
 	 *                          seeked, or read, or changed since its first part was sealed.
 	 */
 	private function read_part( string $file, int $offset, ?int $expected_size, ?int $expected_mtime, int $max_bytes, ?Phase_Timer $timer ): array {
@@ -424,33 +470,78 @@ final class Artifact_Builder {
 	/**
 	 * Resolves a requested file to a real absolute path at or under the root, or fails.
 	 *
-	 * The path was validated when the job was created, but a job record can be read
-	 * again much later; re-resolving it against the installation root here is defence
-	 * in depth against a record altered in between, and it is a boundary check, never a
-	 * sanitiser — a path that resolves outside the root fails the build outright. The
-	 * root and the resolved path are compared on `wp_normalize_path`'d separators so the
-	 * boundary holds on Windows/IIS too, where `realpath` renders paths with backslashes
-	 * a forward-slash prefix would never match — the same normalisation the create-time
-	 * check applies (Extractions_Controller::first_out_of_root_file). A null byte counts
-	 * as out of root because `realpath` would raise a ValueError on it.
+	 * The strict counterpart of {@see locate_in_root()}: everything that method reports
+	 * as gone is an error here. This is the path a part read takes, where a file that is
+	 * not there is a failure whatever the reason — either because the job is strict, or
+	 * because {@see advance()} has already decided the file is not skippable.
 	 *
 	 * @since 0.1.0
 	 *
 	 * @param string $file The installation-root-relative file path.
 	 * @return string The validated absolute path.
 	 *
-	 * @throws RuntimeException When the path resolves outside the root.
+	 * @throws RuntimeException When the path is out of bounds or no longer exists.
 	 */
 	private function resolve_in_root( string $file ): string {
 
-		// Fail closed unless the path resolves to a real location at or under the
-		// canonical installation root, comparing on normalised separators so the boundary
-		// holds on every platform.
+		// A file that is merely gone still fails here, and says so in its own words: an
+		// out-of-bounds message would misdescribe the ordinary case of a deleted file.
+		$abs = $this->locate_in_root( $file );
+		if ( $abs === null ) {
+			throw new RuntimeException( 'A requested file no longer exists.' );
+		}
+
+		return $abs;
+
+	}
+
+	/**
+	 * Locates a requested file inside the root, telling "gone" apart from "hostile".
+	 *
+	 * The path was validated when the job was created, but a job record can be read
+	 * again much later; re-resolving it against the installation root here is defence
+	 * in depth against a record altered in between, and it is a boundary check, never a
+	 * sanitiser — a path that tries to leave the root fails the build outright. The root
+	 * and the resolved path are compared on `wp_normalize_path`'d separators so the
+	 * boundary holds on Windows/IIS too, where `realpath` renders paths with backslashes
+	 * a forward-slash prefix would never match.
+	 *
+	 * The two outcomes are separated because `strict: false` may skip one of them and
+	 * must never skip the other, and the line is drawn exactly where the create path
+	 * draws it (Extractions_Controller::classify_files, ADR-0003/0026): a null byte, a
+	 * `..` segment, and a path resolving outside the root are out of bounds however they
+	 * fail, while a path that never attempted to leave the root and does not resolve is
+	 * simply gone. The `..` test stands on its own because a traversal whose target does
+	 * not exist would otherwise be indistinguishable from a deleted file — `realpath`
+	 * answers false for both — and the create path refuses exactly that case.
+	 *
+	 * @param string $file The installation-root-relative file path.
+	 * @return string|null The validated absolute path, or null when the file no longer exists.
+	 *
+	 * @throws RuntimeException When the path is out of bounds.
+	 */
+	private function locate_in_root( string $file ): ?string {
+
+		// Refuse a path that is hostile rather than merely absent: a null byte, which
+		// would make realpath raise a ValueError, and a `..` segment, which is a traversal
+		// attempt whether or not its target happens to exist. A root that cannot be
+		// canonicalised is a broken install and fails closed for the same reason the
+		// create path treats every file as out of bounds there.
 		$root = realpath( ABSPATH );
 		$root = $root === false ? false : wp_normalize_path( $root );
-		$abs = $root === false || str_contains( $file, "\0" ) ? false : realpath( $root . '/' . $file );
-		$abs = $abs === false ? false : wp_normalize_path( $abs );
-		if ( $root === false || $abs === false || ! ( $abs === $root || str_starts_with( $abs, $root . '/' ) ) ) {
+		if ( $root === false || str_contains( $file, "\0" ) || in_array( '..', explode( '/', str_replace( '\\', '/', $file ) ), true ) ) {
+			throw new RuntimeException( 'A requested file resolves outside the installation root.' );
+		}
+
+		// An unresolvable path inside the root is a file that has gone, which is what the
+		// caller may be entitled to skip; a resolved one is accepted only when it sits at
+		// or under the root on normalised separators.
+		$abs = realpath( $root . '/' . $file );
+		if ( $abs === false ) {
+			return null;
+		}
+		$abs = wp_normalize_path( $abs );
+		if ( ! ( $abs === $root || str_starts_with( $abs, $root . '/' ) ) ) {
 			throw new RuntimeException( 'A requested file resolves outside the installation root.' );
 		}
 

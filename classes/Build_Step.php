@@ -44,10 +44,12 @@ final readonly class Build_Step {
 	 *
 	 * @param Build_Progress $progress The progress this step reached, always accurate for what it sealed.
 	 * @param bool           $complete True once the container has been finalized and published, so no further step is due.
+	 * @param string|null    $skipped_file The installation-root-relative path this step passed over because it had vanished, or null. Non-null only under `strict: false` (ADR-0026), and a step that carries one sealed no segment: it moved the build past a file rather than packaging one, and the caller owes the path to the job's skipped list before the progress beside it is persisted.
 	 */
 	public function __construct(
 		public Build_Progress $progress,
 		public bool $complete,
+		public ?string $skipped_file = null,
 	) {}
 
 }

@@ -74,6 +74,12 @@ final class Phase_Timer {
 
 	/**
 	 * Resolving a selected path inside the installation root, and its `stat` calls.
+	 *
+	 * A chunk can resolve the same path twice: a `strict: false` job first asks
+	 * whether the file is still there at all, so that a vanished one is a skip rather
+	 * than a failure (ADR-0026), and the part read then resolves it again for the
+	 * bytes. Both are `realpath` walks against the same root, so both accumulate here
+	 * rather than one of them falling into the unattributed remainder.
 	 */
 	public const string RESOLVE = 'resolve';
 

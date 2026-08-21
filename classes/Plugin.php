@@ -103,25 +103,29 @@ final class Plugin {
 		// jobs as state files under the working directory (ADR-0004/0008). The
 		// Dispatcher drives a queued job to a sealed artifact through the
 		// Artifact_Builder and its Table_Dumper, one secret-authenticated tick at a
-		// time (ADR-0007/0009). The Sweeper is the TTL backstop that reclaims a
-		// never-consumed job (ADR-0004); it answers the recurring cron event the
-		// Installer schedules against Sweeper::SWEEP_HOOK. The Watchdog is the stall
-		// backstop that restarts a queue whose loopback died (ADR-0007); it answers its
-		// own recurring event against Watchdog::WATCHDOG_HOOK. The Audit_Log records every
-		// completed extraction at the ready transition — the non-evadable trigger — and
-		// answers the administrator-only GET /audit-log (ADR-0006).
+		// time (ADR-0007/0009) — and is built by whatever drives, never here: the
+		// Table_Dumper at the end of it memoises catalog facts for the length of one
+		// request, so a driver wired at load would hold them for the length of the PHP
+		// process instead. In production that costs a page load that drives nothing a
+		// stack it never uses; in a test process running the whole suite it is one
+		// dumper shared by every test file, which is the harness fault issue #40
+		// closes. Everything else here is stateless between requests and is wired once.
+		// The Sweeper is the TTL backstop that reclaims a never-consumed job
+		// (ADR-0004); it answers the recurring cron event the Installer schedules
+		// against Sweeper::SWEEP_HOOK. The Audit_Log records every completed extraction
+		// at the ready transition — the non-evadable trigger — and answers the
+		// administrator-only GET /audit-log (ADR-0006).
 		$authorizer = new Authorizer();
 		$config = new Config();
 		$job_store = new Job_Store( $config );
-		$dispatcher = new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper(), $config ) );
+		$driver = static fn(): Dispatcher => new Dispatcher( $job_store, $config, new Artifact_Builder( new Table_Dumper(), $config ) );
 		$sweeper = new Sweeper( $job_store, $config );
-		$watchdog = new Watchdog( $job_store, $dispatcher );
 		$audit_log = new Audit_Log();
 		$status_controller = new Status_Controller();
 		$tables_controller = new Tables_Controller( $authorizer );
 		$environment_controller = new Environment_Controller( $authorizer, $config );
 		$files_controller = new Files_Controller( $authorizer, $config );
-		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $dispatcher );
+		$extractions_controller = new Extractions_Controller( $authorizer, $config, $job_store, $driver );
 		$audit_log_controller = new Audit_Log_Controller( $audit_log );
 		add_action( 'rest_api_init', $status_controller->register_routes( ... ) );
 		add_action( 'rest_api_init', $tables_controller->register_routes( ... ) );
@@ -145,11 +149,20 @@ final class Plugin {
 		// and after each chunk is the primary driver, wired in the Dispatcher and the
 		// extractions controller; the Watchdog is the backstop that restarts a queue
 		// whose loopback died. Its recurring patrol answers the cron event the Installer
-		// schedules against Watchdog::WATCHDOG_HOOK, and its sub-hourly schedule is
-		// contributed to WordPress's cron intervals so that event has a recurrence to
-		// bind to at activation time.
-		add_filter( 'cron_schedules', $watchdog->register_schedule( ... ) ); // phpcs:ignore WordPress.WP.CronInterval.ChangeDetected -- the interval is declared as a 15-minute constant in Watchdog::register_schedule(); the sniff cannot follow the first-class-callable reference to read it.
-		add_action( Watchdog::WATCHDOG_HOOK, $watchdog->run( ... ) );
+		// schedules against Watchdog::WATCHDOG_HOOK, and the watchdog is built by that
+		// event for the same reason the extractions controller builds its driver per
+		// request: one wired at load would pin a Table_Dumper for the life of the
+		// process. Its sub-hourly schedule is contributed to WordPress's cron intervals
+		// so that event has a recurrence to bind to at activation time; that
+		// contribution is a function of two constants and needs no driver at all, which
+		// is why it is registered against the class rather than an instance.
+		add_filter( 'cron_schedules', Watchdog::register_schedule( ... ) ); // phpcs:ignore WordPress.WP.CronInterval.ChangeDetected -- the interval is declared as a 15-minute constant in Watchdog::register_schedule(); the sniff cannot follow the first-class-callable reference to read it.
+		add_action(
+			Watchdog::WATCHDOG_HOOK,
+			static function () use ( $job_store, $driver ): void {
+				( new Watchdog( $job_store, $driver() ) )->run();
+			},
+		);
 
 		// Record every completed extraction the moment it reaches ready — the
 		// sanctioned, non-evadable trigger, never at consume (ADR-0004/0006).

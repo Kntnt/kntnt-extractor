@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor\Rest;
 
+use Closure;
 use Kntnt\Extractor\Authorizer;
 use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Dispatcher;
@@ -87,7 +88,9 @@ use WP_REST_Server;
  * a safe one. An optional `strict` member, defaulting to true, is the one
  * exception to a vanished *file* being a 404: `strict: false` drops those
  * paths from the selection, records them on the job, and still 404s a missing
- * table, a traversal, or a selection that is empty after the skip.
+ * table, a traversal, or a selection that is empty after the skip. The member
+ * outlives this request — it is persisted on the job, and the packaging path
+ * applies the same rule to a file that vanishes later in the run (ADR-0026).
  *
  * A second optional member, `chunk_size`, carries the job's own file-part budget
  * in bytes, so the one setting that decides whether a multi-hour run survives can
@@ -136,8 +139,8 @@ final class Extractions_Controller {
 	private const int DEFAULT_MAX_BODY_BYTES = 52_428_800;
 
 	/**
-	 * Wires the controller to the access gate, the Config seam, the job store, and
-	 * the driver.
+	 * Wires the controller to the access gate, the Config seam, the job store, and a
+	 * factory for the driver.
 	 *
 	 * The Config seam is back, and reads exactly two knobs: the selection-element
 	 * cap and the request-body byte cap this endpoint bounds an unauthenticated
@@ -145,19 +148,43 @@ final class Extractions_Controller {
 	 * is not among them — it belongs to {@see Job_Store::has_free_slot()} beside the
 	 * count it bounds, and is read there.
 	 *
+	 * The driver arrives as a factory rather than as a driver because it is scoped to
+	 * one request: the Table_Dumper at the far end of it memoises the table catalog for
+	 * the length of a request, and a Dispatcher built once at plugin load would hold
+	 * that memo for the length of the PHP process — which in a test process running the
+	 * whole integration suite is one dumper shared by every test file (#40). Each
+	 * callback that drives asks for a driver of its own, and it goes out with the
+	 * response.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Authorizer $authorizer The shared both-capabilities access gate.
 	 * @param Config     $config     The constant-then-filter configuration seam.
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
-	 * @param Dispatcher $dispatcher Drives a job forward and nudges a stalled queue.
+	 * @param Closure    $driver     Builds this request's driver, which advances a job and nudges a stalled queue.
+	 *
+	 * @phpstan-param Closure(): Dispatcher $driver
 	 */
 	public function __construct(
 		private readonly Authorizer $authorizer,
 		private readonly Config $config,
 		private readonly Job_Store $store,
-		private readonly Dispatcher $dispatcher,
+		private readonly Closure $driver,
 	) {}
+
+	/**
+	 * Builds the driver this request advances its job with.
+	 *
+	 * A Dispatcher of its own per callback, never one shared between requests; see the
+	 * constructor for why what hangs off it must not outlive the request that asked.
+	 *
+	 * @return Dispatcher The driver, built for this request.
+	 */
+	private function dispatcher(): Dispatcher {
+
+		return ( $this->driver )();
+
+	}
 
 	/**
 	 * Registers every extraction route. Hooked on `rest_api_init`.
@@ -320,7 +347,7 @@ final class Extractions_Controller {
 		// only then confirm nothing else took it in the window the check above leaves
 		// open: the count is stale the instant it is read, so two creates that merely
 		// checked would both pass and both take.
-		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'], $payload['strict'] );
 		if ( ! $this->store->has_free_slot( 1 ) ) {
 			// Hand the slot straight back under the job's own tick lock, exactly as consume,
 			// cancel and the sweep do (ADR-0019), so a create refused here leaves no more behind
@@ -349,7 +376,7 @@ final class Extractions_Controller {
 		// Schedule the job's first continuation for after this 201 is sent, so the
 		// response never waits on loopback or packaging work — the job's execution
 		// begins post-response (ADR-0007/0010).
-		$this->dispatcher->continue_after_response( $job );
+		$this->dispatcher()->continue_after_response( $job );
 
 		// Echo the id and queued state; name skipped files only when a strict: false
 		// create actually dropped any, matching the poll's missing-key optionality.
@@ -487,12 +514,14 @@ final class Extractions_Controller {
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state, download_url }` plus
 	 *                                   `progress` while running or ready, `error`
 	 *                                   once failed, `skipped_files` when a
-	 *                                   `strict: false` create dropped vanished
-	 *                                   files, `attempts` once any chunk has
-	 *                                   been begun, and `timings` once a chunk has
-	 *                                   completed under a knob that asked to time
-	 *                                   it; a 404 for an unknown job, or a 403 for
-	 *                                   a non-owner.
+	 *                                   `strict: false` job dropped vanished files
+	 *                                   — at create or since (ADR-0026), so this
+	 *                                   list may grow after the 201 reported it —
+	 *                                   `attempts` once any chunk has been begun,
+	 *                                   and `timings` once a chunk has completed
+	 *                                   under a knob that asked to time it; a 404
+	 *                                   for an unknown job, or a 403 for a
+	 *                                   non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 
@@ -506,7 +535,7 @@ final class Extractions_Controller {
 		// the poll's latency is independent of loopback health (ADR-0010). Post-detach
 		// it drives a queued or stalled job in-process; otherwise it is the same guarded
 		// nudge, now paid after the body is echoed and left alone for a job being ticked.
-		$this->dispatcher->continue_after_response( $job );
+		$this->dispatcher()->continue_after_response( $job );
 
 		// Start from the fields every poll carries: the id, the current state, and the
 		// download link — null until the sealed artifact is published at ready.
@@ -518,12 +547,12 @@ final class Extractions_Controller {
 
 		// Append the state-scoped optional fields of the v1 poll contract: progress while
 		// the build is advancing (and complete once ready), a reason once it failed,
-		// skipped files when a strict: false create dropped vanished paths, and the
-		// bounded attempt log once any chunk has been begun (ADR-0016), and the bounded
-		// phase timings once a chunk has completed under a knob that asked for them
-		// (issue #39). Missing-key optionality — a field the contract marks absent is
-		// omitted, never sent as null — so `progress?`/`error?`/`skipped_files?`/
-		// `attempts?`/`timings?` read exactly as the spec defines.
+		// skipped files when a strict: false job dropped vanished paths, the bounded
+		// attempt log once any chunk has been begun (ADR-0016), and the bounded phase
+		// timings once a chunk has completed under a knob that asked for them (issue
+		// #39). Missing-key optionality — a field the contract marks absent is omitted,
+		// never sent as null — so `progress?`/`error?`/`skipped_files?`/`attempts?`/
+		// `timings?` read exactly as the spec defines.
 		$progress = $this->progress_of( $job );
 		if ( $progress !== null ) {
 			$response['progress'] = $progress;
@@ -911,7 +940,7 @@ final class Extractions_Controller {
 		}
 
 		// Advance the surviving job one tick and report the state it reached.
-		$advanced = $this->dispatcher->tick( $job );
+		$advanced = $this->dispatcher()->tick( $job );
 
 		return new WP_REST_Response(
 			[
@@ -983,7 +1012,9 @@ final class Extractions_Controller {
 	 * table, a traversal, a null-byte path, or a selection that is empty once
 	 * the vanished files are gone. Old clients that omit the member keep the
 	 * behaviour they already understood, which is why `strict` itself required
-	 * no version bump on its own.
+	 * no version bump on its own. The resolved flag is carried onto the job record
+	 * rather than consumed here: the same rule governs a file that vanishes later,
+	 * while the job is being packaged (ADR-0026).
 	 *
 	 * `chunk_size` is optional on the same terms and checked immediately after
 	 * `strict`, since both are optional scalar members refused the same way. It
@@ -1000,7 +1031,7 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>, chunk_size: int}|WP_Error
+	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>, chunk_size: int, strict: bool}|WP_Error
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
@@ -1144,6 +1175,7 @@ final class Extractions_Controller {
 			'public_key' => $public_key,
 			'skipped_files' => $skipped_files,
 			'chunk_size' => $chunk_size,
+			'strict' => $strict,
 		];
 
 	}

@@ -150,15 +150,23 @@ final class Status_Controller {
 	 * and worth naming precisely because the value a host survives is measured
 	 * rather than universal (`docs/measurements/2026-08-19-chunk-size-curve.md`), so
 	 * a client that cannot see the name is stuck with whatever constant the site
-	 * happens to carry. `timings` is `GET /extractions/{id}`' bounded per-phase
-	 * chunk timings (issue #39), and it is the one name here that reports a
-	 * capability rather than an unconditional behaviour: the member appears only
-	 * once the site's own `phase_timing` knob has asked for the measurement, which
-	 * it does not by default. That is deliberate and is the same shape as
-	 * `chunk_size`, whose presence likewise says the build understands the member
-	 * rather than that any particular value is in force — a client checks the name
-	 * to know whether asking is even possible, and reads the poll to know whether
-	 * anyone asked.
+	 * happens to carry. `packaging_skips` is the reach of `strict: false` rather
+	 * than a member of its own: a build carrying it also skips a file that
+	 * vanishes *while it is packaging*, where a build without it skips only what
+	 * was already gone at create and hard-fails the rest of a multi-hour run
+	 * (ADR-0026). It is on this list because `strict` and `skipped_files` were
+	 * both already here against builds that did exactly that — a client reading
+	 * those two names and concluding a long `strict: false` run survives a
+	 * deletion would be wrong, with nothing on the wire to say so, which is the
+	 * `strict` discoverability failure ADR-0017 exists to close, one layer up.
+	 * `timings` is `GET /extractions/{id}`' bounded per-phase chunk timings
+	 * (issue #39), and it is the one name here that reports a capability rather
+	 * than an unconditional behaviour: the member appears only once the site's own
+	 * `phase_timing` knob has asked for the measurement, which it does not by
+	 * default. That is deliberate and is the same shape as `chunk_size`, whose
+	 * presence likewise says the build understands the member rather than that any
+	 * particular value is in force — a client checks the name to know whether
+	 * asking is even possible, and reads the poll to know whether anyone asked.
 	 *
 	 * @since 0.6.0
 	 */
@@ -167,6 +175,7 @@ final class Status_Controller {
 		'chunk_size',
 		'chunks_done',
 		'disclosure',
+		'packaging_skips',
 		'selection_limits',
 		'skipped_files',
 		'state',
