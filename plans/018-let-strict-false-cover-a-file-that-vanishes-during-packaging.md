@@ -58,6 +58,8 @@ Two things must be established before you write anything, and both are STOP cond
 1. **Where the read fails.** Plan 005 made a failed or empty file read an error rather than a silently empty segment — deliberately, and that decision stands. This plan does not undo it: an unreadable file is still an error when `strict` is true. What must change is only the `strict: false` case.
 2. **Whether the packaging path can even see `strict`.** The flag is a create-time concern today. If the job record does not carry it, the record needs the field — and the record is at schema 8 and **released** as of 0.6.0, so that is a schema bump and no longer free (rule R5). If a bump is required, STOP and report rather than taking it silently.
 
+   **Amended 2026-08-21 by the session executing this plan (#31), and this is the one amendment that changed what was built.** The record does not carry `strict`, so a field was needed — and no bump was required, so the STOP condition below did not fire. Its premise was overtaken by the two decisions that landed between this plan being written (commit `00f7532`, 2026-08-19) and being executed. **ADR-0024** removed compatibility with this plugin's own earlier records as a constraint entirely — one site, no migration, ever — so a bump would signal to a reader that does not exist. And **#25**, this plan's own named dependency, had already added `thrown` to schema 8 *after* 0.6.0 shipped, on a reading `SCHEMA_VERSION`'s own docblock now states: an additive key read tolerantly, whose absence is the ordinary shape of a record that never had it, does not move the number. `strict` is written only when `false`, and an absent or ill-typed key reads as `true` — the hard fail every record written before this change already had. `rule R5`, cited above, exists nowhere in this repository. The reasoning is in ADR-0026; `SCHEMA_VERSION` stays `8`.
+
 ## Commands you will need
 
 | Purpose | Command | Expected |
@@ -148,7 +150,7 @@ ALL must hold:
 Stop and report if:
 
 - The drift check reports changes and the excerpts no longer match.
-- **The job record does not carry `strict` and would need a new field.** Schema 8 is released; that is a bump, and it is the operator's call.
+- **The job record does not carry `strict` and would need a new field.** Schema 8 is released; that is a bump, and it is the operator's call. — **Did not fire (2026-08-21, #31).** The field was needed and the bump was not; see the amendment in "What you must find first" above and ADR-0026.
 - You cannot distinguish "gone" from "out of bounds" in the packaging path without weakening the traversal rule. That rule is settled and this plan must not touch it.
 - An existing plan-005 assertion changes behaviour — an unreadable-but-present file must still fail.
 - You conclude a partially packaged file should be skipped with its earlier segments left in the container. That produces a silently truncated file in the artifact, and it is a decision against this project's stated preference for loud failure; report rather than shipping it.

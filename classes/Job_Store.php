@@ -38,10 +38,12 @@ use RuntimeException;
  *
  * A job's record is persisted as two files rather than one (ADR-0014). `job.json`
  * holds the selection — the requested tables and files, the only unbounded part of a
- * record — and is written once, at create. `state.json` holds everything else and is
- * what every save rewrites, so its cost is a few hundred bytes whatever the selection
- * runs to. The two are read back together and merged into the single record shape
- * {@see Extraction_Job} defines, so nothing above this class knows there are two.
+ * record — and is written at create and by nothing else except a tick that skipped a
+ * vanished file, through {@see save_with_selection()} (ADR-0026). `state.json` holds
+ * everything else and is what every {@see save()} rewrites, so its cost is a few
+ * hundred bytes whatever the selection runs to. The two are read back together and
+ * merged into the single record shape {@see Extraction_Job} defines, so nothing above
+ * this class knows there are two.
  *
  * The state directory and the served artifact are deliberately kept apart. A job's
  * on-disk state (the tick secret, the plaintext table/file selection, the build's
@@ -208,11 +210,12 @@ final class Job_Store {
 	 * @param array<int, string> $files          Requested file paths, already resolved inside the root.
 	 * @param array<int, string> $skipped_files  Paths a `strict: false` create dropped because they no longer existed.
 	 * @param int                $chunk_size     File-part budget in bytes the caller asked this job to package at, or 0 to package at the Config default. Already checked against the range the Config seam permits (issue #28); the stall adaptation halves it from here like any other per-job budget (ADR-0015).
+	 * @param bool               $strict         Whether a vanished file is fatal to this job. Carried onto the record because the packaging path reads it too, not only the create filter (ADR-0026).
 	 * @return Extraction_Job The persisted, queued job.
 	 *
 	 * @throws RuntimeException When the job's state file cannot be written whole.
 	 */
-	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files, array $skipped_files = [], int $chunk_size = 0 ): Extraction_Job {
+	public function create( int $owner, string $public_key, array $tables, array $structure_only, array $files, array $skipped_files = [], int $chunk_size = 0, bool $strict = true ): Extraction_Job {
 
 		// Resolve and harden the working directory, and lay down the separate served
 		// downloads directory the ready artifact will be fetched from, then mint an
@@ -224,7 +227,7 @@ final class Job_Store {
 		$this->ensure_downloads();
 		$id = bin2hex( random_bytes( 16 ) );
 		$now = time();
-		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed', chunk_size: $chunk_size, skipped_files: array_values( $skipped_files ) );
+		$job = new Extraction_Job( $id, Job_State::Queued, $owner, $public_key, array_values( $tables ), array_values( $structure_only ), array_values( $files ), $now, $now, bin2hex( random_bytes( 32 ) ), bin2hex( random_bytes( 16 ) ) . '.sealed', chunk_size: $chunk_size, skipped_files: array_values( $skipped_files ), strict: $strict );
 
 		// Give the job its own directory, drop an index.html into it as defence in
 		// depth, and persist the two files that let a later request resume it. The
@@ -430,6 +433,37 @@ final class Job_Store {
 
 		[ , $state ] = $this->split( $job );
 		$this->publish_json( $state, $this->base_path() . '/' . $job->id . '/' . self::STATE_FILE );
+
+	}
+
+	/**
+	 * Persists an updated job over both of its files, selection half included.
+	 *
+	 * The one write that does what {@see save()} deliberately refuses to. It exists for
+	 * the single mutation that reaches the selection half after create: a tick that
+	 * skipped a file it found gone appends to `skipped_files`, which lives there
+	 * (ADR-0014/0026). ADR-0014's cost argument survives because this is paid per
+	 * *skip* and never per save — the hot path stays {@see save()}, which is unchanged,
+	 * and a run that skips nothing never reaches here at all.
+	 *
+	 * The halves are written in {@see create()}'s own order, selection first, so a tick
+	 * killed between them leaves the skip recorded and the progress not yet past the
+	 * file. The next tick re-reaches that file and re-skips it, which
+	 * {@see Extraction_Job::with_skipped_file()} absorbs. The reverse order would
+	 * risk the opposite: progress past a file whose skip was never written, leaving it
+	 * missing from the artifact and from the report alike.
+	 *
+	 * @param Extraction_Job $job The job whose whole record to persist.
+	 * @return void
+	 *
+	 * @throws RuntimeException When either half cannot be encoded or written whole.
+	 */
+	public function save_with_selection( Extraction_Job $job ): void {
+
+		[ $selection, $state ] = $this->split( $job );
+		$dir = $this->base_path() . '/' . $job->id;
+		$this->publish_json( $selection, $dir . '/' . self::SELECTION_FILE );
+		$this->publish_json( $state, $dir . '/' . self::STATE_FILE );
 
 	}
 

@@ -48,13 +48,17 @@ final readonly class Extraction_Job {
 	 * stall began persisting the per-job file-part, table-slice and table-fetch budgets
 	 * it had adapted down to (ADR-0015). Still unreleased, the same version also carries
 	 * the first-tick pre-raise and post-raise `memory_limit` and `max_execution_time`
-	 * a later stall reason reads, the `skipped_files` a `strict: false` create
-	 * records when a named file has vanished between the manifest walk and the POST,
-	 * and the bounded `attempt_log` a tick records so a poll can answer what was
-	 * begun (ADR-0016), so none of those needs a bump. Nor does the `thrown` reason
-	 * an unexpected throw records (issue #25), added to the same version after 0.6.0
-	 * shipped and read the same tolerant way: an absent key is a record that has not
-	 * failed that way, and a release too old to know the key ignores it.
+	 * a later stall reason reads, the `skipped_files` a vanished file is recorded
+	 * under, and the bounded `attempt_log` a tick records so a poll can answer what
+	 * was begun (ADR-0016), so none of those needs a bump. Nor does the `thrown`
+	 * reason an unexpected throw records (issue #25), added to the same version after
+	 * 0.6.0 shipped and read the same tolerant way: an absent key is a record that has
+	 * not failed that way, and a release too old to know the key ignores it. Nor does
+	 * the `strict` flag the packaging path reads (issue #31, ADR-0026), which is that
+	 * shape again — written only when false, absent meaning the hard fail on a vanished
+	 * file that every earlier record already had. ADR-0024 settles the general case
+	 * behind all three: there is no earlier record to stay compatible with, so what a
+	 * bump would signal has no reader.
 	 *
 	 * @since 0.1.0
 	 */
@@ -76,12 +80,18 @@ final readonly class Extraction_Job {
 	/**
 	 * The record's keys that are persisted apart from the rest, in the selection file.
 	 *
-	 * These are the only fields whose size is unbounded — a selection runs to
-	 * tens of thousands of paths — and the only ones no lifecycle transition ever
-	 * changes. Splitting exactly them out is what lets a save rewrite a few hundred
-	 * bytes instead of megabytes, without any field changing its name or meaning
-	 * (ADR-0014). The split is a persistence concern, so {@see Job_Store} performs it;
-	 * the line is drawn here because which fields are unbounded is schema knowledge.
+	 * These are the fields whose size is unbounded — a selection runs to tens of
+	 * thousands of paths. Splitting exactly them out is what lets a save rewrite a few
+	 * hundred bytes instead of megabytes, without any field changing its name or
+	 * meaning (ADR-0014). The split is a persistence concern, so {@see Job_Store}
+	 * performs it; the line is drawn here because which fields are unbounded is schema
+	 * knowledge.
+	 *
+	 * The line is unboundedness and not immutability, which used to amount to the same
+	 * thing and no longer does: `skipped_files` is appended to mid-run by a tick that
+	 * passed over a vanished file (ADR-0026). That is the one lifecycle change reaching
+	 * this half, and {@see Job_Store::save_with_selection()} is the only write that
+	 * carries it — the ordinary save still rewrites the state file alone.
 	 *
 	 * @since 0.6.0
 	 *
@@ -126,9 +136,10 @@ final readonly class Extraction_Job {
 	 * @param string|null               $host_max_execution_time The host's `max_execution_time` before the first tick asked for more, or null until that tick has run.
 	 * @param string|null               $raised_memory_limit The `memory_limit` in force after the first tick's ask, or null until that tick has run.
 	 * @param string|null               $raised_max_execution_time The `max_execution_time` in force after the first tick's ask, or null until that tick has run.
-	 * @param array<int, string>        $skipped_files Install-root-relative paths a `strict: false` create dropped because they no longer existed. Empty when nothing was skipped. Written once, with the selection.
+	 * @param array<int, string>        $skipped_files Install-root-relative paths dropped from the artifact because they no longer existed — at create, or at the moment the packaging path reached one under `strict: false` (ADR-0026). Empty when nothing was skipped. Appended to mid-run, so it is the one selection-half field a tick can change.
 	 * @param array<int, Chunk_Attempt> $attempt_log Newest begun chunk attempts, oldest first, capped at {@see ATTEMPT_LOG_BOUND}. Empty until the first tick. A debug surface, not the stall counter (ADR-0016).
 	 * @param string|null               $thrown Why the job failed, when an unexpected throw killed the build, or null. The counterpart of $error and deliberately not the same field: this one is composed around a string the plugin did not write and cannot vouch for, whereas $error is its own diagnosis (issue #25). Surfaced verbatim to the polling owner like $error, but under a deliberately wider rule: the relayed part **may** carry a filesystem path or a fragment of SQL, and the bound on it limits the size of that disclosure rather than its kind (ADR-0022).
+	 * @param bool                      $strict Whether a vanished file is fatal to this job. False is what the caller asked for on the create, and it is carried here rather than left at the door because the create filter closes only the gap up to the POST while the packaging path meets the much larger one after it (ADR-0026). True is the default in every direction: an omitted member, and an absent or ill-typed key on a record written before this field existed, all read as the hard fail that has always been the behaviour.
 	 */
 	public function __construct(
 		public string $id,
@@ -156,7 +167,36 @@ final readonly class Extraction_Job {
 		public array $skipped_files = [],
 		public array $attempt_log = [],
 		public ?string $thrown = null,
+		public bool $strict = true,
 	) {}
+
+	/**
+	 * Returns a copy carrying one more skipped file, or this one when it already does.
+	 *
+	 * The packaging path reaches this when a `strict: false` job meets a file that has
+	 * gone since the job was created (ADR-0026). Appending is idempotent because the
+	 * skip is persisted before the progress that moves past the file: a tick killed in
+	 * that window leaves the next one re-reaching the same file, and re-recording it
+	 * must not lengthen the list the caller reads.
+	 *
+	 * Unlike every other mutation here this one touches the selection half of the
+	 * record, so the driver persists it through {@see Job_Store::save_with_selection()}
+	 * rather than the ordinary save.
+	 *
+	 * @param string $file The installation-root-relative path that was skipped.
+	 * @return self A new record naming the skipped file, or this one when it already did.
+	 */
+	public function with_skipped_file( string $file ): self {
+
+		// Nothing to record when the path is already on the list; see the idempotence
+		// note above for why that case is reachable rather than defensive.
+		if ( in_array( $file, $this->skipped_files, true ) ) {
+			return $this;
+		}
+
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, [ ...$this->skipped_files, $file ], $this->attempt_log, $this->thrown, $this->strict );
+
+	}
 
 	/**
 	 * Returns a copy of the job in a new lifecycle state, stamped as just updated.
@@ -172,7 +212,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_state( Job_State $state ): self {
 
-		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
 
 	}
 
@@ -203,7 +243,7 @@ final readonly class Extraction_Job {
 			$log = array_slice( $log, -self::ATTEMPT_LOG_BOUND );
 		}
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts + 1, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $log, $this->thrown, $this->strict );
 
 	}
 
@@ -228,7 +268,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_failure( string $error ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
 
 	}
 
@@ -252,7 +292,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_thrown_failure( string $thrown ): self {
 
-		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown );
+		return new self( $this->id, Job_State::Failed, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, null, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $thrown, $this->strict );
 
 	}
 
@@ -278,7 +318,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_progress( Build_Progress $progress ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $progress, time(), 0, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
 
 	}
 
@@ -298,7 +338,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_budgets( Chunk_Budgets $budgets ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, 0, $this->error, $budgets->file_bytes, $budgets->table_bytes, $budgets->table_rows, $this->host_memory_limit, $this->host_max_execution_time, $this->raised_memory_limit, $this->raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
 
 	}
 
@@ -320,7 +360,7 @@ final readonly class Extraction_Job {
 	 */
 	public function with_host_limits( string $host_memory_limit, string $host_max_execution_time, string $raised_memory_limit, string $raised_max_execution_time ): self {
 
-		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown );
+		return new self( $this->id, $this->state, $this->owner, $this->public_key, $this->tables, $this->structure_only, $this->files, $this->created_at, time(), $this->tick_secret, $this->artifact, $this->progress, $this->progressed_at, $this->attempts, $this->error, $this->chunk_size, $this->table_chunk_bytes, $this->table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $this->skipped_files, $this->attempt_log, $this->thrown, $this->strict );
 
 	}
 
@@ -355,7 +395,7 @@ final readonly class Extraction_Job {
 	 *
 	 * @since 0.1.0
 	 *
-	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int, thrown?: string, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
+	 * @return array{version: int, id: string, state: string, owner: int, public_key: string, tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, skipped_files?: array<int, string>, created_at: int, updated_at: int, tick_secret: string, artifact: string, progress: array{tables_done: int, structure_done: int, file_index: int, file_offset: int, container_bytes: int, index_bytes: int, segment_count: int, file_size: int|null, file_mtime: int|null, table_offset: int, table_cursor: array<int, string>|null}|null, progressed_at: int|null, attempts: int, error: string|null, chunk_size: int, table_chunk_bytes: int, table_chunk_rows: int, strict?: false, thrown?: string, host_memory_limit?: string, host_max_execution_time?: string, raised_memory_limit?: string, raised_max_execution_time?: string, attempt_log?: list<array{at: int, kind: string, n: int, offset: int}>}
 	 */
 	public function to_array(): array {
 
@@ -408,6 +448,13 @@ final readonly class Extraction_Job {
 		// strict: false carries no key for it at all.
 		if ( $this->skipped_files !== [] ) {
 			$record['skipped_files'] = $this->skipped_files;
+		}
+
+		// The strict flag is written only when it is false, which is the same
+		// omit-the-default shape every optional key here uses. It reaches the record at
+		// all because the packaging path needs it, not merely the create (ADR-0026).
+		if ( ! $this->strict ) {
+			$record['strict'] = false;
 		}
 
 		// Omit the attempt log until something has been begun, so a job that has not
@@ -517,6 +564,11 @@ final readonly class Extraction_Job {
 			$skipped_files = [];
 		}
 
+		// The strict flag is written only when it is false, so anything else — absent,
+		// ill-typed, or explicitly true — reads as the hard fail on a vanished file that
+		// every record written before this field existed already had (ADR-0026).
+		$strict = ( $data['strict'] ?? null ) !== false;
+
 		// The attempt log is omitted until a tick has begun something, so an absent or
 		// ill-typed value reads as nothing begun rather than disqualifying the record.
 		// A malformed entry is dropped, not fatal.
@@ -553,7 +605,7 @@ final readonly class Extraction_Job {
 			return null;
 		}
 
-		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown );
+		return new self( $id, $state, $owner, $public_key, $tables, $structure_only, $files, $created_at, $updated_at, $tick_secret, $artifact, $progress, $progressed_at, $attempts, $error, $chunk_size, $table_chunk_bytes, $table_chunk_rows, $host_memory_limit, $host_max_execution_time, $raised_memory_limit, $raised_max_execution_time, $skipped_files, $attempt_log, $thrown, $strict );
 
 	}
 

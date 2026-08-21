@@ -87,7 +87,9 @@ use WP_REST_Server;
  * a safe one. An optional `strict` member, defaulting to true, is the one
  * exception to a vanished *file* being a 404: `strict: false` drops those
  * paths from the selection, records them on the job, and still 404s a missing
- * table, a traversal, or a selection that is empty after the skip.
+ * table, a traversal, or a selection that is empty after the skip. The member
+ * outlives this request — it is persisted on the job, and the packaging path
+ * applies the same rule to a file that vanishes later in the run (ADR-0026).
  *
  * A second optional member, `chunk_size`, carries the job's own file-part budget
  * in bytes, so the one setting that decides whether a multi-hour run survives can
@@ -320,7 +322,7 @@ final class Extractions_Controller {
 		// only then confirm nothing else took it in the window the check above leaves
 		// open: the count is stale the instant it is read, so two creates that merely
 		// checked would both pass and both take.
-		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'] );
+		$job = $this->store->create( get_current_user_id(), $payload['public_key'], $payload['tables'], $payload['structure_only'], $payload['files'], $payload['skipped_files'], $payload['chunk_size'], $payload['strict'] );
 		if ( ! $this->store->has_free_slot( 1 ) ) {
 			// Hand the slot straight back under the job's own tick lock, exactly as consume,
 			// cancel and the sweep do (ADR-0019), so a create refused here leaves no more behind
@@ -487,9 +489,11 @@ final class Extractions_Controller {
 	 * @return WP_REST_Response|WP_Error A 200 with `{ id, state, download_url }` plus
 	 *                                   `progress` while running or ready, `error`
 	 *                                   once failed, `skipped_files` when a
-	 *                                   `strict: false` create dropped vanished
-	 *                                   files, and `attempts` once any chunk has
-	 *                                   been begun; a 404 for an unknown job, or a
+	 *                                   `strict: false` job dropped vanished files
+	 *                                   — at create or since (ADR-0026), so this
+	 *                                   list may grow after the 201 reported it —
+	 *                                   and `attempts` once any chunk has been
+	 *                                   begun; a 404 for an unknown job, or a
 	 *                                   403 for a non-owner.
 	 */
 	public function poll( WP_REST_Request $request ): WP_REST_Response|WP_Error {
@@ -516,7 +520,7 @@ final class Extractions_Controller {
 
 		// Append the state-scoped optional fields of the v1 poll contract: progress while
 		// the build is advancing (and complete once ready), a reason once it failed,
-		// skipped files when a strict: false create dropped vanished paths, and the
+		// skipped files when a strict: false job dropped vanished paths, and the
 		// bounded attempt log once any chunk has been begun (ADR-0016). Missing-key
 		// optionality — a field the contract marks absent is omitted, never sent as
 		// null — so `progress?`/`error?`/`skipped_files?`/`attempts?` read exactly as
@@ -944,7 +948,9 @@ final class Extractions_Controller {
 	 * table, a traversal, a null-byte path, or a selection that is empty once
 	 * the vanished files are gone. Old clients that omit the member keep the
 	 * behaviour they already understood, which is why `strict` itself required
-	 * no version bump on its own.
+	 * no version bump on its own. The resolved flag is carried onto the job record
+	 * rather than consumed here: the same rule governs a file that vanishes later,
+	 * while the job is being packaged (ADR-0026).
 	 *
 	 * `chunk_size` is optional on the same terms and checked immediately after
 	 * `strict`, since both are optional scalar members refused the same way. It
@@ -961,7 +967,7 @@ final class Extractions_Controller {
 	 * @since 0.1.0
 	 *
 	 * @param WP_REST_Request $request The incoming create request.
-	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>, chunk_size: int}|WP_Error
+	 * @return array{tables: array<int, string>, structure_only: array<int, string>, files: array<int, string>, public_key: string, skipped_files: array<int, string>, chunk_size: int, strict: bool}|WP_Error
 	 */
 	private function validate_payload( WP_REST_Request $request ): array|WP_Error {
 
@@ -1105,6 +1111,7 @@ final class Extractions_Controller {
 			'public_key' => $public_key,
 			'skipped_files' => $skipped_files,
 			'chunk_size' => $chunk_size,
+			'strict' => $strict,
 		];
 
 	}
