@@ -10,6 +10,7 @@ declare( strict_types = 1 );
 
 namespace Kntnt\Extractor\Rest;
 
+use Closure;
 use Kntnt\Extractor\Authorizer;
 use Kntnt\Extractor\Config;
 use Kntnt\Extractor\Dispatcher;
@@ -136,8 +137,8 @@ final class Extractions_Controller {
 	private const int DEFAULT_MAX_BODY_BYTES = 52_428_800;
 
 	/**
-	 * Wires the controller to the access gate, the Config seam, the job store, and
-	 * the driver.
+	 * Wires the controller to the access gate, the Config seam, the job store, and a
+	 * factory for the driver.
 	 *
 	 * The Config seam is back, and reads exactly two knobs: the selection-element
 	 * cap and the request-body byte cap this endpoint bounds an unauthenticated
@@ -145,19 +146,43 @@ final class Extractions_Controller {
 	 * is not among them — it belongs to {@see Job_Store::has_free_slot()} beside the
 	 * count it bounds, and is read there.
 	 *
+	 * The driver arrives as a factory rather than as a driver because it is scoped to
+	 * one request: the Table_Dumper at the far end of it memoises the table catalog for
+	 * the length of a request, and a Dispatcher built once at plugin load would hold
+	 * that memo for the length of the PHP process — which in a test process running the
+	 * whole integration suite is one dumper shared by every test file (#40). Each
+	 * callback that drives asks for a driver of its own, and it goes out with the
+	 * response.
+	 *
 	 * @since 0.1.0
 	 *
 	 * @param Authorizer $authorizer The shared both-capabilities access gate.
 	 * @param Config     $config     The constant-then-filter configuration seam.
 	 * @param Job_Store  $store      Persistence for Extraction jobs.
-	 * @param Dispatcher $dispatcher Drives a job forward and nudges a stalled queue.
+	 * @param Closure    $driver     Builds this request's driver, which advances a job and nudges a stalled queue.
+	 *
+	 * @phpstan-param Closure(): Dispatcher $driver
 	 */
 	public function __construct(
 		private readonly Authorizer $authorizer,
 		private readonly Config $config,
 		private readonly Job_Store $store,
-		private readonly Dispatcher $dispatcher,
+		private readonly Closure $driver,
 	) {}
+
+	/**
+	 * Builds the driver this request advances its job with.
+	 *
+	 * A Dispatcher of its own per callback, never one shared between requests; see the
+	 * constructor for why what hangs off it must not outlive the request that asked.
+	 *
+	 * @return Dispatcher The driver, built for this request.
+	 */
+	private function dispatcher(): Dispatcher {
+
+		return ( $this->driver )();
+
+	}
 
 	/**
 	 * Registers every extraction route. Hooked on `rest_api_init`.
@@ -349,7 +374,7 @@ final class Extractions_Controller {
 		// Schedule the job's first continuation for after this 201 is sent, so the
 		// response never waits on loopback or packaging work — the job's execution
 		// begins post-response (ADR-0007/0010).
-		$this->dispatcher->continue_after_response( $job );
+		$this->dispatcher()->continue_after_response( $job );
 
 		// Echo the id and queued state; name skipped files only when a strict: false
 		// create actually dropped any, matching the poll's missing-key optionality.
@@ -504,7 +529,7 @@ final class Extractions_Controller {
 		// the poll's latency is independent of loopback health (ADR-0010). Post-detach
 		// it drives a queued or stalled job in-process; otherwise it is the same guarded
 		// nudge, now paid after the body is echoed and left alone for a job being ticked.
-		$this->dispatcher->continue_after_response( $job );
+		$this->dispatcher()->continue_after_response( $job );
 
 		// Start from the fields every poll carries: the id, the current state, and the
 		// download link — null until the sealed artifact is published at ready.
@@ -872,7 +897,7 @@ final class Extractions_Controller {
 		}
 
 		// Advance the surviving job one tick and report the state it reached.
-		$advanced = $this->dispatcher->tick( $job );
+		$advanced = $this->dispatcher()->tick( $job );
 
 		return new WP_REST_Response(
 			[
