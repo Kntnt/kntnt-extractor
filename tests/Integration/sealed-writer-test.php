@@ -5,8 +5,10 @@
  * A narrow, crypto-focused round-trip that proves the correctness a
  * security-critical container must not leave to end-to-end coverage alone.
  * Segments are sealed to a fixed test keypair and recovered with the matching
- * private key using nothing but PHP-bundled `sodium`, exactly as the caller
- * (kntnt-wp-skills) will. It exercises every acceptance criterion of issue #3:
+ * private key using nothing but PHP-bundled `sodium` — a property of the
+ * container format rather than of any one caller, specified normatively by
+ * `docs/container-format.md` (§4's reading algorithm, §6's cryptography).
+ * It exercises every acceptance criterion of issue #3:
  * per-segment plaintext fidelity, a fresh random symmetric key per segment
  * sealed with `sodium_crypto_box_seal`, a sealed index that hides which
  * tables/files were taken, tamper detection, that finalize() leaves no
