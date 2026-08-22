@@ -87,11 +87,21 @@ The example is PHP; the rule is identical in TypeScript and plain JavaScript.
 
 **Audience.** Comments are for an experienced developer reading the file for the first time. Don't restate what the code shows, write tutorials, address juniors, or narrate the obvious.
 
-**Line wrapping.** Comments wrap at column 80. Code may go wider where it improves readability — see formatter settings per language.
+**Line wrapping.** Comments and code follow different rules:
+
+1. A comment standing alone on its own line never passes column 80, no matter where in the file it sits.
+2. A comment trailing at the end of a code line is never wrapped, however long it runs.
+3. Code lines have no upper limit. This removes the *pressure* to break a line for its own sake — it is not an invitation to let one sprawl; *Motivated line breaks*, below, is what actually triggers a break.
+
+Rule 1 is measured across the whole physical line: the count starts at column 1, runs through the indentation and the `//`, `#`, `/*` or `*` marker, and ends at the last character written. Nothing appears in column 81 or beyond. Indentation is spent from the same budget as the prose, so a comment nested three blocks deep has materially less room than a top-level one. Where a module declares tab indentation, a tab advances to the next multiple of its declared display width — the 80 is what a reader sees, not a count of characters.
+
+A docblock tag line (`@param`, `@return`, `@throws`) is exempt from rule 1 where its type cannot be broken without changing what a static analyser reads — a wide array shape or union has no continuation syntax to wrap into. The exemption is a last resort, not a licence: shorten the description, drop any vertical padding between the tag's columns, or extract the type into a named alias, and take the overflow only when none of those bring the line inside 80.
+
+No sniff can express a comment-specific width, so rule 1 is enforced by review, not tooling.
 
 ### Whitespace
 
-- **No vertical alignment of `=` or `=>`.** Single-space the operator and move on; realignment churn on every edit costs more than the negligible visual benefit.
+- **No vertical alignment of `=` or `=>`.** Single-space the operator and move on; realignment churn on every edit costs more than the negligible visual benefit. No sniff enforces this — the phpcs sniffs that touch alignment (e.g. `Generic.Formatting.MultipleStatementAlignment`, `WordPress.Arrays.MultipleStatementAlignment`) can only ever demand alignment, never forbid it — so review catches violations, and a project ruleset excluding those sniffs is the expected, correct posture, not a gap.
 - **No padding inside short collections.** Short array literals stay on one line: `[1, 2, 3]`.
 - **No gratuitous line breaks** in parameter lists. One line unless it becomes hard to read or exceeds the formatter's max width.
 - **Motivated line breaks are fine.** Break an array literal across lines when its elements naturally form a list or matrix — lookup tables, observer thresholds, route definitions, fixture rows. Content-driven, not character-count-driven. Do not split a short call like `create_user( $name, $email, $role )`.
@@ -103,6 +113,10 @@ Always prefer the modern construction over the legacy one: nullish coalescing, n
 ### Defensive coding
 
 Write a guard only where a real, present condition needs it — an untrusted boundary (user input, a network response, deserialization), a documented platform quirk, a contract a caller can plausibly break. Defensive code against states the surrounding invariants already rule out is forbidden: redundant null checks, `try`/`catch` around calls that cannot throw, re-validation of data already validated upstream, `else` branches for conditions that cannot occur, fallbacks for a dependency the module constructs itself. Such code adds paths no test covers, dilutes the contract, and feigns a doubt the types and invariants have already settled. When a guard is warranted, its `//` topic sentence names the threat it defends against — as the dispatch example above does.
+
+### Refactoring completeness
+
+When a change alters a shared symbol's contract, signature, or effective behaviour, enumerate every caller — grep, an IDE's find-references — before finishing, and update all of them in the same change. Never leave some callers updated to the new contract and others stranded on the old one: a diff that reads as locally consistent within the files it touches can still leave the codebase globally inconsistent, a gap a review that only reads the diff structurally misses. When bringing every caller up to date would genuinely ripple beyond the task at hand, say so explicitly in the summary or handoff — never apply the change to only the callers already in view and leave the rest half-done.
 
 ### Identifiers
 

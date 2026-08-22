@@ -20,7 +20,7 @@ Applies whenever the project contains PHP code. WordPress projects additionally 
 - Arrow functions (`fn() =>`) for short callbacks.
 - `enum` for closed sets of values; backed enums when the values cross a boundary (DB, JSON, query string).
 - Null-safe operator: `$user?->getProfile()?->getEmail()`.
-- First-class callable syntax: `array_filter( $items, $this->is_valid(...) )`.
+- First-class callable syntax for immediate-consumption callables — `array_filter( $items, $this->is_valid(...) )`, `array_map`, `usort`, and the like — where the callable is used and discarded within the same call. **Exception:** not for `add_action()` / `add_filter()` callbacks, nor any registry where a callback must remain individually removable — `$this->method(...)` builds a fresh `Closure` on every call, and a `Closure`'s hook id (`_wp_filter_build_unique_id()`) is tied to that unreachable instance, so nothing can ever call `remove_action()` / `remove_filter()` against it; use the array-callable form, `[ $this, 'method' ]`, there instead.
 - `str_contains()`, `str_starts_with()`, `str_ends_with()` instead of `strpos` comparisons.
 - Array spread: `[ ...$existing, $new ]`.
 
@@ -32,7 +32,7 @@ Language-level preferences, regardless of project.
 - Trailing commas in multi-line arrays, parameter lists, and argument lists.
 - `?:` and `??` as appropriate; do not chain them into puzzles.
 - **Conditions: natural order by default.** Yoda conditions are acceptable when they make intent clearer for an experienced reader — e.g. idiomatic null-checks (`if ( null === $value )`) or where the test is fundamentally a boolean assertion rather than a comparison. The choice is purely about readability.
-- Code may go up to the project's max line width (default 120 cols). Comments wrap at column 80.
+- Line width for comments and code follows the universal *Line wrapping* rules in the general module.
 
 ### Surface style — PSR-12
 
@@ -67,9 +67,7 @@ A single-file PHP script meant to run from the terminal uses the env-based sheba
 
 ### Doc comments
 
-Every file, class, trait, interface, enum, method, function, property, and constant has a PHPDoc block. Document the why and the contract; the type system already shows the shape.
-
-**Below 1.0 a new symbol carries no `@since`.** The release a symbol will ship in is derived from the changelog at release time and is not knowable while the code is written, so any number stamped during a cycle is a guess that a later version decision invalidates. Version history is also compatibility bookkeeping, which this project defers until 1.0 (ADR-0024). Existing stamps are correct for the releases they shipped in and are left alone; from 1.0 the tag returns and is included from the release a symbol first appeared in.
+Every file, class, trait, interface, enum, method, function, property, and constant has a PHPDoc block. Include `@since` from the first release. Document the why and the contract; the type system already shows the shape.
 
 ```php
 /**
@@ -79,6 +77,8 @@ Every file, class, trait, interface, enum, method, function, property, and const
  * point to a deleted user. Callers must distinguish "no such user"
  * from "no permission" themselves.
  *
+ * @since 1.0.0
+ *
  * @param string $token Opaque identifier from the authenticator.
  * @return User|null
  */
@@ -87,10 +87,11 @@ public function resolveUser( string $token ): ?User { … }
 
 ### PHP tooling
 
+Defaults when applicable, not a mandate that every project carries every tool — the same conditionality DDEV already states below. The general module's TDD rule — automate every test that can meaningfully constrain behaviour at the lowest layer that does — is the deciding question for whether a project owes itself a test suite at all; where it does, the following are the defaults.
+
 - **Composer** for dependency management and PSR-4 autoloading.
-- **Pest** for unit and feature tests.
-- **PHPStan** for static analysis. Aim for `--level max` on new code; raise legacy code incrementally. PHPStan catches bugs tests alone do not — typos in property names, wrong argument types, dead branches.
-- **pcov** for PHP code coverage.
+- **Pest** for unit and feature tests, when the TDD rule says a test is owed. When you also measure coverage, use **pcov** rather than Xdebug — Xdebug is a full step debugger and roughly 10x slower for coverage collection than pcov, which only instruments line execution. pcov is a PHP runtime extension (installed via PECL, the PHP build, or container config), not a Composer package; no `composer.json` can depend on it the way it depends on Pest.
+- **PHPStan** for static analysis, unconditionally — even a project with no test suite gets this check, and its value is highest precisely there, because it is then the only automated check standing between a typo and production. Aim for `--level max` on new code; raise legacy code incrementally. PHPStan catches bugs tests alone do not — typos in property names, wrong argument types, dead branches. Pin PHPStan's `phpVersion` to the project's declared PHP floor (the `Requires PHP` header, or `require.php` in `composer.json`) and keep the two in step — this, not a separate tool, is the mechanism that enforces the floor: with `phpVersion` set, PHPStan reports any syntax or built-in newer than the floor as an ordinary, non-ignorable error that a baseline file cannot bury. **Do not reach for PHPCompatibility's `testVersion` for this** — its last stable release predates PHP 8.0, so it passes 8.x-only syntax in total silence; a gate wired to it looks green while enforcing nothing, worse than no gate at all.
 - **DDEV** for any PHP project needing a local server (PHP, database, web server). DDEV's project-local configuration is checked in for a reproducible environment.
 
-WordPress-specific PHP tooling — Brain Monkey, Mockery, the `szepeviktor/phpstan-wordpress` extension, WordPress Playground for integration tests — is described under the WordPress rules.
+WordPress-specific PHP tooling — Brain Monkey, Mockery, the `szepeviktor/phpstan-wordpress` extension, WordPress Playground for integration tests, **phpcs** + **WPCS** for static style checking — is described under the WordPress rules.
